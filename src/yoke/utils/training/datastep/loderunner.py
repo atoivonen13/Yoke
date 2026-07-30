@@ -19,8 +19,7 @@ def train_DDP_scalar_temporal_loderunner_datastep_gri(
     rank: int,
     world_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    DDP training datastep for scalar temporal LodeRunner wrapper.
+    """DDP training datastep for scalar temporal LodeRunner wrapper.
 
     Expected data:
         x:      [B, input_dim]
@@ -34,7 +33,6 @@ def train_DDP_scalar_temporal_loderunner_datastep_gri(
     Expected model output:
         pred:   [B, 3]
     """
-
     model.train()
 
     x, target, Dt = data
@@ -84,8 +82,7 @@ def eval_DDP_scalar_temporal_loderunner_datastep_gri(
     rank,
     world_size,
 ):
-    """
-    Evaluation datastep for ScalarTemporalConditionedLodeRunner.
+    """Evaluation datastep for ScalarTemporalConditionedLodeRunner.
 
     Expected dataset output:
         x:      [B, input_dim]
@@ -99,7 +96,6 @@ def eval_DDP_scalar_temporal_loderunner_datastep_gri(
     Expected model output:
         pred:   [B, 3]
     """
-
     model.eval()
 
     x, target, Dt = data
@@ -843,6 +839,7 @@ def eval_DDP_loderunner_seq_channel_datastep(
     rank,
     world_size,
 ):
+    """DDP eval step for channel-stacked LodeRunner on a single next-step target."""
     model.eval()
 
     start_img, end_img, Dt = data
@@ -872,6 +869,7 @@ def eval_DDP_loderunner_seq_datastep(
     rank,
     world_size,
 ):
+    """DDP eval step rolling LodeRunner over a full image sequence."""
     model.eval()
 
     img_seq, Dt = data
@@ -1328,6 +1326,7 @@ def train_DDP_temporal_loderunner_datastep(
     rank,
     world_size,
 ):
+    """DDP training step for temporal LodeRunner on a channel-stacked context."""
     model.train()
 
     context_seq, target_img, Dt = data
@@ -1369,6 +1368,7 @@ def train_DDP_scalar_temporal_loderunner_datastep(
     rank,
     world_size,
 ):
+    """DDP training step for scalar temporal LodeRunner on flattened context."""
     model.train()
 
     x, target, Dt = data
@@ -1411,6 +1411,7 @@ def eval_DDP_temporal_loderunner_datastep(
     rank,
     world_size,
 ):
+    """DDP eval step for temporal LodeRunner on a channel-stacked context."""
     model.eval()
 
     context_seq, target_img, Dt = data
@@ -1447,14 +1448,15 @@ def eval_DDP_scalar_temporal_loderunner_datastep(
     rank,
     world_size,
 ):
+    """DDP eval step for scalar temporal LodeRunner on flattened context."""
     model.eval()
 
     with torch.no_grad():
         x, target, Dt = data
 
-        x = x.to(torch.float32).to(device, non_blocking=True)          # [B, 2 * context_len]
-        target = target.to(torch.float32).to(device, non_blocking=True) # [B]
-        Dt = Dt.to(torch.float32).to(device, non_blocking=True)         # [B]
+        x = x.to(torch.float32).to(device, non_blocking=True)  # [B, 2 * context_len]
+        target = target.to(torch.float32).to(device, non_blocking=True)  # [B]
+        Dt = Dt.to(torch.float32).to(device, non_blocking=True)  # [B]
 
         C = 8
         in_vars = torch.arange(C, device=device)
@@ -1485,8 +1487,7 @@ def eval_DDP_loderunner_seq_context_datastep(
     rank,
     world_size,
 ):
-    """
-    DDP eval step for TemporalLodeRunner / channel-stacked context model.
+    """DDP eval step for TemporalLodeRunner / channel-stacked context model.
 
     Expected data:
         context_seq, target_img, Dt = data
@@ -1496,9 +1497,6 @@ def eval_DDP_loderunner_seq_context_datastep(
         target_img:  [B, C, H, W]
         Dt:          [B] or [B, 1]
     """
-    import torch
-    import torch.distributed as dist
-
     model.eval()
 
     context_seq, target_img, Dt = data
