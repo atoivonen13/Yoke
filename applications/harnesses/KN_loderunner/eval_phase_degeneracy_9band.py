@@ -19,11 +19,10 @@ contributes to the under-fade bias and the floored median loss.
 
 This script tests whether that degeneracy actually hurts, empirically:
 
-  For each held-out object we know (from the noise-free UNIFORM-grid companion
-  set) an object-independent physical phase zero. The "detection lag" is how long
-  after that zero the first REALISTIC detection occurred:
+  For each held-out object we know the TRUE merger time from sim truth. The
+  "detection lag" is how long after merger the first REALISTIC detection occurred:
 
-      detection_lag = t0_realistic - t_phasezero_proxy
+      detection_lag = t0_realistic - t_merger
 
   This is exactly the hidden phase offset the model cannot observe. We then ask:
   do the late-time forecast residuals depend on detection_lag? If objects first
@@ -33,16 +32,19 @@ This script tests whether that degeneracy actually hurts, empirically:
   unknown phase, and an explicit phase treatment (auxiliary phase-regression
   head, or a phase feature with an inference-time estimator) is warranted.
 
-PHASE-ZERO PROXY
-----------------
-The npz files carry no merger-time column, so we proxy physical phase zero by the
-earliest sample of the UNIFORM-grid companion (``--uniform_glob``), which is
-sampled on a regular phase grid from near explosion with no limiting-mag cut.
-This is a common, object-independent zero point -- all that a correlation
-diagnostic requires. If your uniform set's grid does not start at merger, the lag
-is offset by a constant across ALL objects, which shifts the x-axis but does NOT
-change whether a trend exists (the thing we test). Override with an explicit npz
-key via ``--phasezero_key`` if your files store one.
+PHASE ZERO (TRUE MERGER TIME)
+-----------------------------
+The merger time IS in the light-curve npz files: each carries an
+``injection_parameters`` entry (a JSON string) with ``kilonova_trigger_time`` --
+the true merger/trigger MJD used to simulate the object. We read it directly from
+the realistic file, so the detection lag is the real, un-proxied hidden phase
+offset. Override the JSON key name with ``--trigger_key`` if your sims differ.
+
+Fallback: if a realistic file has no ``injection_parameters`` (older sims), the
+object is skipped by default; pass ``--uniform_glob`` with ``--allow_uniform_proxy``
+to instead approximate phase zero by the earliest uniform-grid sample (offsets the
+lag by a per-object-independent constant, which shifts the x-axis but preserves
+any trend -- the thing we test).
 
 This is a READ-ONLY diagnostic: it loads a trained checkpoint, reuses the exact
 scoring path of ``eval_dense_latetime_9band`` (same context, normalization, and
@@ -51,6 +53,7 @@ Dt convention), and writes plots + a CSV. It never trains.
 
 import argparse
 import csv
+import json
 import os
 import sys
 
@@ -90,36 +93,59 @@ plt.rcParams["figure.figsize"] = (7, 5)
 BAND_KEYS = NINE_BAND_KEYS
 
 
-def _phasezero_proxy(
-    uniform_stream, phasezero_key: str | None, uniform_path: str | None
+def _trigger_time_from_npz(
+    npz_path: str, trigger_key: str, params_key: str = "injection_parameters"
 ) -> float | None:
-    """Object-independent physical phase-zero proxy in absolute MJD.
+    """Read the TRUE merger/trigger MJD from a light-curve file's sim truth.
 
-    Preference order:
-      1. An explicit scalar npz key (``--phasezero_key``), if present -- the true
-         merger/explosion time when the data provides it.
-      2. The earliest UNIFORM-grid sample time -- a regular phase grid starting
-         near explosion, so its minimum is a stable per-object zero point.
+    The simulator embeds its injection parameters as a JSON string under
+    ``injection_parameters`` in every npz; ``kilonova_trigger_time`` (the merger
+    MJD used to generate the object) is one of the fields. This is the true,
+    un-proxied physical phase zero.
 
     Args:
-        uniform_stream (tuple): (times, values, bands) of the uniform companion,
-            absolute MJD; times may be empty.
-        phasezero_key (str | None): Optional npz key holding an explicit
-            phase-zero time (scalar). Checked first when given.
-        uniform_path (str | None): Path to the uniform npz, used only to read
-            ``phasezero_key`` if requested.
+        npz_path (str): Path to the light-curve npz.
+        trigger_key (str): JSON field holding the merger time (default set by the
+            caller, e.g. "kilonova_trigger_time").
+        params_key (str): npz key holding the JSON parameters string.
 
     Returns:
-        float | None: Phase-zero time in absolute MJD, or None if unavailable.
+        float | None: Trigger MJD, or None if the file/field is absent or the
+        JSON cannot be parsed.
     """
-    if phasezero_key is not None and uniform_path is not None:
-        data = np.load(uniform_path, allow_pickle=True)
-        try:
-            if phasezero_key in data.files:
-                return float(np.asarray(data[phasezero_key]).ravel()[0])
-        finally:
-            data.close()
+    data = np.load(npz_path, allow_pickle=True)
+    try:
+        if params_key not in data.files:
+            return None
+        raw = np.asarray(data[params_key]).ravel()
+        if raw.shape[0] == 0:
+            return None
+        params = json.loads(str(raw[0]))
+    except (ValueError, TypeError):
+        return None
+    finally:
+        data.close()
+    if trigger_key not in params:
+        return None
+    return float(params[trigger_key])
 
+
+def _phasezero_from_uniform(uniform_stream) -> float | None:
+    """Fallback phase-zero proxy: earliest uniform-grid sample (absolute MJD).
+
+    Used only with ``--allow_uniform_proxy`` when a file has no sim-truth trigger.
+    The uniform grid starts near explosion, so its minimum is a stable per-object
+    zero point offset from true merger by an object-independent constant -- which
+    shifts the lag axis but preserves any trend.
+
+    Args:
+        uniform_stream (tuple | None): (times, values, bands) or None.
+
+    Returns:
+        float | None: Earliest uniform sample MJD, or None if unavailable.
+    """
+    if uniform_stream is None:
+        return None
     u_t, _, _ = uniform_stream
     if u_t is not None and u_t.shape[0] > 0:
         return float(u_t.min())
@@ -181,23 +207,36 @@ def get_args():
         help="Glob for the dense light-curve files (late-time truth).",
     )
     p.add_argument(
+        "--trigger_key",
+        type=str,
+        default="kilonova_trigger_time",
+        help="JSON field inside the npz 'injection_parameters' that holds the "
+        "TRUE merger/trigger MJD. This is the physical phase zero -- the detection "
+        "lag is (first realistic detection) - (this trigger time).",
+    )
+    p.add_argument(
+        "--params_key",
+        type=str,
+        default="injection_parameters",
+        help="npz key holding the sim-truth JSON parameter string.",
+    )
+    p.add_argument(
         "--uniform_glob",
         type=str,
         default=(
             "/net/sescratch1/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
         ),
-        help="Glob for the UNIFORM-grid companion set. REQUIRED here: its "
-        "earliest sample time is the physical phase-zero proxy that defines the "
-        "detection lag. Objects with no matching uniform file are skipped.",
+        help="Glob for the UNIFORM-grid companion set. Only used as a FALLBACK "
+        "phase-zero proxy (with --allow_uniform_proxy) for objects whose files "
+        "lack a sim-truth trigger. Ignored when the true trigger is available.",
     )
     p.add_argument(
-        "--phasezero_key",
-        type=str,
-        default=None,
-        help="Optional npz key holding an explicit phase-zero (merger/explosion) "
-        "time per object. When present it is used instead of the uniform-grid "
-        "minimum, giving a true (not proxied) detection lag.",
+        "--allow_uniform_proxy",
+        action="store_true",
+        help="For objects with no sim-truth trigger, fall back to the earliest "
+        "uniform-grid sample as an approximate phase zero (offset from true "
+        "merger by a constant). Without this flag, such objects are skipped.",
     )
     p.add_argument(
         "--test_filelist",
@@ -287,17 +326,14 @@ def main():
 
     real_map = _stem_to_path(args.realistic_glob)
     dense_map = _stem_to_path(args.dense_glob)
-    uniform_map = _stem_to_path(args.uniform_glob) if args.uniform_glob else {}
-    if not uniform_map:
-        raise ValueError(
-            "No uniform-grid files matched --uniform_glob. This diagnostic needs "
-            "the uniform set (or --phasezero_key) to define the physical "
-            "phase-zero proxy."
-        )
+    # Uniform set is only needed as a fallback proxy; load it if requested.
+    uniform_map = {}
+    if args.allow_uniform_proxy and args.uniform_glob:
+        uniform_map = _stem_to_path(args.uniform_glob)
 
-    # Objects must appear in all three sets: realistic (context), dense (truth),
-    # and uniform (phase-zero proxy).
-    stems = sorted(set(real_map) & set(dense_map) & set(uniform_map))
+    # Phase zero comes from the true trigger in each realistic file, so objects
+    # only need to appear in realistic (context) and dense (truth).
+    stems = sorted(set(real_map) & set(dense_map))
 
     if args.test_filelist is not None:
         with open(args.test_filelist) as fh:
@@ -307,7 +343,8 @@ def main():
 
     print(
         f"Realistic: {len(real_map)}; dense: {len(dense_map)}; "
-        f"uniform: {len(uniform_map)}; paired & in-split: {len(stems)}"
+        f"paired & in-split: {len(stems)}; "
+        f"uniform-proxy fallback: {'on' if args.allow_uniform_proxy else 'off'}"
     )
     if args.max_objects > 0:
         stems = stems[: args.max_objects]
@@ -319,17 +356,25 @@ def main():
     obj_rows = []
     n_eval = 0
     n_no_phasezero = 0
+    n_proxy = 0
 
     for stem in stems:
         real_stream = read_merged_stream(real_map[stem], DROP_UPPER_LIMITS)
         dense_stream = read_merged_stream(dense_map[stem], drop_upper_limits=False)
-        uniform_stream = read_merged_stream(
-            uniform_map[stem], drop_upper_limits=False
-        )
 
-        t_phasezero = _phasezero_proxy(
-            uniform_stream, args.phasezero_key, uniform_map.get(stem)
+        # Physical phase zero: the TRUE merger time from sim truth in the
+        # realistic file. Fall back to the uniform-grid proxy only if allowed.
+        t_phasezero = _trigger_time_from_npz(
+            real_map[stem], args.trigger_key, args.params_key
         )
+        uniform_stream = None
+        if t_phasezero is None and args.allow_uniform_proxy and stem in uniform_map:
+            uniform_stream = read_merged_stream(
+                uniform_map[stem], drop_upper_limits=False
+            )
+            t_phasezero = _phasezero_from_uniform(uniform_stream)
+            if t_phasezero is not None:
+                n_proxy += 1
         if t_phasezero is None:
             n_no_phasezero += 1
             continue
@@ -394,17 +439,24 @@ def main():
         print("No late-time points scored (check cutoffs, globs, phase-zero).")
         return
     if n_no_phasezero:
-        print(f"Skipped {n_no_phasezero} objects with no phase-zero proxy.")
+        print(f"Skipped {n_no_phasezero} objects with no trigger time "
+              f"(pass --allow_uniform_proxy to approximate instead of skipping).")
+    if n_proxy:
+        print(f"Used the uniform-grid proxy for {n_proxy} objects lacking a "
+              f"sim-truth trigger; their lags are offset by a constant.")
 
     lag = np.asarray([r["detection_lag"] for r in rows])
     resid = np.asarray([r["residual_mag"] for r in rows])
     bands = np.asarray([r["band"] for r in rows])
     mode = "AUTOREGRESSIVE rollout" if args.rollout else "DIRECT single-pass"
 
+    zero_src = "true merger time" if not args.allow_uniform_proxy else \
+        "true merger time (+uniform proxy fallback)"
     print(f"\nForecast mode: {mode}")
+    print(f"Phase zero: {zero_src}")
     print(f"Evaluated {n_eval} objects; {len(rows)} late-time points.")
     print(
-        f"Detection lag (days after phase-zero proxy): "
+        f"Detection lag (days after merger): "
         f"min={lag.min():.2f} median={np.median(lag):.2f} max={lag.max():.2f}"
     )
 
@@ -439,7 +491,7 @@ def main():
     ax.axhline(0.0, color="0.6", lw=0.8, ls="--")
     ax.plot(centers, bin_bias, "o-", color="#E63946", label="bias (mean resid)")
     ax.plot(centers, bin_rmse, "s-", color="#457B9D", label="RMSE")
-    ax.set_xlabel("Detection lag: first realistic detection − phase-zero [days]")
+    ax.set_xlabel("Detection lag: first realistic detection − merger time [days]")
     ax.set_ylabel("Late-time residual [mag]  (pred − true)")
     ax.set_title(
         f"Phase degeneracy: forecast error vs hidden detection lag\n"
