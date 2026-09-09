@@ -587,6 +587,7 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
     world_size: int,
     band_weights: torch.Tensor = None,
     ema: object = None,
+    grad_clip_norm: float = None,
 ) -> None:
     """DDP epoch function for the masked 9-band scalar temporal LodeRunner.
 
@@ -613,6 +614,12 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
     ``ema`` (optional :class:`yoke.utils.ema.ParamEMA`) shadows the trainable
     params and is updated after each ``optimizer.step()`` (Polyak averaging);
     ``None`` (default) is a no-op.
+
+    ``grad_clip_norm`` (optional float) clips the global gradient norm of the
+    trainable params to this value before ``optimizer.step()``. Important under
+    MSE, whose gradient scales with the residual (unlike Huber, which bounds it),
+    so a single outlier-heavy batch can spike the update. ``None`` (default)
+    disables clipping.
     """
     train_rcrd_filename = train_rcrd_filename.replace(
         "<epochIDX>",
@@ -670,6 +677,10 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
                 )
 
             batch_loss.backward()
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip_norm
+                )
             optimizer.step()
             LRsched.step()
 
@@ -1134,6 +1145,7 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band_rollout(
     dt_weight_tau: float = None,
     ema: object = None,
     train_diag_rcrd_filename: str = None,
+    grad_clip_norm: float = None,
 ) -> None:
     """Multi-step rollout DDP epoch for the masked 9-band scalar temporal model.
 
@@ -1300,6 +1312,10 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band_rollout(
             )
 
             batch_loss.backward()
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip_norm
+                )
             optimizer.step()
             LRsched.step()
 

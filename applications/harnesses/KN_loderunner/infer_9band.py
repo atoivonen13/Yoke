@@ -203,6 +203,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     # 1 for legacy checkpoints (no key) -> point head. > 1 rebuilds the wider
     # quantile head; the median is the point forecast extracted downstream.
     n_quantiles = ckpt.get("n_quantiles", 1)
+    bypass_backbone = ckpt.get("bypass_backbone", False)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -236,6 +237,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         trend_max_offset=trend_max_offset,
         pool_mode=pool_mode,
         n_quantiles=n_quantiles,
+        bypass_backbone=bypass_backbone,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

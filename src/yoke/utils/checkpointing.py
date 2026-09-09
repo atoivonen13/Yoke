@@ -515,6 +515,7 @@ def load_direct_loderunner_checkpoint_9band(
         # output_head last-layer width (n_bands) so strict load succeeds. > 1
         # reconstructs the wider quantile head.
         n_quantiles=checkpoint_data.get("n_quantiles", 1),
+        bypass_backbone=checkpoint_data.get("bypass_backbone", False),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

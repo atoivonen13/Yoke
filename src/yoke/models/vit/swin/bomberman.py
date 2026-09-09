@@ -494,6 +494,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         trend_max_offset: float = None,
         pool_mode: str = "mean",
         n_quantiles: int = 1,
+        bypass_backbone: bool = False,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -587,6 +588,19 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 checkpoint will NOT load that layer; the flag is recorded in the
                 checkpoint and restored by the loaders. Train it with the pinball
                 (quantile) loss rather than Huber.
+            bypass_backbone (bool): When True (default False), the frozen backbone
+                is SKIPPED in ``forward``: the tiled conditioner output is used
+                directly as the "prediction image" fed to the pooling+head. This
+                turns the trainable path into a pure MLP (conditioner -> pool ->
+                head) with the backbone contributing nothing, as a DIAGNOSTIC
+                baseline -- if it matches the full model's RMSE, the frozen
+                backbone (fed a spatially-constant image) is dead weight and the
+                ceiling is set by conditioner/head capacity + input information,
+                not the backbone. Adds NO parameters and does NOT change any layer
+                shape (the head still consumes ``pool_channels + dt_extra``; under
+                ``meanstdmax`` the constant image just makes the std slice 0 and
+                the max slice equal the mean), so the ``state_dict`` is unchanged
+                and checkpoints load ``strict=True``. Round-trips via the loaders.
         """
         super().__init__()
 
@@ -622,6 +636,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # what the rollout feeds back as context.
         self.n_quantiles = n_quantiles
         self.median_idx = n_quantiles // 2
+
+        # Diagnostic baseline: skip the frozen backbone in forward() and feed the
+        # tiled conditioner output straight to pooling+head. Adds no params and
+        # changes no shapes, so checkpoints load strict=True either way.
+        self.bypass_backbone = bypass_backbone
 
         if pool_mode not in ("mean", "meanstdmax"):
             raise ValueError(
@@ -877,12 +896,18 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
         backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
 
-        pred_img = self.backbone(
-            pseudo_img,
-            backbone_in_vars,
-            backbone_out_vars,
-            Dt,
-        )  # [B, backbone_channels, H, W]
+        if self.bypass_backbone:
+            # Diagnostic baseline: skip the frozen backbone entirely and feed the
+            # tiled (spatially-constant) conditioner output straight to pooling.
+            # The trainable path collapses to conditioner -> pool -> head.
+            pred_img = pseudo_img  # [B, backbone_channels, H, W]
+        else:
+            pred_img = self.backbone(
+                pseudo_img,
+                backbone_in_vars,
+                backbone_out_vars,
+                Dt,
+            )  # [B, backbone_channels, H, W]
 
         # Collapse spatial dimensions to backbone-channel summaries. The mean
         # alone throws away all spatial structure the backbone produced; the
