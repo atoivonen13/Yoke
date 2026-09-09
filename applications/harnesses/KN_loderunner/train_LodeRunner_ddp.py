@@ -399,15 +399,18 @@ def main(args, rank, world_size, local_rank, device):
     # the model real time evolution instead of a single dense night. Set these
     # from the plot_observation_histograms.py time-window sweep. Leave
     # CONTEXT_WINDOW_DAYS = None to use the legacy fixed-count context.
-    # Lever 4 (context extent): widened from 2.0 d / 12 events. The window and
-    # the padded width MUST move together -- widening the window while
-    # MAX_CONTEXT_LEN stays low just keeps the most-recent events and DROPS the
-    # early rise (see sel_idx[-max_context_len:] in kilonova_dataset), which is
-    # the opposite of the intent. 5 d of history at up to 24 events lets the
-    # conditioner see light-curve shape/color evolution, the only signal that can
-    # break the viewing-angle / ejecta-mass degeneracy driving the RMSE floor.
-    CONTEXT_WINDOW_DAYS = 5.0
-    MAX_CONTEXT_LEN = 24
+    # Lever 4 (context extent): the 5 d / 24 event widening (study 072) REGRESSED
+    # late-time RMSE vs the 2 d / 12 event baseline (071: 2.08 -> 072: 2.25), and
+    # study 073 (capacity + phase) only partially recovered it (2.11). Since 072
+    # bundled the window widening WITH bypass, revert the window here to isolate:
+    # this run keeps 073's architecture (waist 32 / hidden 128 / phase 6, bypass)
+    # but restores the 2 d / 12 event context. If RMSE drops below 2.08, the
+    # window widening was the culprit, not bypass. The window and the padded width
+    # MUST move together -- widening the window while MAX_CONTEXT_LEN stays low
+    # just keeps the most-recent events and DROPS the early rise (see
+    # sel_idx[-max_context_len:] in kilonova_dataset), the opposite of the intent.
+    CONTEXT_WINDOW_DAYS = 2.0
+    MAX_CONTEXT_LEN = 12
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
