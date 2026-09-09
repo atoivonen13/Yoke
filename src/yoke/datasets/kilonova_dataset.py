@@ -411,6 +411,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         target_horizon_days: float = None,
         data_glob: str = None,
         object_ids: set = None,
+        append_phase: bool = False,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -473,6 +474,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 shared object-level train/val/test split across the realistic and
                 dense directories (the same stems appear in both). None (default)
                 loads all files matched by ``data_glob``.
+            append_phase (bool): If True (default False), append the anchor event's
+                phase (days since the curve's first detection) as a trailing scalar
+                on the flattened ``x`` in window mode, for models built with
+                ``phase_fourier_bands > 0`` (which slice it back off in ``forward``).
+                Window mode only. When False the layout is unchanged.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -522,6 +528,10 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # max_context_len with a validity flag, instead of a fixed event count.
         self.context_window_days = context_window_days
         self.window_mode = context_window_days is not None
+
+        # Append the anchor phase (days since first detection) as a trailing
+        # scalar on window-mode x, consumed by models with phase_fourier_bands > 0.
+        self.append_phase = append_phase
 
         if self.window_mode:
             self.max_context_len = (
@@ -861,7 +871,14 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         per_event[:n_real, 2] = 1.0  # validity flag for real events
         per_event[np.arange(n_real), 3 + ctx_b] = 1.0
 
-        x = torch.tensor(per_event.reshape(-1), dtype=torch.float32)
+        x_flat = per_event.reshape(-1)
+        if self.append_phase:
+            # Anchor phase = days since the curve's first detection. times are
+            # file-relative (times -= times.min()), so anchor_t IS that phase.
+            x_flat = np.concatenate(
+                [x_flat, np.array([anchor_t], dtype=np.float32)]
+            )
+        x = torch.tensor(x_flat, dtype=torch.float32)
 
         # Target is the event at target_idx, in a per-band vector + mask.
         target_band = int(bands[target_idx])
