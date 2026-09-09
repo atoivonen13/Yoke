@@ -511,6 +511,10 @@ def load_direct_loderunner_checkpoint_9band(
         # "mean" for legacy checkpoints (no key) -> global average pool, matching
         # the saved output_head first-layer shape so strict load succeeds.
         pool_mode=checkpoint_data.get("pool_mode", "mean"),
+        # 1 for legacy checkpoints (no key) -> point head, matching the saved
+        # output_head last-layer width (n_bands) so strict load succeeds. > 1
+        # reconstructs the wider quantile head.
+        n_quantiles=checkpoint_data.get("n_quantiles", 1),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

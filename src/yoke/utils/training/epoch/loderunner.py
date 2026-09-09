@@ -15,6 +15,94 @@ from yoke.utils.training.datastep.loderunner import (
 )
 
 
+class PinballLoss(torch.nn.Module):
+    """Pinball (quantile) loss for the quantile-head 9-band forecaster.
+
+    Drop-in replacement for ``nn.HuberLoss(reduction="none")`` in the 9-band
+    training/rollout paths when the model predicts multiple quantiles per band.
+    It carries the quantile levels so the epoch/rollout functions need not know
+    them, and it collapses the quantile axis INTERNALLY so the downstream masking
+    and per-sample reduction (which assume a per-band ``[B, n_bands]`` or a
+    per-step ``[B]`` loss) are untouched.
+
+    ``forward`` dispatches on ``pred.dim()``:
+      - single-step: ``pred`` is ``[B, n_quantiles, n_bands]`` and ``target`` is
+        ``[B, n_bands]``; returns ``[B, n_bands]`` (mean over the quantile axis).
+      - rollout: ``pred`` is ``[B, n_quantiles]`` and ``target`` is ``[B]``;
+        returns ``[B]`` (mean over the quantile axis).
+
+    The pinball loss per element is ``max(q * e, (q - 1) * e)`` with
+    ``e = target - pred`` and ``q`` the quantile level, which is minimized when
+    ``pred`` is the ``q``-th quantile of the target distribution.
+    """
+
+    def __init__(self, quantile_levels: tuple) -> None:
+        """Store the quantile levels as a non-trainable buffer.
+
+        Args:
+            quantile_levels (tuple): Quantile levels in (0, 1), e.g.
+                ``(0.1, 0.5, 0.9)``. Order must match the model's head output.
+        """
+        super().__init__()
+        self.register_buffer(
+            "levels", torch.tensor(quantile_levels, dtype=torch.float32)
+        )
+
+    def forward(
+        self, pred: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute the per-band (or per-step) pinball loss.
+
+        Args:
+            pred (torch.Tensor): ``[B, Q, n_bands]`` (single-step) or ``[B, Q]``
+                (rollout).
+            target (torch.Tensor): ``[B, n_bands]`` (single-step) or ``[B]``
+                (rollout).
+
+        Returns:
+            torch.Tensor: ``[B, n_bands]`` or ``[B]`` -- the quantile axis is
+                mean-reduced so existing masking/reduction logic is unchanged.
+        """
+        if pred.dim() == 3:
+            # Single-step: [B, Q, n_bands] vs [B, n_bands].
+            e = target.unsqueeze(1) - pred  # [B, Q, n_bands]
+            lv = self.levels.view(1, -1, 1)  # [1, Q, 1]
+            per_q = torch.maximum(lv * e, (lv - 1.0) * e)  # [B, Q, n_bands]
+            return per_q.mean(dim=1)  # [B, n_bands]
+
+        # Rollout: [B, Q] vs [B].
+        e = target.unsqueeze(1) - pred  # [B, Q]
+        lv = self.levels.view(1, -1)  # [1, Q]
+        per_q = torch.maximum(lv * e, (lv - 1.0) * e)  # [B, Q]
+        return per_q.mean(dim=1)  # [B]
+
+
+def _check_pred_target_shapes(
+    pred: torch.Tensor, target: torch.Tensor, where: str
+) -> None:
+    """Validate a 9-band model output against the target, allowing a quantile axis.
+
+    Point head: ``pred`` is ``[B, n_bands]`` and must equal ``target.shape``.
+    Quantile head: ``pred`` is ``[B, n_quantiles, n_bands]``; the batch and band
+    dims must match ``target`` (``[B, n_bands]``) while the middle quantile axis
+    is free.
+
+    Args:
+        pred (torch.Tensor): Model output.
+        target (torch.Tensor): Ground-truth ``[B, n_bands]``.
+        where (str): Label for the error message (e.g. "Validation").
+    """
+    if pred.dim() == 3:
+        ok = pred.shape[0] == target.shape[0] and pred.shape[2] == target.shape[1]
+    else:
+        ok = pred.shape == target.shape
+    if not ok:
+        raise RuntimeError(
+            f"{where} prediction and target shapes do not match: "
+            f"pred.shape={pred.shape}, target.shape={target.shape}"
+        )
+
+
 def train_simple_loderunner_epoch(
     channel_map: list,
     training_data: torch.utils.data.DataLoader,
@@ -559,14 +647,12 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
 
             pred = model(x, in_vars, out_vars, Dt)
 
-            if pred.shape != target.shape:
-                raise RuntimeError(
-                    f"Prediction and target shapes do not match: "
-                    f"pred.shape={pred.shape}, target.shape={target.shape}"
-                )
+            _check_pred_target_shapes(pred, target, "Training")
 
-            # loss_fn uses reduction='none' -> [B, n_bands]. Mask to the
-            # observed band and average per sample over observed entries.
+            # loss_fn uses reduction='none' -> [B, n_bands] (for both the point
+            # HuberLoss and the quantile PinballLoss, which mean-reduces its
+            # quantile axis internally). Mask to the observed band and average per
+            # sample over observed entries.
             loss = loss_fn(pred, target) * mask
             per_sample_loss = loss.sum(dim=1) / (mask.sum(dim=1) + 1e-8)
 
@@ -635,12 +721,7 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
 
                     pred = model(x, in_vars, out_vars, Dt)
 
-                    if pred.shape != target.shape:
-                        raise RuntimeError(
-                            f"Validation prediction and target shapes do not "
-                            f"match: pred.shape={pred.shape}, "
-                            f"target.shape={target.shape}"
-                        )
+                    _check_pred_target_shapes(pred, target, "Validation")
 
                     loss = loss_fn(pred, target) * mask
                     per_sample_loss = loss.sum(dim=1) / (mask.sum(dim=1) + 1e-8)
@@ -670,6 +751,7 @@ def _rollout_pass_9band(
     teacher_forcing_ratio: float,
     device: torch.device,
     band_weights: torch.Tensor = None,
+    median_idx: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Unroll the 9-band model over a batch of rollouts with scheduled sampling.
 
@@ -679,6 +761,11 @@ def _rollout_pass_9band(
     ``future_valid``). The value fed back into the context is the true value with
     probability ``teacher_forcing_ratio`` and the model's own (detached)
     prediction otherwise, so gradients never flow through the rollout.
+
+    With a quantile head (model output ``[B, n_quantiles, n_bands]``) the step
+    loss is taken over ALL quantiles of the observed band (so the spread is
+    trained during rollout) while the value fed back is the MEDIAN quantile
+    (``median_idx``), keeping the fed-back context a single scalar per sample.
 
     Args:
         ctx_v (torch.Tensor): Initial context values [B, context_len].
@@ -699,6 +786,8 @@ def _rollout_pass_9band(
             per-band weighted mean over valid steps; ``per_sample_loss`` (the
             recorded metric) stays unweighted. ``None`` reproduces the plain
             equal-weight behavior exactly.
+        median_idx (int): Quantile index fed back into the context when the model
+            has a quantile head. Ignored for a point head. Default 0.
 
     Returns:
         per_sample_loss (torch.Tensor): Mean rollout loss per sample [B].
@@ -740,12 +829,21 @@ def _rollout_pass_9band(
         x_step = per_event.reshape(B, -1)
 
         Dt = future_dt[:, step]
-        pred_all = model(x_step, in_vars, out_vars, Dt)  # [B, n_bands]
+        pred_all = model(x_step, in_vars, out_vars, Dt)
+        # [B, n_bands] (point) or [B, n_quantiles, n_bands] (quantile).
 
         tgt_band = future_b[:, step]
-        pred_obs = pred_all[batch_arange, tgt_band]  # [B]
         true_obs = future_v[:, step]  # [B]
         valid = future_valid[:, step]  # [B]
+
+        if pred_all.dim() == 3:
+            # Quantile head: loss over all quantiles of the observed band; feed
+            # back the median quantile as the single scalar context value.
+            pred_obs = pred_all[batch_arange, :, tgt_band]  # [B, n_quantiles]
+            fed_val = pred_all[batch_arange, median_idx, tgt_band]  # [B]
+        else:
+            pred_obs = pred_all[batch_arange, tgt_band]  # [B]
+            fed_val = pred_obs  # [B]
 
         step_loss = loss_fn(pred_obs, true_obs) * valid
         step_losses.append(step_loss)
@@ -756,7 +854,7 @@ def _rollout_pass_9band(
         use_true = (
             torch.rand(B, device=device) < teacher_forcing_ratio
         )
-        fed = torch.where(use_true, true_obs, pred_obs.detach())
+        fed = torch.where(use_true, true_obs, fed_val.detach())
 
         # For padded steps there is no real event to advance to; feeding the true
         # (zero) value with a zero dt is harmless since their loss is masked out
@@ -806,6 +904,7 @@ def _rollout_pass_9band_window(
     device: torch.device,
     band_weights: torch.Tensor = None,
     dt_weight_tau: float = None,
+    median_idx: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Unroll the 9-band model over a batch of rollouts in time-window mode.
 
@@ -855,6 +954,8 @@ def _rollout_pass_9band_window(
             forecast toward a flat plateau). Composes multiplicatively with
             ``band_weights``. ``per_sample_loss`` (the recorded metric) stays
             unweighted. ``None`` (default) disables it, reproducing prior behavior.
+        median_idx (int): Quantile index fed back into the context when the model
+            has a quantile head. Ignored for a point head. Default 0.
 
     Returns:
         per_sample_loss (torch.Tensor): Mean rollout loss per sample [B].
@@ -943,12 +1044,21 @@ def _rollout_pass_9band_window(
         x_step = per_event.reshape(B, -1)
 
         Dt = future_dt[:, step]
-        pred_all = model(x_step, in_vars, out_vars, Dt)  # [B, n_bands]
+        pred_all = model(x_step, in_vars, out_vars, Dt)
+        # [B, n_bands] (point) or [B, n_quantiles, n_bands] (quantile).
 
         tgt_band = future_b[:, step]
-        pred_obs = pred_all[batch_arange, tgt_band]  # [B]
         true_obs = future_v[:, step]  # [B]
         valid = future_valid[:, step]  # [B]
+
+        if pred_all.dim() == 3:
+            # Quantile head: loss over all quantiles of the observed band; feed
+            # back the median quantile as the single scalar context value.
+            pred_obs = pred_all[batch_arange, :, tgt_band]  # [B, n_quantiles]
+            fed_val = pred_all[batch_arange, median_idx, tgt_band]  # [B]
+        else:
+            pred_obs = pred_all[batch_arange, tgt_band]  # [B]
+            fed_val = pred_obs  # [B]
 
         step_loss = loss_fn(pred_obs, true_obs) * valid
         step_losses.append(step_loss)
@@ -957,7 +1067,7 @@ def _rollout_pass_9band_window(
 
         # Scheduled sampling: choose true vs own (detached) prediction per sample.
         use_true = torch.rand(B, device=device) < teacher_forcing_ratio
-        fed = torch.where(use_true, true_obs, pred_obs.detach())
+        fed = torch.where(use_true, true_obs, fed_val.detach())
 
         # Append the new event (following the true time/band schedule) at the
         # left-packed write position and grow the count. For padded steps the
@@ -1124,6 +1234,11 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band_rollout(
         future_dt = future_dt.to(torch.float32).to(device, non_blocking=True)
         future_valid = future_valid.to(device, non_blocking=True)
 
+        # Quantile head feeds back the median quantile; 0 for a point head (the
+        # rollout ignores it in that case).
+        core = model.module if hasattr(model, "module") else model
+        median_idx = getattr(core, "median_idx", 0)
+
         if window_mode:
             return _rollout_pass_9band_window(
                 ctx_v=ctx_v,
@@ -1143,6 +1258,7 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band_rollout(
                 device=device,
                 band_weights=weights,
                 dt_weight_tau=dt_tau,
+                median_idx=median_idx,
             )
 
         return _rollout_pass_9band(
@@ -1159,6 +1275,7 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band_rollout(
             teacher_forcing_ratio=ratio,
             device=device,
             band_weights=weights,
+            median_idx=median_idx,
         )
 
     train_rcrd_filename = train_rcrd_filename.replace(

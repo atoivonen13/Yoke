@@ -493,6 +493,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         trend_slope_k: int = 3,
         trend_max_offset: float = None,
         pool_mode: str = "mean",
+        n_quantiles: int = 1,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -571,6 +572,21 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 checkpoint trained with a different ``pool_mode`` will NOT load that
                 layer (the rest of the head/conditioner/backbone still load); the flag
                 is recorded in the checkpoint and restored by the loaders.
+            n_quantiles (int): Number of quantile levels the output head predicts
+                per band. When ``1`` (default) the model is a point regressor and is
+                byte-identical to the legacy model: the head's final layer emits
+                ``n_bands`` values, ``forward`` returns ``[B, n_bands]`` with no
+                reshape, and old checkpoints load strict=True. When ``> 1`` the head
+                becomes a QUANTILE regressor: the final layer emits
+                ``n_bands * n_quantiles`` values, reshaped in ``forward`` to
+                ``[B, n_quantiles, n_bands]`` and made monotone along the quantile
+                axis via cumulative-softplus (so the predicted quantiles never
+                cross). The median quantile (index ``n_quantiles // 2``) is the point
+                forecast; the outer quantiles express the irreducible per-band
+                scatter. This CHANGES the output_head's LAST-layer shape, so a point
+                checkpoint will NOT load that layer; the flag is recorded in the
+                checkpoint and restored by the loaders. Train it with the pinball
+                (quantile) loss rather than Huber.
         """
         super().__init__()
 
@@ -587,6 +603,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 "slope augments the per-band delta anchor."
             )
 
+        if n_quantiles < 1:
+            raise ValueError(f"n_quantiles must be >= 1, got {n_quantiles}.")
+
         self.backbone = backbone
         self.context_len = context_len
         self.n_bands = n_bands
@@ -598,6 +617,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         self.trend_decay_anchor = trend_decay_anchor
         self.trend_slope_k = trend_slope_k
         self.trend_max_offset = trend_max_offset
+        # Quantile head: 1 -> legacy point regressor (byte-identical); >1 ->
+        # per-band quantile regressor. median_idx picks the point forecast and is
+        # what the rollout feeds back as context.
+        self.n_quantiles = n_quantiles
+        self.median_idx = n_quantiles // 2
 
         if pool_mode not in ("mean", "meanstdmax"):
             raise ValueError(
@@ -651,11 +675,14 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         )
 
         # Maps the backbone-channel summary (plus the Fourier Dt encoding, when
-        # enabled) back to one prediction per band.
+        # enabled) back to one prediction per band. When n_quantiles == 1 the last
+        # layer emits n_bands (byte-identical to the legacy point head); when > 1 it
+        # emits n_bands * n_quantiles, reshaped in forward() to [B, n_quantiles,
+        # n_bands].
         self.output_head = nn.Sequential(
             nn.Linear(pool_channels + dt_extra, hidden),
             nn.GELU(),
-            nn.Linear(hidden, n_bands),
+            nn.Linear(hidden, n_bands * n_quantiles),
         )
 
     def _encode_dt(self, Dt: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -820,7 +847,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 can condition directly on lead time.
 
         Returns:
-            pred (torch.Tensor): Predictions of shape [B, n_bands].
+            pred (torch.Tensor): Predictions of shape [B, n_bands] when
+                ``n_quantiles == 1``, or [B, n_quantiles, n_bands] (monotone along
+                the quantile axis) when ``n_quantiles > 1``.
         """
         B = x.shape[0]
         H, W = self.image_size
@@ -873,19 +902,43 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
         # Convert backbone channels to per-band predictions, conditioning the
         # head on lead time via the same Fourier encoding ([B, 0] when disabled).
-        pred = self.output_head(
+        head_out = self.output_head(
             torch.cat([pred_channel_vals, dt_feat], dim=1)
-        )  # [B, n_bands]
+        )  # [B, n_bands] (point) or [B, n_bands * n_quantiles] (quantile)
 
-        # Delta mode: the head predicts a change relative to the per-band last
-        # observed value (anchored regression), so the forecast starts at the last
-        # observation at Dt=0 instead of reconstructing the absolute magnitude. The
-        # anchor is derived from x (no parameters), so the disabled path is
-        # byte-identical to the absolute model.
+        if self.n_quantiles == 1:
+            # -------- Legacy point head (byte-identical path) --------
+            pred = head_out  # [B, n_bands]
+
+            # Delta mode: the head predicts a change relative to the per-band last
+            # observed value (anchored regression), so the forecast starts at the
+            # last observation at Dt=0 instead of reconstructing the absolute
+            # magnitude. The anchor is derived from x (no parameters), so the
+            # disabled path is byte-identical to the absolute model.
+            if self.predict_delta:
+                pred = pred + self._band_anchor(x, Dt)
+
+            return pred  # [B, n_bands]
+
+        # -------- Quantile head --------
+        # Reshape to [B, n_quantiles, n_bands] (quantile-major so band indexing
+        # stays on the last axis).
+        pred = head_out.view(B, self.n_quantiles, self.n_bands)
+
+        # Enforce non-crossing quantiles STRUCTURALLY (no reliance on the loss):
+        # emit the lowest quantile directly, then add a non-negative gap
+        # (softplus) for each successive level, so the cumulative sum along the
+        # quantile axis is monotone non-decreasing per band.
+        base = pred[:, :1, :]  # [B, 1, n_bands] -- lowest quantile
+        gaps = nn.functional.softplus(pred[:, 1:, :])  # [B, n_quantiles-1, n_bands]
+        pred = torch.cat([base, base + torch.cumsum(gaps, dim=1)], dim=1)
+
+        # Delta mode: a constant per-band shift preserves the quantile ordering, so
+        # broadcast the [B, n_bands] anchor across the quantile axis.
         if self.predict_delta:
-            pred = pred + self._band_anchor(x, Dt)
+            pred = pred + self._band_anchor(x, Dt).unsqueeze(1)
 
-        return pred
+        return pred  # [B, n_quantiles, n_bands]
 
 
 if __name__ == "__main__":
