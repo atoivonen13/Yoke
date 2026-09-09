@@ -251,6 +251,8 @@ def _rollout_scored(
                 n_bands=N_BANDS,
                 device=device,
                 window_mode=True,
+                phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
+                phase0=t0,  # win_t is absolute MJD; first detection at t0
             )
             # Lead time from the last FED event (the running context tip).
             dt = float(target_t[k]) - float(ctx_t[-1])
@@ -374,6 +376,8 @@ def eval_object(
         n_bands=N_BANDS,
         device=device,
         window_mode=True,
+        phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
+        phase0=t0,  # win_t is absolute MJD; first realistic detection at t0
     )
 
     # Score each late-time dense point at its true lead time from the last

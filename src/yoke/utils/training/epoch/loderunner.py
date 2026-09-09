@@ -979,6 +979,13 @@ def _rollout_pass_9band_window(
     W = float(context_window_days)
     M = int(max_context_len)
 
+    # When the model consumes an absolute anchor phase, each step's flattened x
+    # carries a trailing scalar: the most recent real event's file-relative time
+    # (days since the curve's first detection). ctx_t / buf_t are already in that
+    # frame, so last_t is the phase directly.
+    core = model.module if hasattr(model, "module") else model
+    append_phase = getattr(core, "phase_fourier_bands", 0) > 0
+
     # Growing buffer: the seed (<= M real events, left-packed) plus at most one
     # appended event per rollout step. Left-packed and time-sorted throughout.
     C = M + n_steps
@@ -1053,6 +1060,8 @@ def _rollout_pass_9band_window(
             dim=-1,
         )  # [B, M, 3 + n_bands]
         x_step = per_event.reshape(B, -1)
+        if append_phase:
+            x_step = torch.cat([x_step, last_t.unsqueeze(1)], dim=1)
 
         Dt = future_dt[:, step]
         pred_all = model(x_step, in_vars, out_vars, Dt)

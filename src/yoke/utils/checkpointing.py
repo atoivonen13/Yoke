@@ -516,6 +516,15 @@ def load_direct_loderunner_checkpoint_9band(
         # reconstructs the wider quantile head.
         n_quantiles=checkpoint_data.get("n_quantiles", 1),
         bypass_backbone=checkpoint_data.get("bypass_backbone", False),
+        # None for legacy checkpoints (no key) -> waist == backbone_channels.
+        # When set (bypass-only), it widens the trainable waist, changing the
+        # conditioner last-layer + output_head first-layer shapes, so it MUST
+        # match the training config for the strict load to succeed.
+        bypass_channels=checkpoint_data.get("bypass_channels", None),
+        # 0 for legacy checkpoints (no key) -> no phase input. > 0 widens the
+        # conditioner first-layer (input_dim + dt_extra + phase_extra), so it
+        # MUST match the training config for the strict load to succeed.
+        phase_fourier_bands=checkpoint_data.get("phase_fourier_bands", 0),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

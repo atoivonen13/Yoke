@@ -251,7 +251,12 @@ def main(args, rank, world_size, local_rank, device):
 
 
     CONTEXT_LEN = 5 #3
-    HIDDEN_CHANNELS = 64
+    # Conditioner/head MLP width. Bumped 64 -> 128 alongside BYPASS_CHANNELS: under
+    # bypass the trainable path is a pure MLP, so both the hidden width and the
+    # emitted "waist" are the real capacity knobs. Changing this alters every
+    # conditioner/head Linear shape, so start a fresh (epoch-0) study; the value
+    # round-trips via the "hidden" checkpoint key so cycle restarts rebuild it.
+    HIDDEN_CHANNELS = 128
 
     # Output-head spatial pooling. The backbone emits a [B, 8, H, W] image that
     # is collapsed to the 8-scalar summary the head consumes. "mean" (legacy) is
@@ -302,6 +307,18 @@ def main(args, rank, world_size, local_rank, device):
     # against the full model -- if they match, the frozen backbone is dead weight.
     BYPASS_BACKBONE = True
 
+    # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
+    # the trainable path funnels ALL information through the conditioner's emitted
+    # channel count, which is sized for the (now-skipped) frozen backbone
+    # (backbone_channels=8) -- the real bottleneck. Setting this decouples that
+    # emitted width from the backbone: the conditioner emits BYPASS_CHANNELS
+    # scalars and the (meanstdmax) pool + head widen to match. Only valid with
+    # BYPASS_BACKBONE=True (the non-bypass path calls the frozen backbone, which
+    # needs exactly backbone_channels). None -> waist == backbone_channels (legacy
+    # width). Changes conditioner/head shapes -> fresh study; round-trips via the
+    # "bypass_channels" checkpoint key.
+    BYPASS_CHANNELS = 32
+
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
     # time Dt, so they can learn a real per-band decay curve instead of a flat
@@ -309,6 +326,18 @@ def main(args, rank, world_size, local_rank, device):
     # frozen backbone, which cannot adapt, so late-time forecasts plateau.) Set
     # to 0 for the legacy architecture (byte-identical; old checkpoints load).
     DT_FOURIER_BANDS = 8
+
+    # Absolute-phase conditioning. When > 0, the conditioner additionally receives
+    # a 2*PHASE_FOURIER_BANDS + 1 encoding (sin/cos over log-spaced periods + a
+    # log1p magnitude channel) of the ANCHOR PHASE -- days since the curve's first
+    # detection. Context rel_t is measured from the first event in the WINDOW, so
+    # the model otherwise never sees where on the light curve it sits (pre- vs
+    # post-peak), which is exactly what disambiguates the shape/decay. The phase
+    # is delivered as a trailing scalar appended to x at every window-mode build
+    # site (dataset, rollout, eval). Widens the conditioner first-layer -> fresh
+    # study; round-trips via the "phase_fourier_bands" checkpoint key. Requires
+    # window mode (needs a well-defined anchor). 0 -> legacy (byte-identical).
+    PHASE_FOURIER_BANDS = 6
 
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
@@ -539,6 +568,8 @@ def main(args, rank, world_size, local_rank, device):
             pool_mode=POOL_MODE,
             n_quantiles=N_QUANTILES,
             bypass_backbone=BYPASS_BACKBONE,
+            bypass_channels=BYPASS_CHANNELS,
+            phase_fourier_bands=PHASE_FOURIER_BANDS,
         ).to(device)
 
         # Stage 1: freeze pretrained LodeRunner, train only conditioner + output head
@@ -750,6 +781,7 @@ def main(args, rank, world_size, local_rank, device):
             target_horizon_days=TARGET_HORIZON_DAYS,
             data_glob=data_glob,
             object_ids=object_ids,
+            append_phase=PHASE_FOURIER_BANDS > 0,
         )
 
     # Realistic TRAIN objects (always present) plus, if a dense set is provided
@@ -957,6 +989,8 @@ def main(args, rank, world_size, local_rank, device):
                     "loss_type": LOSS_TYPE,
                     "grad_clip_norm": GRAD_CLIP_NORM,
                     "bypass_backbone": BYPASS_BACKBONE,
+                    "bypass_channels": BYPASS_CHANNELS,
+                    "phase_fourier_bands": PHASE_FOURIER_BANDS,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None

@@ -495,6 +495,8 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         pool_mode: str = "mean",
         n_quantiles: int = 1,
         bypass_backbone: bool = False,
+        bypass_channels: int = None,
+        phase_fourier_bands: int = 0,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -601,6 +603,28 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 ``meanstdmax`` the constant image just makes the std slice 0 and
                 the max slice equal the mean), so the ``state_dict`` is unchanged
                 and checkpoints load ``strict=True``. Round-trips via the loaders.
+            bypass_channels (int): When set (default None), the conditioner emits
+                this many "waist" channels instead of ``backbone_channels``, and
+                the pooling + output-head input width resize to match. This widens
+                the information bottleneck that ALL trainable capacity funnels
+                through under bypass. Only valid with ``bypass_backbone=True`` (the
+                frozen backbone requires ``backbone_channels`` input, so the wider
+                waist is incompatible with the non-bypass path -- a ValueError is
+                raised). When None the waist is ``backbone_channels``, byte-identical
+                to before. CHANGES the conditioner-final and output-head-first layer
+                shapes, so start a fresh study; the flag round-trips via the loaders.
+            phase_fourier_bands (int): Number of Fourier bands used to encode the
+                anchor PHASE (days since the curve's first detection) and inject it
+                into the conditioner. When ``0`` (default) the feature is DISABLED
+                and byte-identical to the model without it. When ``> 0``, the
+                builders append the anchor phase as a trailing scalar on the
+                flattened ``x`` and ``forward`` slices it off, Fourier-encodes it
+                (``[sin, cos, log1p]``, periods ~1 -> 200 days) and concatenates it
+                onto the conditioner input, so the trainable path knows WHERE on the
+                light curve it is -- the signal that breaks the viewing-angle /
+                ejecta-mass degeneracy. Requires time-window mode. CHANGES the
+                conditioner-first layer shape (fresh study); round-trips via the
+                loaders.
         """
         super().__init__()
 
@@ -619,6 +643,13 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
         if n_quantiles < 1:
             raise ValueError(f"n_quantiles must be >= 1, got {n_quantiles}.")
+
+        if phase_fourier_bands > 0 and context_window_days is None:
+            raise ValueError(
+                "phase_fourier_bands > 0 requires time-window mode "
+                "(context_window_days set); the anchor phase (days since first "
+                "detection) is derived from the window-mode absolute-time layout."
+            )
 
         self.backbone = backbone
         self.context_len = context_len
@@ -642,13 +673,29 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # changes no shapes, so checkpoints load strict=True either way.
         self.bypass_backbone = bypass_backbone
 
+        # Waist width: the number of channels the conditioner emits and pooling
+        # summarizes. When bypass_channels is set it DECOUPLES this from the frozen
+        # backbone's fixed backbone_channels -- valid only under bypass, where the
+        # backbone (which requires backbone_channels input) is never called. When
+        # None (default) the waist is backbone_channels, byte-identical to before.
+        if bypass_channels is not None and not bypass_backbone:
+            raise ValueError(
+                "bypass_channels requires bypass_backbone=True; the frozen "
+                "backbone only accepts backbone_channels input, so the widened "
+                "waist is incompatible with the non-bypass path."
+            )
+        self.bypass_channels = bypass_channels
+        self.waist = (
+            bypass_channels if bypass_channels is not None else backbone_channels
+        )
+
         if pool_mode not in ("mean", "meanstdmax"):
             raise ValueError(
                 f"pool_mode must be 'mean' or 'meanstdmax', got {pool_mode!r}."
             )
         self.pool_mode = pool_mode
-        # Number of pooled statistics per backbone channel fed to the output head.
-        pool_channels = backbone_channels * (3 if pool_mode == "meanstdmax" else 1)
+        # Number of pooled statistics per waist channel fed to the output head.
+        pool_channels = self.waist * (3 if pool_mode == "meanstdmax" else 1)
 
         # Dataset x layout, flattened per event. Fixed-count mode:
         #   [value, rel_t, one_hot_band(n_bands)] * context_len   -> 2 + n_bands
@@ -656,6 +703,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         #   [value, rel_t, valid, one_hot_band(n_bands)] * context_len -> 3 + n_bands
         per_event_width = 3 + n_bands if context_window_days is not None else 2 + n_bands
         input_dim = context_len * per_event_width
+        # Stored so forward() can slice the per-event block off x when the phase
+        # scalar is appended as a trailing element (phase_fourier_bands > 0).
+        self.input_dim = input_dim
 
         # Fourier lead-time encoding. When enabled, a fixed log-spaced frequency
         # bank turns the scalar Dt into a 2*dt_fourier_bands feature vector that
@@ -683,14 +733,39 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         else:
             dt_extra = 0
 
-        # Maps the scalar temporal event stream (plus the Fourier Dt encoding,
-        # when enabled) into the pseudo-channels expected by the backbone.
+        # Global anchor-phase encoding. When enabled, ONE scalar per sample -- the
+        # anchor event's phase (days since the curve's first detection) -- is
+        # Fourier-encoded like Dt and concatenated onto the conditioner input, so
+        # the trainable path knows WHERE on the light curve it is (pre- vs
+        # post-peak), the signal that breaks the viewing-angle / ejecta-mass
+        # degeneracy. The max period is 200 d (vs Dt's 60 d): phase can reach the
+        # full curve length, so the slowest band must stay within a fraction of a
+        # cycle over the observed phase range to remain monotone. A non-periodic
+        # log1p(phase) channel is appended too (see _encode_phase). When
+        # phase_fourier_bands == 0 the feature is DISABLED and byte-identical to
+        # the model without it (no scalar appended to x, no slice in forward).
+        self.phase_fourier_bands = phase_fourier_bands
+        if phase_fourier_bands > 0:
+            phase_periods = torch.logspace(
+                math.log10(1.0), math.log10(200.0), phase_fourier_bands
+            )
+            self.register_buffer("phase_freqs", 2.0 * math.pi / phase_periods)
+            # 2 * bands (sin + cos) + 1 monotone log1p(phase) channel.
+            phase_extra = 2 * phase_fourier_bands + 1
+        else:
+            phase_extra = 0
+
+        # Maps the scalar temporal event stream (plus the Fourier Dt encoding and
+        # the anchor-phase encoding, when enabled) into the waist channels. The
+        # final layer emits self.waist (== backbone_channels unless bypass widens
+        # it) -- the pseudo-image the backbone consumes, or the pooled summary fed
+        # straight to the head under bypass.
         self.conditioner = nn.Sequential(
-            nn.Linear(input_dim + dt_extra, hidden),
+            nn.Linear(input_dim + dt_extra + phase_extra, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
-            nn.Linear(hidden, backbone_channels),
+            nn.Linear(hidden, self.waist),
         )
 
         # Maps the backbone-channel summary (plus the Fourier Dt encoding, when
@@ -727,6 +802,34 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # [B, 1] * [1, bands] -> [B, bands]
         angles = Dt * self.dt_freqs.reshape(1, -1)
         mono = torch.log1p(Dt.clamp_min(0.0))  # [B, 1], monotone in lead time
+        return torch.cat([torch.sin(angles), torch.cos(angles), mono], dim=1)
+
+    def _encode_phase(self, phase: torch.Tensor, batch_size: int) -> torch.Tensor:
+        """Fourier-encode the anchor phase for the trainable path.
+
+        The direct analogue of :meth:`_encode_dt`, applied to the anchor event's
+        phase (days since the curve's first detection) instead of the lead time.
+
+        Args:
+            phase (torch.Tensor): Anchor-phase tensor of shape [B] or [B, 1] (or
+                broadcastable). Ignored when the feature is disabled.
+            batch_size (int): Batch size B, used to size the disabled-path output.
+
+        Returns:
+            torch.Tensor: [B, 2 * phase_fourier_bands + 1] of
+            ``[sin(phase·f), cos(phase·f), log1p(phase)]`` when enabled, else an
+            empty [B, 0] tensor (so the concat is a no-op and the disabled path is
+            byte-identical to the model without the phase feature). The trailing
+            ``log1p(phase)`` is a non-periodic, monotone channel giving the
+            conditioner an explicit "later in the curve" ramp independent of the
+            periodic bands.
+        """
+        if self.phase_fourier_bands == 0:
+            return phase.new_zeros((batch_size, 0)) if phase is not None else None
+
+        phase = phase.reshape(batch_size, 1)
+        angles = phase * self.phase_freqs.reshape(1, -1)  # [B, bands]
+        mono = torch.log1p(phase.clamp_min(0.0))  # [B, 1], monotone in phase
         return torch.cat([torch.sin(angles), torch.cos(angles), mono], dim=1)
 
     def _band_anchor(self, x: torch.Tensor, Dt: torch.Tensor) -> torch.Tensor:
@@ -873,35 +976,60 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         B = x.shape[0]
         H, W = self.image_size
 
+        # Split off the trailing anchor-phase scalar when the phase feature is
+        # enabled: the builders append it as the last element of the flattened x.
+        # x_events is the per-event block fed to the conditioner AND _band_anchor
+        # (which reshapes to [B, context_len, 3 + n_bands] and would break on the
+        # appended scalar). When disabled, x has width input_dim and is used as-is
+        # so the path is byte-identical to the model without the phase feature.
+        if self.phase_fourier_bands > 0:
+            x_events = x[:, : self.input_dim]
+            phase_raw = x[:, self.input_dim : self.input_dim + 1]
+        else:
+            x_events = x
+            phase_raw = None
+
         # Fourier Dt encoding for the trainable path ([B, 0] when disabled, so
         # both concats below are no-ops and match the legacy architecture).
         dt_feat = self._encode_dt(Dt, B)
+        # Anchor-phase encoding ([B, 0] when disabled -> no-op concat).
+        phase_feat = self._encode_phase(phase_raw, B)
+        if phase_feat is None:
+            phase_feat = x.new_zeros((B, 0))
 
         channel_vals = self.conditioner(
-            torch.cat([x, dt_feat], dim=1)
-        )  # [B, backbone_channels]
-
-        pseudo_img = channel_vals.view(
-            B,
-            self.backbone_channels,
-            1,
-            1,
-        ).expand(
-            B,
-            self.backbone_channels,
-            H,
-            W,
-        )
-
-        backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
-        backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
+            torch.cat([x_events, dt_feat, phase_feat], dim=1)
+        )  # [B, self.waist]
 
         if self.bypass_backbone:
-            # Diagnostic baseline: skip the frozen backbone entirely and feed the
-            # tiled (spatially-constant) conditioner output straight to pooling.
-            # The trainable path collapses to conditioner -> pool -> head.
-            pred_img = pseudo_img  # [B, backbone_channels, H, W]
+            # Skip the frozen backbone entirely. The pseudo-image is spatially
+            # constant, so its pooled statistics are analytic: mean = channel_vals,
+            # std = 0, max = channel_vals. Computing them directly avoids
+            # materializing the [B, waist, H, W] constant image (H*W = 448000),
+            # and is numerically identical to pooling the expanded tensor.
+            if self.pool_mode == "meanstdmax":
+                pred_channel_vals = torch.cat(
+                    [channel_vals, torch.zeros_like(channel_vals), channel_vals],
+                    dim=1,
+                )  # [B, 3 * waist]
+            else:
+                pred_channel_vals = channel_vals  # [B, waist]
         else:
+            pseudo_img = channel_vals.view(
+                B,
+                self.waist,
+                1,
+                1,
+            ).expand(
+                B,
+                self.waist,
+                H,
+                W,
+            )
+
+            backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
+            backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
+
             pred_img = self.backbone(
                 pseudo_img,
                 backbone_in_vars,
@@ -909,21 +1037,21 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 Dt,
             )  # [B, backbone_channels, H, W]
 
-        # Collapse spatial dimensions to backbone-channel summaries. The mean
-        # alone throws away all spatial structure the backbone produced; the
-        # meanstdmax mode also carries the per-channel spatial spread and peak,
-        # tripling the head's real input width for near-zero cost.
-        if self.pool_mode == "meanstdmax":
-            pred_channel_vals = torch.cat(
-                [
-                    pred_img.mean(dim=(2, 3)),
-                    pred_img.flatten(2).std(dim=2),
-                    pred_img.amax(dim=(2, 3)),
-                ],
-                dim=1,
-            )  # [B, 3 * backbone_channels]
-        else:
-            pred_channel_vals = pred_img.mean(dim=(2, 3))  # [B, backbone_channels]
+            # Collapse spatial dimensions to per-channel summaries. The mean alone
+            # throws away all spatial structure the backbone produced; the
+            # meanstdmax mode also carries the per-channel spatial spread and peak,
+            # tripling the head's real input width for near-zero cost.
+            if self.pool_mode == "meanstdmax":
+                pred_channel_vals = torch.cat(
+                    [
+                        pred_img.mean(dim=(2, 3)),
+                        pred_img.flatten(2).std(dim=2),
+                        pred_img.amax(dim=(2, 3)),
+                    ],
+                    dim=1,
+                )  # [B, 3 * backbone_channels]
+            else:
+                pred_channel_vals = pred_img.mean(dim=(2, 3))  # [B, backbone_channels]
 
         # Convert backbone channels to per-band predictions, conditioning the
         # head on lead time via the same Fourier encoding ([B, 0] when disabled).
@@ -941,7 +1069,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # magnitude. The anchor is derived from x (no parameters), so the
             # disabled path is byte-identical to the absolute model.
             if self.predict_delta:
-                pred = pred + self._band_anchor(x, Dt)
+                pred = pred + self._band_anchor(x_events, Dt)
 
             return pred  # [B, n_bands]
 
@@ -961,7 +1089,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # Delta mode: a constant per-band shift preserves the quantile ordering, so
         # broadcast the [B, n_bands] anchor across the quantile axis.
         if self.predict_delta:
-            pred = pred + self._band_anchor(x, Dt).unsqueeze(1)
+            pred = pred + self._band_anchor(x_events, Dt).unsqueeze(1)
 
         return pred  # [B, n_quantiles, n_bands]
 

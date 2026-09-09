@@ -204,6 +204,13 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     # quantile head; the median is the point forecast extracted downstream.
     n_quantiles = ckpt.get("n_quantiles", 1)
     bypass_backbone = ckpt.get("bypass_backbone", False)
+    # None for legacy checkpoints (no key) -> waist == backbone_channels. When
+    # set (bypass-only), it widens the trainable waist, changing conditioner
+    # last-layer + output_head first-layer shapes; MUST match to load strict.
+    bypass_channels = ckpt.get("bypass_channels", None)
+    # 0 for legacy checkpoints (no key) -> no phase input. > 0 widens the
+    # conditioner first-layer; MUST match to load strict.
+    phase_fourier_bands = ckpt.get("phase_fourier_bands", 0)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -218,6 +225,9 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("trend_max_offset:", trend_max_offset)
     print("pool_mode:", pool_mode)
     print("n_quantiles:", n_quantiles)
+    print("bypass_backbone:", bypass_backbone)
+    print("bypass_channels:", bypass_channels)
+    print("phase_fourier_bands:", phase_fourier_bands)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -238,6 +248,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         pool_mode=pool_mode,
         n_quantiles=n_quantiles,
         bypass_backbone=bypass_backbone,
+        bypass_channels=bypass_channels,
+        phase_fourier_bands=phase_fourier_bands,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
@@ -340,7 +352,15 @@ def load_event_stream(fn, means, stds):
 
 
 def build_context_input(
-    ctx_t, ctx_v, ctx_b, n_bands, device, window_mode=False, max_context_len=None
+    ctx_t,
+    ctx_v,
+    ctx_b,
+    n_bands,
+    device,
+    window_mode=False,
+    max_context_len=None,
+    phase_fourier_bands=0,
+    phase0=None,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -353,6 +373,12 @@ def build_context_input(
     Real events fill the leading rows in time order with ``rel_t`` relative to
     the first real event; padded rows are all-zero with ``valid = 0``. Matches
     ``_getitem_window`` in the dataset.
+
+    Absolute phase (``phase_fourier_bands > 0``): append one trailing scalar,
+    the anchor phase in days since the curve's first detection, computed as
+    ``ctx_t[-1] - phase0``. ``phase0`` is REQUIRED when the feature is enabled
+    (the curve's first-detection time in ``ctx_t``'s frame). This inference
+    path relativizes the stream (``times -= t0``), so ``phase0 = 0.0``.
     """
     ctx_t = np.asarray(ctx_t, dtype=np.float32)
     ctx_v = np.asarray(ctx_v, dtype=np.float32)
@@ -377,8 +403,19 @@ def build_context_input(
             axis=1,
         )
 
+    x_flat = per_event.reshape(-1)
+    if phase_fourier_bands > 0:
+        if phase0 is None:
+            raise ValueError(
+                "phase0 is required when phase_fourier_bands > 0; pass the "
+                "curve's first-detection time in ctx_t's frame (0.0 for this "
+                "relativized inference stream)."
+            )
+        phase = np.float32(ctx_t[-1] - phase0)
+        x_flat = np.concatenate([x_flat, np.array([phase], dtype=np.float32)])
+
     x = torch.tensor(
-        per_event.reshape(-1),
+        x_flat,
         dtype=torch.float32,
         device=device,
     ).unsqueeze(0)
@@ -431,6 +468,8 @@ def forecast_curve(
         device,
         window_mode=window_mode,
         max_context_len=max_context_len,
+        phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
+        phase0=0.0,  # stream relativized (times -= t0) -> first detection at 0
     )
 
     last_t = float(times[-1])
