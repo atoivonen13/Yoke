@@ -277,6 +277,31 @@ def main(args, rank, world_size, local_rank, device):
     N_QUANTILES = 1
     QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 
+    # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
+    # down-weights every residual > 0.1 -- i.e. exactly the large-residual tail
+    # that dominates RMSE, so the objective is close to L1/median while the
+    # metric is L2/mean. "mse" is the RMSE-optimal objective (targets the
+    # conditional mean); it is untested cleanly (the delta=1.0 trial was
+    # confounded by a smaller effective batch and is still not L2). Ignored when
+    # N_QUANTILES > 1 (the pinball loss is used instead). Recorded loss values
+    # are not comparable across loss types -- start an "mse" run as a fresh study.
+    LOSS_TYPE = "huber"  # "huber" | "mse"
+
+    # Global grad-norm clip applied before optimizer.step(). Huber(delta=0.1)
+    # implicitly bounded per-sample gradients; MSE does not, so its ~3-sigma
+    # outliers produce ~30x larger gradients and a single outlier-heavy batch can
+    # spike the update. Clipping the STEP (not the loss) keeps the objective
+    # mean-optimal while avoiding blow-ups. None disables it (legacy behavior).
+    GRAD_CLIP_NORM = 1.0
+
+    # Diagnostic baseline. When True, the frozen backbone is skipped in forward()
+    # and the tiled conditioner output feeds pooling+head directly, turning the
+    # trainable path into a pure MLP (conditioner -> pool -> head). Adds no params
+    # and changes no shapes, so checkpoints stay interchangeable with the full
+    # model. Run as a SEPARATE study (new studyIDX/rundir) to compare its RMSE
+    # against the full model -- if they match, the frozen backbone is dead weight.
+    BYPASS_BACKBONE = False
+
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
     # time Dt, so they can learn a real per-band decay curve instead of a flat
@@ -506,6 +531,7 @@ def main(args, rank, world_size, local_rank, device):
             trend_max_offset=TREND_MAX_OFFSET,
             pool_mode=POOL_MODE,
             n_quantiles=N_QUANTILES,
+            bypass_backbone=BYPASS_BACKBONE,
         ).to(device)
 
         # Stage 1: freeze pretrained LodeRunner, train only conditioner + output head
@@ -524,21 +550,22 @@ def main(args, rank, world_size, local_rank, device):
             **optimizer_kwargs,
         )
 
-    #loss_fn = nn.MSELoss(reduction="none")
-    # delta=0.1 to MATCH study 44's config (the RMSE-1.52 run). delta=1.0 was
-    # tried (row 64) and did NOT help -- RMSE 1.89 vs 44's 1.52 (confounded by a
-    # smaller effective batch, but no improvement to show for it). The phase-
-    # degeneracy diagnostic showed the dominant error is VARIANCE, not bias, so
-    # the loss delta is not the lever; reverting to the known-good baseline.
+    # Point loss selected by LOSS_TYPE (see config above). "mse" targets the
+    # conditional mean (RMSE-optimal); "huber" (delta=0.1) matches study 44 but
+    # down-weights the large-residual tail that dominates RMSE.
     #
-    # With a quantile head (N_QUANTILES > 1) the point Huber loss is replaced by
-    # the pinball loss over QUANTILE_LEVELS, which models that variance directly.
+    # With a quantile head (N_QUANTILES > 1) the point loss is replaced by the
+    # pinball loss over QUANTILE_LEVELS, which models the scatter directly.
     # PinballLoss collapses its quantile axis internally so the epoch/rollout
     # masking and reduction are unchanged.
     if N_QUANTILES > 1:
         loss_fn = PinballLoss(QUANTILE_LEVELS).to(device)
-    else:
+    elif LOSS_TYPE == "mse":
+        loss_fn = nn.MSELoss(reduction="none")
+    elif LOSS_TYPE == "huber":
         loss_fn = nn.HuberLoss(delta=0.1, reduction="none")
+    else:
+        raise ValueError(f"LOSS_TYPE must be 'huber' or 'mse', got {LOSS_TYPE!r}.")
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     #############################################
@@ -844,6 +871,7 @@ def main(args, rank, world_size, local_rank, device):
                 dt_weight_tau=DT_WEIGHT_TAU,
                 ema=ema,
                 train_diag_rcrd_filename=traindiag_rcrd_filename,
+                grad_clip_norm=GRAD_CLIP_NORM,
             )
         else:
             #train_DDP_loderunner_epoch(
@@ -865,6 +893,7 @@ def main(args, rank, world_size, local_rank, device):
                 world_size=world_size,
                 band_weights=BAND_WEIGHTS,
                 ema=ema,
+                grad_clip_norm=GRAD_CLIP_NORM,
             )
 
         print(f"[rank {rank}] finished epoch", flush=True)
@@ -918,6 +947,9 @@ def main(args, rank, world_size, local_rank, device):
                     "pool_mode": POOL_MODE,
                     "n_quantiles": N_QUANTILES,
                     "quantile_levels": list(QUANTILE_LEVELS),
+                    "loss_type": LOSS_TYPE,
+                    "grad_clip_norm": GRAD_CLIP_NORM,
+                    "bypass_backbone": BYPASS_BACKBONE,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
