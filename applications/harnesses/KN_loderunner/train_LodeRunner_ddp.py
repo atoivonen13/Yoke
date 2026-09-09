@@ -285,7 +285,7 @@ def main(args, rank, world_size, local_rank, device):
     # confounded by a smaller effective batch and is still not L2). Ignored when
     # N_QUANTILES > 1 (the pinball loss is used instead). Recorded loss values
     # are not comparable across loss types -- start an "mse" run as a fresh study.
-    LOSS_TYPE = "huber"  # "huber" | "mse"
+    LOSS_TYPE = "mse"  # "huber" | "mse"
 
     # Global grad-norm clip applied before optimizer.step(). Huber(delta=0.1)
     # implicitly bounded per-sample gradients; MSE does not, so its ~3-sigma
@@ -300,7 +300,7 @@ def main(args, rank, world_size, local_rank, device):
     # and changes no shapes, so checkpoints stay interchangeable with the full
     # model. Run as a SEPARATE study (new studyIDX/rundir) to compare its RMSE
     # against the full model -- if they match, the frozen backbone is dead weight.
-    BYPASS_BACKBONE = False
+    BYPASS_BACKBONE = True
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
@@ -370,8 +370,15 @@ def main(args, rank, world_size, local_rank, device):
     # the model real time evolution instead of a single dense night. Set these
     # from the plot_observation_histograms.py time-window sweep. Leave
     # CONTEXT_WINDOW_DAYS = None to use the legacy fixed-count context.
-    CONTEXT_WINDOW_DAYS = 2.0
-    MAX_CONTEXT_LEN = 12
+    # Lever 4 (context extent): widened from 2.0 d / 12 events. The window and
+    # the padded width MUST move together -- widening the window while
+    # MAX_CONTEXT_LEN stays low just keeps the most-recent events and DROPS the
+    # early rise (see sel_idx[-max_context_len:] in kilonova_dataset), which is
+    # the opposite of the intent. 5 d of history at up to 24 events lets the
+    # conditioner see light-curve shape/color evolution, the only signal that can
+    # break the viewing-angle / ejecta-mass degeneracy driving the RMSE floor.
+    CONTEXT_WINDOW_DAYS = 5.0
+    MAX_CONTEXT_LEN = 24
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
