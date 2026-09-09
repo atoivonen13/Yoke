@@ -171,7 +171,16 @@ def train_DDP_scalar_temporal_loderunner_datastep_9band(
 
     pred = model(x, in_vars, out_vars, Dt)
 
-    if pred.shape != target.shape:
+    # Point head: pred is [B, n_bands] and must match target exactly. Quantile
+    # head: pred is [B, n_quantiles, n_bands]; only the batch and band dims must
+    # match target (the loss collapses the quantile axis to [B, n_bands]).
+    if pred.dim() == 3:
+        shapes_ok = (
+            pred.shape[0] == target.shape[0] and pred.shape[2] == target.shape[1]
+        )
+    else:
+        shapes_ok = pred.shape == target.shape
+    if not shapes_ok:
         raise RuntimeError(
             f"Prediction and target shapes do not match: "
             f"pred.shape={pred.shape}, target.shape={target.shape}"
@@ -223,7 +232,15 @@ def eval_DDP_scalar_temporal_loderunner_datastep_9band(
     with torch.no_grad():
         pred = model(x, in_vars, out_vars, Dt)
 
-    if pred.shape != target.shape:
+    # Quantile head (pred [B, n_quantiles, n_bands]) only needs the batch/band
+    # dims to match target; the point head must match exactly.
+    if pred.dim() == 3:
+        shapes_ok = (
+            pred.shape[0] == target.shape[0] and pred.shape[2] == target.shape[1]
+        )
+    else:
+        shapes_ok = pred.shape == target.shape
+    if not shapes_ok:
         raise RuntimeError(
             "Prediction and target shapes do not match in eval datastep: "
             f"pred.shape={pred.shape}, target.shape={target.shape}"

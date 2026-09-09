@@ -167,12 +167,17 @@ def _batched_forward(
     """
     lead_times = np.asarray(lead_times, dtype=np.float32)
     out = np.zeros((lead_times.shape[0], N_BANDS), dtype=np.float32)
+    median_idx = getattr(model, "median_idx", 0)
     with torch.no_grad():
         for start in range(0, lead_times.shape[0], max_batch):
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
             Dt = torch.tensor(chunk, dtype=torch.float32, device=device)
             pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
+            # Quantile head returns [B, n_quantiles, N_BANDS]; take the median as
+            # the point forecast. Point head returns [B, N_BANDS] (no-op).
+            if pred.dim() == 3:
+                pred = pred[:, median_idx, :]
             out[start : start + chunk.shape[0]] = (
                 pred.reshape(chunk.shape[0], N_BANDS).detach().cpu().numpy()
             )
@@ -253,13 +258,12 @@ def _rollout_scored(
                 # Non-increasing time; skip feeding but still score at a tiny dt.
                 dt = max(dt, 1e-3)
             Dt = torch.tensor([dt], dtype=torch.float32, device=device)
-            pred_all = (
-                model(x, in_vars=None, out_vars=None, Dt=Dt)
-                .reshape(N_BANDS)
-                .detach()
-                .cpu()
-                .numpy()
-            )
+            pred_t = model(x, in_vars=None, out_vars=None, Dt=Dt)
+            # Quantile head returns [B, n_quantiles, N_BANDS]; take the median as
+            # the point forecast. Point head returns [B, N_BANDS] (no-op).
+            if pred_t.dim() == 3:
+                pred_t = pred_t[:, getattr(model, "median_idx", 0), :]
+            pred_all = pred_t.reshape(N_BANDS).detach().cpu().numpy()
             band = int(target_b[k])
             pred_norm = float(pred_all[band])
             pred_mag = pred_norm * (stds[band] + EPS) + means[band]

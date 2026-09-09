@@ -229,6 +229,9 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     # "meanstdmax" head triples the pooled width (3 * backbone_channels), so this
     # MUST match the training config or the strict load fails on output_head.0.
     pool_mode = ckpt.get("pool_mode", "mean")
+    # 1 for legacy checkpoints (no key) -> point head. > 1 rebuilds the wider
+    # quantile head; the median is extracted downstream as the point forecast.
+    n_quantiles = ckpt.get("n_quantiles", 1)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -246,6 +249,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("trend_decay_anchor:", trend_decay_anchor)
     print("trend_max_offset:", trend_max_offset)
     print("pool_mode:", pool_mode)
+    print("n_quantiles:", n_quantiles)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -264,6 +268,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         trend_slope_k=trend_slope_k,
         trend_max_offset=trend_max_offset,
         pool_mode=pool_mode,
+        n_quantiles=n_quantiles,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
@@ -424,12 +429,17 @@ def _batched_forward(model, x, lead_times, n_bands, device, max_batch=256):
     """
     lead_times = np.asarray(lead_times, dtype=np.float32)
     out = np.zeros((lead_times.shape[0], n_bands), dtype=np.float32)
+    median_idx = getattr(model, "median_idx", 0)
     with torch.no_grad():
         for start in range(0, lead_times.shape[0], max_batch):
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
             Dt = torch.tensor(chunk, dtype=torch.float32, device=device)
             pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
+            # Quantile head returns [B, n_quantiles, n_bands]; take the median as
+            # the point forecast. Point head returns [B, n_bands] (no-op).
+            if pred.dim() == 3:
+                pred = pred[:, median_idx, :]
             out[start : start + chunk.shape[0]] = (
                 pred.reshape(chunk.shape[0], n_bands).detach().cpu().numpy()
             )
@@ -567,6 +577,10 @@ def get_rollout_from_stream(
             )
 
             pred_all = model(x, in_vars=None, out_vars=None, Dt=Dt)
+            # Quantile head returns [B, n_quantiles, n_bands]; take the median as
+            # the point forecast. Point head returns [B, n_bands] (no-op).
+            if pred_all.dim() == 3:
+                pred_all = pred_all[:, getattr(model, "median_idx", 0), :]
             pred_all = pred_all.reshape(n_bands).detach().cpu().numpy()
 
             # The model predicts every band at this lead time, including bands

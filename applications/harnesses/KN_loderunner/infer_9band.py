@@ -200,6 +200,9 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     # saved output_head first-layer shape. "meanstdmax" triples the pooled width,
     # so this MUST match the training config or the strict load fails.
     pool_mode = ckpt.get("pool_mode", "mean")
+    # 1 for legacy checkpoints (no key) -> point head. > 1 rebuilds the wider
+    # quantile head; the median is the point forecast extracted downstream.
+    n_quantiles = ckpt.get("n_quantiles", 1)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -213,6 +216,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("trend_decay_anchor:", trend_decay_anchor)
     print("trend_max_offset:", trend_max_offset)
     print("pool_mode:", pool_mode)
+    print("n_quantiles:", n_quantiles)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -231,6 +235,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         trend_slope_k=trend_slope_k,
         trend_max_offset=trend_max_offset,
         pool_mode=pool_mode,
+        n_quantiles=n_quantiles,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
@@ -430,10 +435,16 @@ def forecast_curve(
 
     preds_norm = np.zeros((len(lead_times), n_bands), dtype=np.float32)
 
+    median_idx = getattr(model, "median_idx", 0)
+
     with torch.no_grad():
         for k, dt in enumerate(lead_times):
             Dt = torch.tensor([dt], dtype=torch.float32, device=device)
             pred = model(x, in_vars=None, out_vars=None, Dt=Dt)
+            # Quantile head returns [B, n_quantiles, n_bands]; take the median as
+            # the point forecast. Point head returns [B, n_bands] (no-op).
+            if pred.dim() == 3:
+                pred = pred[:, median_idx, :]
             preds_norm[k] = pred.reshape(n_bands).detach().cpu().numpy()
 
     # Denormalize per band back to magnitudes.

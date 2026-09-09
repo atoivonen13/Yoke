@@ -23,6 +23,7 @@ from yoke.datasets.kilonova_dataset import (
 from yoke.utils.training.epoch.loderunner import (
     train_DDP_scalar_temporal_loderunner_epoch_9band,
     train_DDP_scalar_temporal_loderunner_epoch_9band_rollout,
+    PinballLoss,
 )
 from yoke.utils.ema import ParamEMA
 from yoke.utils.restart import continuation_setup
@@ -263,6 +264,19 @@ def main(args, rank, world_size, local_rank, device):
     # the checkpoint so the cycle_epochs=1 restarts rebuild the matching head.
     POOL_MODE = "meanstdmax"
 
+    # Quantile (probabilistic) output head. When 1 (default) the model is a point
+    # regressor trained with Huber loss -- byte-identical to old checkpoints. When
+    # > 1 the head predicts QUANTILE_LEVELS per band (monotone via cumulative
+    # softplus), trained with the pinball loss; the median is the point forecast
+    # and the outer quantiles express the irreducible per-band scatter (viewing
+    # angle / ejecta-mass spread that a short early-time context cannot resolve).
+    # This CHANGES the output_head's LAST-layer width, so it is NOT compatible
+    # with a point checkpoint; start it as a fresh (epoch-0) study. Both the count
+    # and the levels round-trip via the checkpoint so cycle_epochs=1 restarts and
+    # eval loaders rebuild the matching head and loss.
+    N_QUANTILES = 1
+    QUANTILE_LEVELS = (0.1, 0.5, 0.9)
+
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
     # time Dt, so they can learn a real per-band decay curve instead of a flat
@@ -491,6 +505,7 @@ def main(args, rank, world_size, local_rank, device):
             trend_slope_k=TREND_SLOPE_K,
             trend_max_offset=TREND_MAX_OFFSET,
             pool_mode=POOL_MODE,
+            n_quantiles=N_QUANTILES,
         ).to(device)
 
         # Stage 1: freeze pretrained LodeRunner, train only conditioner + output head
@@ -515,7 +530,15 @@ def main(args, rank, world_size, local_rank, device):
     # smaller effective batch, but no improvement to show for it). The phase-
     # degeneracy diagnostic showed the dominant error is VARIANCE, not bias, so
     # the loss delta is not the lever; reverting to the known-good baseline.
-    loss_fn = nn.HuberLoss(delta=0.1, reduction="none")
+    #
+    # With a quantile head (N_QUANTILES > 1) the point Huber loss is replaced by
+    # the pinball loss over QUANTILE_LEVELS, which models that variance directly.
+    # PinballLoss collapses its quantile axis internally so the epoch/rollout
+    # masking and reduction are unchanged.
+    if N_QUANTILES > 1:
+        loss_fn = PinballLoss(QUANTILE_LEVELS).to(device)
+    else:
+        loss_fn = nn.HuberLoss(delta=0.1, reduction="none")
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     #############################################
@@ -893,6 +916,8 @@ def main(args, rank, world_size, local_rank, device):
                     "trend_slope_k": TREND_SLOPE_K,
                     "trend_max_offset": TREND_MAX_OFFSET,
                     "pool_mode": POOL_MODE,
+                    "n_quantiles": N_QUANTILES,
+                    "quantile_levels": list(QUANTILE_LEVELS),
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
