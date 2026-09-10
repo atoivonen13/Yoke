@@ -1023,21 +1023,40 @@ def _rollout_pass_9band_window(
         # Trailing W-day window is a contiguous suffix of the sorted buffer.
         real_mask = pos < count.unsqueeze(1)  # [B, C]
         ge_mask = buf_t >= lo.unsqueeze(1)  # [B, C]
-        n_in_window = (real_mask & ge_mask).sum(dim=1)  # [B]
-        win_len = torch.clamp(n_in_window, max=M)  # [B]
-        start = count - win_len  # [B]
+        n_in_window = (real_mask & ge_mask).sum(dim=1)  # [B] qualifying count
+        win_len = torch.clamp(n_in_window, max=M)  # [B] real outputs kept
+        # First (earliest) in-window index per row. When n_in_window > M we
+        # subsample by index instead of dropping the rise, so the window is NOT a
+        # contiguous suffix of length M -- it starts at the earliest qualifying
+        # event and keeps M spread positions ending at the anchor.
+        start0 = count - n_in_window  # [B]
+
+        # Local positions [0, M) within the qualifying run to keep. Vectorized
+        # twin of window_select_positions (yoke.utils.context_selection): pure
+        # integer round-half-up linspace when subsampling, else the contiguous
+        # arange -- bit-identical to the numpy helper the dataset/eval use.
+        Mm1 = M - 1
+        if Mm1 == 0:
+            local_pos = (n_in_window - 1).clamp(min=0).unsqueeze(1).expand(B, M)
+        else:
+            n1 = (n_in_window - 1).clamp(min=0).unsqueeze(1)  # [B, 1]
+            lin_pos = (out_pos * n1 + (Mm1 // 2)) // Mm1  # [B, M] round-half-up
+            contig_pos = out_pos.expand(B, M)  # [B, M]
+            subsample = (n_in_window.unsqueeze(1) > M)  # [B, 1]
+            local_pos = torch.where(subsample, lin_pos, contig_pos)  # [B, M]
 
         # Source buffer index for each padded output position p in [0, M).
-        src_idx = start.unsqueeze(1) + out_pos  # [B, M]
+        src_idx = start0.unsqueeze(1) + local_pos  # [B, M]
         valid_out = out_pos < win_len.unsqueeze(1)  # [B, M] bool
-        src_idx_c = src_idx.clamp(max=C - 1)
+        src_idx_c = src_idx.clamp(min=0, max=C - 1)
 
         gathered_v = buf_v.gather(1, src_idx_c)  # [B, M]
         gathered_t = buf_t.gather(1, src_idx_c)  # [B, M]
         gathered_b = buf_b.gather(1, src_idx_c)  # [B, M]
 
-        # rel_t relative to the window's first real event (buf_t[start]).
-        first_t = buf_t.gather(1, start.clamp(max=C - 1).unsqueeze(1))  # [B, 1]
+        # rel_t relative to the first SELECTED event (local position 0 == the
+        # earliest in-window event, buf_t[start0]).
+        first_t = buf_t.gather(1, start0.clamp(min=0, max=C - 1).unsqueeze(1))
         rel_t = gathered_t - first_t  # [B, M]
 
         valid_f = valid_out.to(buf_v.dtype)  # [B, M]

@@ -34,6 +34,7 @@ from yoke.datasets.kilonova_dataset import (
     NINE_BAND_KEYS,
     load_or_compute_band_normalization,
 )
+from yoke.utils.context_selection import window_select_positions
 from yoke.utils.ema import ParamEMA
 
 
@@ -449,8 +450,9 @@ def forecast_curve(
         anchor_t = times[-1]
         lo = anchor_t - context_window_days
         sel_idx = np.nonzero(times >= lo)[0]
-        if sel_idx.shape[0] > max_context_len:
-            sel_idx = sel_idx[-max_context_len:]
+        # Anchor-pinned subsample (earliest + anchor always kept) when the window
+        # over-fills M -- matches window_select_positions in the dataset/training.
+        sel_idx = sel_idx[window_select_positions(sel_idx.shape[0], max_context_len)]
         ctx_t = times[sel_idx]
         ctx_v = values_norm[sel_idx]
         ctx_b = bands[sel_idx]
