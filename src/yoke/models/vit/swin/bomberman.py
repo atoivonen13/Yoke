@@ -746,8 +746,14 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # the model without it (no scalar appended to x, no slice in forward).
         self.phase_fourier_bands = phase_fourier_bands
         if phase_fourier_bands > 0:
+            # Min period 0.3 d (was 1.0): the fast early decline (esp. the blue
+            # bands, where the residual is now variance-dominated) evolves on
+            # sub-day timescales, so the encoding needs a band short enough to
+            # resolve it. Max stays 200 d (full curve length). phase_freqs is a
+            # persistent buffer, so old checkpoints restore their own trained
+            # frequencies on strict load -- this bound only affects fresh studies.
             phase_periods = torch.logspace(
-                math.log10(1.0), math.log10(200.0), phase_fourier_bands
+                math.log10(0.3), math.log10(200.0), phase_fourier_bands
             )
             self.register_buffer("phase_freqs", 2.0 * math.pi / phase_periods)
             # 2 * bands (sin + cos) + 1 monotone log1p(phase) channel.
