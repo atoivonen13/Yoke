@@ -337,7 +337,13 @@ def main(args, rank, world_size, local_rank, device):
     # site (dataset, rollout, eval). Widens the conditioner first-layer -> fresh
     # study; round-trips via the "phase_fourier_bands" checkpoint key. Requires
     # window mode (needs a well-defined anchor). 0 -> legacy (byte-identical).
-    PHASE_FOURIER_BANDS = 6
+    # Bumped 6 -> 10 (study 074 -> next): phase was the lever with clear traction
+    # (074 = 1.90 RMSE, new best, biases well-controlled), so give the encoding
+    # finer phase resolution. More bands = more log-spaced periods over 1-200 d,
+    # so the conditioner can distinguish nearby phases (esp. the fast early
+    # decline where the blue-band residual still lives). Widens the conditioner
+    # first-layer -> fresh study; round-trips via the checkpoint key.
+    PHASE_FOURIER_BANDS = 10
 
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
