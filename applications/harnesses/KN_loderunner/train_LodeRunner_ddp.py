@@ -279,7 +279,16 @@ def main(args, rank, world_size, local_rank, device):
     # with a point checkpoint; start it as a fresh (epoch-0) study. Both the count
     # and the levels round-trip via the checkpoint so cycle_epochs=1 restarts and
     # eval loaders rebuild the matching head and loss.
-    N_QUANTILES = 1
+    # Study 079: quantiles ON as a diagnostic. The rising/fading residual split on
+    # 075 showed the late-time error is ~86% variance in the fading bulk (bias only
+    # -0.27), i.e. a variance floor a short context cannot resolve. The 0.1/0.9
+    # bands quantify that floor. NOTE: the median (q=0.5) is trained by the q=0.5
+    # pinball term = 0.5*|e| -> it targets the conditional MEDIAN (L1), not the
+    # mean (L2), so the reported point-forecast RMSE is expected to shift vs 075's
+    # 1.84 (MAE should improve). This run is NOT RMSE-comparable to 075 by design.
+    # Fresh study: the head's last-layer width changes with N_QUANTILES, so start
+    # at epoch 0 -- do NOT restart from a point (N_QUANTILES=1) checkpoint.
+    N_QUANTILES = 3
     QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
