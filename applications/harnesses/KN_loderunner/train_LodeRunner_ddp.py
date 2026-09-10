@@ -413,10 +413,17 @@ def main(args, rank, world_size, local_rank, device):
     # but restores the 2 d / 12 event context. If RMSE drops below 2.08, the
     # window widening was the culprit, not bypass. The window and the padded width
     # MUST move together -- widening the window while MAX_CONTEXT_LEN stays low
-    # just keeps the most-recent events and DROPS the early rise (see
-    # sel_idx[-max_context_len:] in kilonova_dataset), the opposite of the intent.
-    CONTEXT_WINDOW_DAYS = 2.0
-    MAX_CONTEXT_LEN = 12
+    # just keeps the most-recent events and DROPS the early rise, the opposite of
+    # the intent. The anchor-pinned subsample (window_select_positions) now keeps
+    # the earliest in-window event and the anchor when the window over-fills, so a
+    # WIDE window no longer drops the rise. Study 077 showed the subsample LOSES at
+    # 2 d/12 (2.11 vs 075's 1.84) -- narrow windows have no distant rise to rescue,
+    # so spreading events only dilutes recent sampling. This run (078) tests the
+    # subsample where it is meant to help: a 5 d/24 window, vs 072's wide+legacy
+    # (2.25). Beats 075 -> new champion; beats 072 but not 075 -> narrow-legacy
+    # wins, drop the wide idea; loses to 072 -> revert the subsample entirely.
+    CONTEXT_WINDOW_DAYS = 5.0
+    MAX_CONTEXT_LEN = 24
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
