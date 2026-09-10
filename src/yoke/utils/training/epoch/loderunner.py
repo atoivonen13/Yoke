@@ -1025,25 +1025,16 @@ def _rollout_pass_9band_window(
         ge_mask = buf_t >= lo.unsqueeze(1)  # [B, C]
         n_in_window = (real_mask & ge_mask).sum(dim=1)  # [B] qualifying count
         win_len = torch.clamp(n_in_window, max=M)  # [B] real outputs kept
-        # First (earliest) in-window index per row. When n_in_window > M we
-        # subsample by index instead of dropping the rise, so the window is NOT a
-        # contiguous suffix of length M -- it starts at the earliest qualifying
-        # event and keeps M spread positions ending at the anchor.
-        start0 = count - n_in_window  # [B]
-
-        # Local positions [0, M) within the qualifying run to keep. Vectorized
-        # twin of window_select_positions (yoke.utils.context_selection): pure
-        # integer round-half-up linspace when subsampling, else the contiguous
-        # arange -- bit-identical to the numpy helper the dataset/eval use.
-        Mm1 = M - 1
-        if Mm1 == 0:
-            local_pos = (n_in_window - 1).clamp(min=0).unsqueeze(1).expand(B, M)
-        else:
-            n1 = (n_in_window - 1).clamp(min=0).unsqueeze(1)  # [B, 1]
-            lin_pos = (out_pos * n1 + (Mm1 // 2)) // Mm1  # [B, M] round-half-up
-            contig_pos = out_pos.expand(B, M)  # [B, M]
-            subsample = (n_in_window.unsqueeze(1) > M)  # [B, 1]
-            local_pos = torch.where(subsample, lin_pos, contig_pos)  # [B, M]
+        # Legacy trailing selection (batched twin of window_select_positions,
+        # which reverted to sel_idx[-M:] -- studies 077/078 showed the spread
+        # subsample loses at every window). The kept events are the contiguous
+        # most-recent win_len suffix: start at count - win_len, take a contiguous
+        # arange. Bit-identical to the numpy helper the dataset/eval use. (The
+        # anchor-pinned linspace is preserved commented in the helper; if it is
+        # re-enabled, restore the start0 = count - n_in_window + torch.where math
+        # here to match.)
+        start0 = count - win_len  # [B] first kept index (most-recent suffix)
+        local_pos = out_pos.expand(B, M)  # [B, M] contiguous
 
         # Source buffer index for each padded output position p in [0, M).
         src_idx = start0.unsqueeze(1) + local_pos  # [B, M]
@@ -1054,8 +1045,9 @@ def _rollout_pass_9band_window(
         gathered_t = buf_t.gather(1, src_idx_c)  # [B, M]
         gathered_b = buf_b.gather(1, src_idx_c)  # [B, M]
 
-        # rel_t relative to the first SELECTED event (local position 0 == the
-        # earliest in-window event, buf_t[start0]).
+        # rel_t relative to the first SELECTED event (local position 0 ==
+        # buf_t[start0], the first of the most-recent win_len suffix -- matches
+        # the numpy path's ctx_t[0]).
         first_t = buf_t.gather(1, start0.clamp(min=0, max=C - 1).unsqueeze(1))
         rel_t = gathered_t - first_t  # [B, M]
 
