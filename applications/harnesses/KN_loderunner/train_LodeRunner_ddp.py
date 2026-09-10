@@ -335,7 +335,15 @@ def main(args, rank, world_size, local_rank, device):
     # needs exactly backbone_channels). None -> waist == backbone_channels (legacy
     # width). Changes conditioner/head shapes -> fresh study; round-trips via the
     # "bypass_channels" checkpoint key.
-    BYPASS_CHANNELS = 32
+    #
+    # MUST be None for study 081 (BYPASS_BACKBONE=False): the non-bypass path feeds
+    # the frozen backbone, which needs exactly backbone_channels=8, so the model
+    # rejects a decoupled waist (bomberman.py raises on channels-set + bypass-off).
+    # This means 081's trainable waist is 8, not the 32 that 080 used -- so 081 is
+    # NOT a clean bypass-vs-nonbypass A/B (it also narrows the waist). It answers
+    # "does the frozen backbone help at the width it requires?", which is the
+    # relevant question, but keep the confound in mind reading the result.
+    BYPASS_CHANNELS = None
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
