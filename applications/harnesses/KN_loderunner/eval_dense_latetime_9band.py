@@ -146,6 +146,7 @@ def _batched_forward(
     lead_times: np.ndarray,
     device: torch.device,
     max_batch: int = 256,
+    return_quantiles: bool = False,
 ) -> np.ndarray:
     """Predict all bands for many lead times in one (chunked) forward pass.
 
@@ -161,27 +162,37 @@ def _batched_forward(
         lead_times (np.ndarray): 1-D array of lead times (days).
         device (torch.device): Device to run on.
         max_batch (int): Maximum lead times evaluated per forward pass.
+        return_quantiles (bool): When True and the model has a quantile head,
+            return the FULL quantile axis [len(lead_times), n_quantiles, N_BANDS]
+            instead of collapsing to the median. For a point head the axis is
+            length 1. Used by the DIRECT scoring path to emit 0.1/0.9 bands; the
+            curve sweep and rollout leave it False (median point forecast).
 
     Returns:
-        np.ndarray: Predictions of shape [len(lead_times), N_BANDS] (normalized).
+        np.ndarray: Normalized predictions, shape [len(lead_times), N_BANDS] when
+        ``return_quantiles`` is False, else [len(lead_times), Q, N_BANDS].
     """
     lead_times = np.asarray(lead_times, dtype=np.float32)
-    out = np.zeros((lead_times.shape[0], N_BANDS), dtype=np.float32)
     median_idx = getattr(model, "median_idx", 0)
+    chunks = []
     with torch.no_grad():
         for start in range(0, lead_times.shape[0], max_batch):
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
             Dt = torch.tensor(chunk, dtype=torch.float32, device=device)
             pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
-            # Quantile head returns [B, n_quantiles, N_BANDS]; take the median as
-            # the point forecast. Point head returns [B, N_BANDS] (no-op).
-            if pred.dim() == 3:
-                pred = pred[:, median_idx, :]
-            out[start : start + chunk.shape[0]] = (
-                pred.reshape(chunk.shape[0], N_BANDS).detach().cpu().numpy()
-            )
-    return out
+            # Quantile head returns [B, n_quantiles, N_BANDS]; point head returns
+            # [B, N_BANDS]. Normalize to a quantile axis of length >= 1 so the two
+            # heads share one code path.
+            if pred.dim() == 2:
+                pred = pred.unsqueeze(1)  # [B, 1, N_BANDS]
+            if not return_quantiles:
+                pred = pred[:, median_idx : median_idx + 1, :]  # keep median only
+            chunks.append(pred.detach().cpu().numpy())
+    out = np.concatenate(chunks, axis=0)  # [P, Q_or_1, N_BANDS]
+    if not return_quantiles:
+        return out[:, 0, :]  # [P, N_BANDS] -- unchanged contract for callers
+    return out  # [P, Q, N_BANDS]
 
 
 def _rollout_scored(
@@ -415,11 +426,21 @@ def eval_object(
             max_context_len=max_context_len,
         )
     else:
-        pred_scored = _batched_forward(model, x, lead_times, device)  # [P, N_BANDS]
+        # Keep the full quantile axis so the 0.1/0.9 bands can be scored/plotted.
+        # For a point head Q == 1 and low/high collapse to the median (no-op).
+        pred_q = _batched_forward(
+            model, x, lead_times, device, return_quantiles=True
+        )  # [P, Q, N_BANDS]
+        median_idx = getattr(model, "median_idx", 0)
+        n_q = pred_q.shape[1]
+        low_idx, high_idx = 0, n_q - 1  # outer quantiles (== median when Q == 1)
         scored = []
         for j, idx in enumerate(late_idx):
             band = int(d_b[idx])
-            pred_mag = float(pred_scored[j, band] * (stds[band] + EPS) + means[band])
+            sb = stds[band] + EPS
+            pred_mag = float(pred_q[j, median_idx, band] * sb + means[band])
+            pred_low = float(pred_q[j, low_idx, band] * sb + means[band])
+            pred_high = float(pred_q[j, high_idx, band] * sb + means[band])
             true_mag = float(d_v[idx])
             scored.append(
                 {
@@ -427,6 +448,8 @@ def eval_object(
                     "lead_time": float(lead_times[j]),
                     "band": band,
                     "pred_mag": pred_mag,
+                    "pred_low": pred_low,
+                    "pred_high": pred_high,
                     "true_mag": true_mag,
                     "residual_mag": pred_mag - true_mag,
                 }
@@ -437,8 +460,17 @@ def eval_object(
     # single batched forward pass.
     max_dt = float(lead_times.max())
     lead_grid = np.linspace(0.0, max_dt, 60).astype(np.float32)
-    curve = _batched_forward(model, x, lead_grid, device)  # [60, N_BANDS]
+    curve_q = _batched_forward(
+        model, x, lead_grid, device, return_quantiles=True
+    )  # [60, Q, N_BANDS]
+    median_idx = getattr(model, "median_idx", 0)
+    n_q = curve_q.shape[1]
+    curve = curve_q[:, median_idx, :]  # [60, N_BANDS] median point forecast
     curve_mag = curve * (stds[None, :] + EPS) + means[None, :]
+    # Outer-quantile curves for the shaded uncertainty band (== median when Q==1,
+    # so the band has zero width for a point head and nothing is drawn).
+    curve_low_mag = curve_q[:, 0, :] * (stds[None, :] + EPS) + means[None, :]
+    curve_high_mag = curve_q[:, n_q - 1, :] * (stds[None, :] + EPS) + means[None, :]
 
     # Optional uniform-grid "true curve" for plotting, phase-aligned to the same
     # t0 (first realistic detection) so it overlays in the same frame. Never
@@ -457,6 +489,8 @@ def eval_object(
         "last_real_t": last_real_t,
         "curve_phase": (last_real_t - t0) + lead_grid,
         "curve_mag": curve_mag.astype(np.float32),
+        "curve_low_mag": curve_low_mag.astype(np.float32),
+        "curve_high_mag": curve_high_mag.astype(np.float32),
         # Only the pre-cutoff realistic detections were shown to the model, so
         # plot those as the context (not the full realistic stream).
         "real": (r_t_ctx - t0, r_v_ctx, r_b_ctx),
@@ -506,6 +540,20 @@ def plot_object(result, stem, outpath):
             ax.scatter(
                 r_ph[rm], r_v[rm], s=26, c=BAND_COLORS[b],
                 edgecolor="k", linewidth=0.4, label="realistic ctx",
+            )
+        # Shaded quantile band (0.1-0.9) when the model has a quantile head. For a
+        # point head low == high == median, so skip drawing a zero-width band.
+        c_low = result.get("curve_low_mag")
+        c_high = result.get("curve_high_mag")
+        if (
+            c_low is not None
+            and c_high is not None
+            and np.any(np.abs(c_high[:, b] - c_low[:, b]) > 1e-6)
+        ):
+            ax.fill_between(
+                result["curve_phase"], c_low[:, b], c_high[:, b],
+                color=BAND_COLORS[b], alpha=0.2, linewidth=0,
+                label="forecast 0.1-0.9",
             )
         ax.plot(
             result["curve_phase"], result["curve_mag"][:, b],
@@ -780,12 +828,17 @@ def main():
         w = csv.writer(fh)
         w.writerow(
             ["stem", "band", "phase_days", "lead_time_days",
-             "pred_mag", "true_mag", "residual_mag"]
+             "pred_mag", "pred_low", "pred_high", "true_mag", "residual_mag"]
         )
         for s in all_scored:
+            # pred_low/high present only on the DIRECT quantile path; fall back to
+            # the point forecast (rollout path, or a point head) so the columns are
+            # always populated.
             w.writerow([
                 s["stem"], BAND_NAMES[s["band"]], f"{s['phase']:.4f}",
                 f"{s['lead_time']:.4f}", f"{s['pred_mag']:.4f}",
+                f"{s.get('pred_low', s['pred_mag']):.4f}",
+                f"{s.get('pred_high', s['pred_mag']):.4f}",
                 f"{s['true_mag']:.4f}", f"{s['residual_mag']:.4f}",
             ])
 
