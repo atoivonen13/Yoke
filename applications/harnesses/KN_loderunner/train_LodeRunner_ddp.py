@@ -314,7 +314,16 @@ def main(args, rank, world_size, local_rank, device):
     # and changes no shapes, so checkpoints stay interchangeable with the full
     # model. Run as a SEPARATE study (new studyIDX/rundir) to compare its RMSE
     # against the full model -- if they match, the frozen backbone is dead weight.
-    BYPASS_BACKBONE = True
+    # Study 081: backbone ON (un-bypassed), still frozen. The train==test result
+    # (train 1.869 vs test 1.858, no gap) proved the model is not data-limited;
+    # this run tests whether routing the conditioner output THROUGH the frozen
+    # Swin backbone (vs the pure-MLP bypass path that produced 071-080) changes
+    # RMSE. If it matches ~1.86, the frozen backbone is confirmed dead weight on
+    # the current quantile+phase architecture and the only remaining capacity
+    # lever is UNFREEZING it (a separate, larger study). Requires BYPASS_CHANNELS
+    # = None: the non-bypass path feeds the backbone, which needs exactly
+    # backbone_channels=8, so the model rejects a decoupled waist here.
+    BYPASS_BACKBONE = False
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
