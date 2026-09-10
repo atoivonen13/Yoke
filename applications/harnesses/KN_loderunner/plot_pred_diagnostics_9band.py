@@ -46,6 +46,7 @@ from yoke.datasets.kilonova_dataset import (
     Kilonova_lc_scalar_context_DataSet_9band,
     load_or_compute_band_normalization,
 )
+from yoke.utils.context_selection import window_select_positions
 from yoke.utils.ema import ParamEMA
 
 
@@ -497,8 +498,9 @@ def _select_window(ctx_t, ctx_v, ctx_b, context_window_days, max_context_len):
     anchor_t = ct[-1]
     lo = anchor_t - context_window_days
     sel_idx = np.nonzero(ct >= lo)[0]
-    if sel_idx.shape[0] > max_context_len:
-        sel_idx = sel_idx[-max_context_len:]
+    # Anchor-pinned subsample (earliest + anchor always kept) when the window
+    # over-fills M -- matches window_select_positions in the dataset/training.
+    sel_idx = sel_idx[window_select_positions(sel_idx.shape[0], max_context_len)]
 
     return (
         list(cv[sel_idx]),

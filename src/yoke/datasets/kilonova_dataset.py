@@ -17,6 +17,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from yoke.utils.context_selection import window_select_positions
+
 
 EPS = 1e-6
 
@@ -850,8 +852,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         prior_t = times[: anchor_idx + 1]
         in_window = prior_t >= lo
         sel_idx = np.nonzero(in_window)[0]
-        if sel_idx.shape[0] > self.max_context_len:
-            sel_idx = sel_idx[-self.max_context_len:]
+        # Keep a temporally-spread subset (earliest + anchor always retained)
+        # when the window over-fills M, instead of dropping the early rise.
+        sel_idx = sel_idx[
+            window_select_positions(sel_idx.shape[0], self.max_context_len)
+        ]
 
         ctx_t = times[sel_idx]
         ctx_v = values[sel_idx]
@@ -1039,8 +1044,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         prior_t = times[:target_idx]
         in_window = prior_t >= lo
         sel_idx = np.nonzero(in_window)[0]
-        if sel_idx.shape[0] > self.max_context_len:
-            sel_idx = sel_idx[-self.max_context_len:]
+        # Same anchor-pinned subsample as _getitem_window (earliest + anchor
+        # always kept) so the rollout seed matches the single-step context.
+        sel_idx = sel_idx[
+            window_select_positions(sel_idx.shape[0], self.max_context_len)
+        ]
 
         n_real = sel_idx.shape[0]
 
