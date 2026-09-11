@@ -5,6 +5,11 @@ to the Yoke framework. They are designed to work seamlessly with the Yoke traini
 evaluation processes, ensuring that model states can be saved and restored effectively.
 """
 
+import os
+import glob
+import shutil
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -43,20 +48,67 @@ def backbone_tail_modules(model: torch.nn.Module) -> list:
     ]
 
 
+def backbone_decoder_modules(model: torch.nn.Module) -> list:
+    """Full decoder + bottleneck of the wrapped Swin U-Net backbone.
+
+    A superset of :func:`backbone_tail_modules`: every parameter-bearing module on
+    the backbone's UP path plus the bottleneck -- ``bottleneck_stage4``, the three
+    UP SwinEncoder stages (``up_stage1/2/3``), every skip-connection receptor
+    (``up_connect``), every ``PatchExpand``, and ``backbone.linear4unpatch``. Under
+    the default ``block_structure=(1,1,3,1)`` the ``up_stage2`` / ``up_stage3``
+    loops are empty, so this reduces to bottleneck(1) + up_stage1(2) + up_connect(3)
+    + PatchExpand(3) + linear4unpatch. The lists are iterated (not indexed ``[-1]``)
+    so the selection is correct for any ``block_structure``.
+
+    The ENCODER stays frozen -- ``parallel_embed``, ``var_embed_layer``,
+    ``agg_vars``, ``pos_embed``, ``temporal_encoding``, ``dwn_stage1/2/3``,
+    ``down_connect``, and ``PatchMerge`` are the shared feature extractor reused,
+    unchanged, across downstream multiphysics applications. This is the "decoder"
+    fine-tune scope: freeze the shared encoder, adapt the per-task decoder.
+
+    Args:
+        model (torch.nn.Module): A ScalarTemporalConditionedLodeRunner_9band whose
+            ``.backbone`` is a LodeRunner (has ``.unet`` and ``.linear4unpatch``).
+
+    Returns:
+        list: The submodules constituting the bottleneck + decoder.
+    """
+    unet = model.backbone.unet
+    return [
+        *unet.bottleneck_stage4,
+        *unet.up_stage1,
+        *unet.up_stage2,
+        *unet.up_stage3,
+        *unet.up_connect,
+        *unet.PatchExpand,
+        model.backbone.linear4unpatch,
+    ]
+
+
 def build_finetune_optimizer(
     model: torch.nn.Module,
     optimizer_kwargs: dict,
     backbone_tail_lr_mult: float = 0.0,
+    backbone_finetune_scope: str = "tail",
     verbose: bool = False,
 ) -> tuple:
     """Freeze the backbone, set trainable params, and build the AdamW optimizer.
 
     Always trains ``conditioner`` + ``output_head``. When
-    ``backbone_tail_lr_mult > 0`` it additionally unfreezes the decoder tail
-    (:func:`backbone_tail_modules`) and puts it in a SECOND optimizer param group
-    at ``base_lr * backbone_tail_lr_mult`` -- discriminative fine-tuning of the
-    pretrained weights. When ``0`` (default) the whole backbone stays frozen and a
-    single-group optimizer is built, byte-identical to the legacy frozen regime.
+    ``backbone_tail_lr_mult > 0`` it additionally unfreezes a subset of the
+    pretrained backbone -- selected by ``backbone_finetune_scope`` -- and puts it in
+    a SECOND optimizer param group at ``base_lr * backbone_tail_lr_mult``
+    (discriminative fine-tuning). When ``0`` (default) the whole backbone stays
+    frozen and a single-group optimizer is built, byte-identical to the legacy
+    frozen regime.
+
+    ``backbone_finetune_scope`` selects which modules the second group unfreezes:
+      - ``"tail"`` (default): the thin output-proximal tail
+        (:func:`backbone_tail_modules`) -- study 082's set, kept as the default so
+        that study stays reproducible.
+      - ``"decoder"``: the whole bottleneck + decoder
+        (:func:`backbone_decoder_modules`), leaving the encoder frozen as a shared
+        feature extractor -- study 084.
 
     The per-group LR ratio is returned separately as ``lr_mults`` because
     ``CosineWithWarmupScheduler`` overwrites each group's ``lr`` every step with
@@ -68,7 +120,10 @@ def build_finetune_optimizer(
         optimizer_kwargs (dict): AdamW kwargs; ``optimizer_kwargs["lr"]`` is the
             head (base) learning rate.
         backbone_tail_lr_mult (float): Fraction of the head LR for the unfrozen
-            backbone tail. 0 keeps the backbone frozen (no second group).
+            backbone modules. 0 keeps the backbone frozen (no second group).
+        backbone_finetune_scope (str): Which backbone modules the second group
+            unfreezes when ``backbone_tail_lr_mult > 0`` -- ``"tail"`` (default,
+            study 082) or ``"decoder"`` (study 084). Ignored when the mult is 0.
         verbose (bool): If True, print trainable-parameter counts (rank-0 only).
 
     Returns:
@@ -99,8 +154,17 @@ def build_finetune_optimizer(
                 "bypass path never runs the backbone, so unfreezing its tail has "
                 "no effect and breaks DDP (unused parameters)."
             )
+        if backbone_finetune_scope == "tail":
+            finetune_mods = backbone_tail_modules(model)
+        elif backbone_finetune_scope == "decoder":
+            finetune_mods = backbone_decoder_modules(model)
+        else:
+            raise ValueError(
+                "backbone_finetune_scope must be 'tail' or 'decoder', got "
+                f"{backbone_finetune_scope!r}."
+            )
         tail_params = []
-        for mod in backbone_tail_modules(model):
+        for mod in finetune_mods:
             for p in mod.parameters():
                 p.requires_grad = True
                 tail_params.append(p)
@@ -117,8 +181,9 @@ def build_finetune_optimizer(
             n_head = sum(p.numel() for p in head_params)
             n_tail = sum(p.numel() for p in tail_params)
             print(
-                f"[finetune] head params: {n_head:,}; unfrozen backbone-tail "
-                f"params: {n_tail:,} (LR mult {backbone_tail_lr_mult})"
+                f"[finetune] head params: {n_head:,}; unfrozen backbone "
+                f"({backbone_finetune_scope}) params: {n_tail:,} "
+                f"(LR mult {backbone_tail_lr_mult})"
             )
     else:
         optimizer = torch.optim.AdamW(head_params, **optimizer_kwargs)
@@ -129,6 +194,111 @@ def build_finetune_optimizer(
             print(f"[finetune] head params: {n_head:,}; backbone frozen")
 
     return optimizer, lr_mults
+
+
+def _epoch_median_val_losses(
+    val_rcrd_glob: str,
+) -> dict:
+    """Median validation loss per epoch, read from the per-epoch record CSVs.
+
+    Each epoch's validation record is a CSV of ``epoch, batch, loss`` rows (see
+    the ``train_DDP_scalar_temporal_loderunner_epoch_9band*`` writers). This globs
+    every matching file, reads the loss column, and reduces to the MEDIAN per
+    epoch -- the same statistic the loss-curve plot shows, and robust to the heavy
+    per-batch tail that would make the mean noisy. Files that are empty or
+    unreadable are skipped (a half-written CSV from a crashed epoch does not
+    poison the ranking).
+
+    Args:
+        val_rcrd_glob (str): Glob matching the validation record CSVs, e.g.
+            ``./validation_study083_epoch*.csv``.
+
+    Returns:
+        dict: ``{epoch_int: median_loss_float}`` for every epoch with a readable,
+        non-empty record. Empty dict if nothing matches.
+    """
+    out = {}
+    for path in glob.glob(val_rcrd_glob):
+        # Skip empty files up front: np.loadtxt emits a UserWarning on a
+        # zero-byte record (e.g. an epoch skipped by train_per_val, or a crashed
+        # half-written file), which would otherwise spam the training log.
+        try:
+            if os.path.getsize(path) == 0:
+                continue
+        except OSError:
+            continue
+        try:
+            arr = np.loadtxt(path, delimiter=",", ndmin=2)
+        except (ValueError, OSError):
+            continue
+        if arr.size == 0:
+            continue
+        # Columns: epoch, batch, loss. A single epoch per file, but derive the
+        # epoch from the data (not the filename) so it is authoritative.
+        epochs = arr[:, 0].astype(int)
+        losses = arr[:, 2]
+        for ep in np.unique(epochs):
+            out[int(ep)] = float(np.median(losses[epochs == ep]))
+    return out
+
+
+def update_best_checkpoint(
+    studyIDX: int,
+    val_rcrd_glob: str,
+    ckpt_dir: str = "./",
+) -> tuple:
+    """Copy the lowest-median-val-loss epoch's checkpoint to a stable ``_best`` file.
+
+    Designed for the ``cycle_epochs=1`` restart pattern where every epoch runs as a
+    fresh process: this is STATELESS. It rebuilds the full per-epoch val-loss
+    history from the record CSVs on disk each call, so no "best-so-far" value needs
+    to survive the process restart. Call it on rank 0 after each epoch's checkpoint
+    has been written.
+
+    The per-epoch ``study{IDX}_modelState_epoch{NNNN}.pth`` files are left
+    untouched (the continuation chain still resumes from the latest one); this only
+    maintains a COPY at ``study{IDX}_modelState_best.pth`` pointing at the best
+    epoch seen so far. Selection is by validation loss (the trained objective),
+    which is a proxy for the late-time RMSE the studies are ranked on -- use it to
+    pick a small candidate set for the dense eval, not as the final word.
+
+    Args:
+        studyIDX (int): Study index, for the checkpoint / record filename pattern.
+        val_rcrd_glob (str): Glob for the validation record CSVs (e.g.
+            ``./validation_study083_epoch*.csv``).
+        ckpt_dir (str): Directory holding the per-epoch checkpoints.
+
+    Returns:
+        tuple: ``(best_epoch, best_loss, best_path)`` on success, or
+        ``(None, None, None)`` if no val records or no matching checkpoint exist
+        yet (e.g. before the first validation epoch).
+    """
+    med = _epoch_median_val_losses(val_rcrd_glob)
+    if not med:
+        return None, None, None
+
+    # Only consider epochs whose checkpoint actually exists on disk.
+    best_epoch, best_loss, best_src = None, None, None
+    for ep in sorted(med):
+        src = os.path.join(
+            ckpt_dir, f"study{studyIDX:03d}_modelState_epoch{ep:04d}.pth"
+        )
+        if not os.path.exists(src):
+            continue
+        if best_loss is None or med[ep] < best_loss:
+            best_epoch, best_loss, best_src = ep, med[ep], src
+
+    if best_src is None:
+        return None, None, None
+
+    best_dst = os.path.join(ckpt_dir, f"study{studyIDX:03d}_modelState_best.pth")
+    # Copy (not symlink/rename) so the per-epoch file stays intact for the
+    # continuation chain and _best is self-contained. Atomic-ish: write to a temp
+    # name then replace, so a crash mid-copy never leaves a truncated _best.
+    tmp_dst = best_dst + ".tmp"
+    shutil.copyfile(best_src, tmp_dst)
+    os.replace(tmp_dst, best_dst)
+    return best_epoch, best_loss, best_dst
 
 
 def save_model_and_optimizer_hdf5(
@@ -557,6 +727,7 @@ def load_direct_loderunner_checkpoint_9band(
     optimizer_kwargs: dict,
     device: torch.device,
     backbone_tail_lr_mult: float = 0.0,
+    backbone_finetune_scope: str = "tail",
 ) -> tuple:
     """Load a ScalarTemporalConditionedLodeRunner_9band model from a checkpoint.
 
@@ -581,8 +752,12 @@ def load_direct_loderunner_checkpoint_9band(
         optimizer_kwargs (dict): Kwargs for the AdamW optimizer.
         device (torch.device): Device to load the model/optimizer onto.
         backbone_tail_lr_mult (float): Fraction of the head LR for the unfrozen
-            backbone tail. 0 (default) keeps the backbone fully frozen -- the
+            backbone modules. 0 (default) keeps the backbone fully frozen -- the
             legacy behavior.
+        backbone_finetune_scope (str): Which backbone modules to unfreeze when
+            ``backbone_tail_lr_mult > 0`` -- ``"tail"`` (default) or ``"decoder"``.
+            MUST match the value used to create the checkpoint, or the rebuilt
+            optimizer's param-group structure will not match the saved state.
 
     Returns:
         model (torch.nn.Module): The wrapper model.
@@ -701,6 +876,7 @@ def load_direct_loderunner_checkpoint_9band(
         model,
         optimizer_kwargs,
         backbone_tail_lr_mult=backbone_tail_lr_mult,
+        backbone_finetune_scope=backbone_finetune_scope,
     )
 
     # Only restore optimizer for TRUE continuation checkpoints

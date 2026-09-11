@@ -32,6 +32,7 @@ from yoke.utils.checkpointing import load_model_and_optimizer
 from yoke.utils.checkpointing import save_model_and_optimizer
 from yoke.utils.checkpointing import load_direct_loderunner_checkpoint_9band
 from yoke.utils.checkpointing import build_finetune_optimizer
+from yoke.utils.checkpointing import update_best_checkpoint
 from yoke.utils.parallel import setup_distributed, cleanup_distributed
 from yoke.lr_schedulers import CosineWithWarmupScheduler
 from yoke.helpers import cli
@@ -327,11 +328,18 @@ def main(args, rank, world_size, local_rank, device):
     #
     # RESULT: 081 (frozen, waist 8) regressed to 2.02; 082 (tail unfrozen, waist
     # 8) recovered to 1.85 -- backbone path was capacity-limited, not dead weight,
-    # but only TIED the 080 bypass champion (1.83) at higher cost. Conclusion: the
-    # backbone buys nothing here. Study 083 returns to bypass to isolate the WAIST
-    # width (the one lever never tested past 32), which is only decouplable under
-    # bypass. -> BYPASS_BACKBONE = True.
-    BYPASS_BACKBONE = True
+    # but only TIED the 080 bypass champion (1.86 @ 1000 obj) at higher cost. 083
+    # (bypass, waist 64) also tied -> waist saturates by 32; ~1.86 is the aleatoric
+    # floor for single-task RMSE.
+    #
+    # Study 084: GOAL SHIFT. The backbone is wanted as a SHARED asset reused across
+    # many multiphysics applications, so "backbone ON ties the bespoke MLP" is the
+    # transferability result we WANT, not a reason to drop it. 082 only fine-tuned
+    # the thin OUTPUT TAIL and left the bottleneck + up_stage1's 2 decoder blocks
+    # frozen. 084 keeps the ENCODER frozen (the shared feature extractor, identical
+    # across apps) and fine-tunes the WHOLE bottleneck + decoder at 0.1x LR --
+    # a clean shared-encoder / per-task-decoder split. -> BYPASS_BACKBONE = False.
+    BYPASS_BACKBONE = False
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -352,13 +360,10 @@ def main(args, rank, world_size, local_rank, device):
     # "does the frozen backbone help at the width it requires?", which is the
     # relevant question, but keep the confound in mind reading the result.
     #
-    # Study 083: WAIST-WIDTH capacity test. 080 (waist 32) is champion; 8 (081/082,
-    # forced by the backbone) clearly starves the head (biases return). This widens
-    # the waist to 64 on the bypass champion -- a clean one-variable A/B vs 080. If
-    # it beats 1.83, the waist was still binding (keep widening); if it ties, we are
-    # at the aleatoric floor and the residual is irreducible scatter, not capacity.
-    # Changes conditioner/head shapes -> fresh study (new studyIDX/rundir).
-    BYPASS_CHANNELS = 64
+    # Study 084: MUST be None. The non-bypass path feeds the frozen backbone, which
+    # needs exactly backbone_channels=8, so bomberman.py raises on a decoupled waist
+    # with the backbone on. Waist returns to 8 (the pretrained input width).
+    BYPASS_CHANNELS = None
 
     # Study 082 (backbone capacity test). When > 0, the OUTPUT-PROXIMAL decoder
     # tail of the frozen Swin U-Net (final PatchExpand + final up_connect +
@@ -375,7 +380,23 @@ def main(args, rank, world_size, local_rank, device):
     # MUST be 0.0 under bypass (study 083, BYPASS_BACKBONE=True): the backbone never
     # runs, so unfreezing its tail leaves those params unused -- build_finetune_
     # optimizer raises to prevent the silent-waste / DDP-unused-param failure.
-    BACKBONE_TAIL_LR_MULT = 0.0
+    #
+    # Study 084: 0.1 (backbone ON). WHICH modules this unfreezes is set by
+    # BACKBONE_FINETUNE_SCOPE below.
+    BACKBONE_TAIL_LR_MULT = 0.1
+
+    # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
+    # which backbone modules the second (low-LR) optimizer group unfreezes:
+    #   "tail"    -- study 082's thin output-proximal tail (final PatchExpand +
+    #                final up_connect + linear4unpatch).
+    #   "decoder" -- study 084's whole bottleneck + decoder (bottleneck_stage4 +
+    #                up_stage1/2/3 + all up_connect + all PatchExpand +
+    #                linear4unpatch), leaving the ENCODER frozen as the shared
+    #                feature extractor reused across multiphysics apps.
+    # Not a saved checkpoint key: the cycle_epochs=1 restart re-reads it from this
+    # config (like BACKBONE_TAIL_LR_MULT), so it MUST stay consistent across the
+    # run or the rebuilt optimizer's param groups won't match the saved state.
+    BACKBONE_FINETUNE_SCOPE = "decoder"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
@@ -569,6 +590,7 @@ def main(args, rank, world_size, local_rank, device):
             optimizer_kwargs=optimizer_kwargs,
             device=device,
             backbone_tail_lr_mult=BACKBONE_TAIL_LR_MULT,
+            backbone_finetune_scope=BACKBONE_FINETUNE_SCOPE,
         )
 
         if rank == 0:
@@ -662,6 +684,7 @@ def main(args, rank, world_size, local_rank, device):
             model,
             optimizer_kwargs,
             backbone_tail_lr_mult=BACKBONE_TAIL_LR_MULT,
+            backbone_finetune_scope=BACKBONE_FINETUNE_SCOPE,
             verbose=(rank == 0),
         )
 
@@ -1095,6 +1118,23 @@ def main(args, rank, world_size, local_rank, device):
             )
 
             print(f"Saved checkpoint: {new_chkpt_path}", flush=True)
+
+            # Maintain a stable "_best" checkpoint = the lowest-median-val-loss
+            # epoch so far. Stateless (rebuilds history from the val record CSVs
+            # each call), so it survives the cycle_epochs=1 restart. Selection is
+            # by val loss (a proxy for late-time RMSE) -- eval the _best epoch, or
+            # use it to seed a small candidate set for the dense eval. Guarded so a
+            # missing record (e.g. an epoch skipped by train_per_val) is a no-op.
+            best_val_glob = val_rcrd_filename.replace("<epochIDX>", "*")
+            best_epoch, best_loss, best_path = update_best_checkpoint(
+                studyIDX, best_val_glob, ckpt_dir="./"
+            )
+            if best_epoch is not None:
+                print(
+                    f"Best-so-far val epoch {best_epoch} "
+                    f"(median loss {best_loss:.6f}) -> {best_path}",
+                    flush=True,
+                )
 
     if rank == 0:
         #############################################
