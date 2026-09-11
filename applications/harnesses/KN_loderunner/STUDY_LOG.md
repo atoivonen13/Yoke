@@ -23,7 +23,8 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 079 | `a1166b7` | 1.9054 | bypass MLP, waist 32, **point** head (N_QUANTILES=1) | Same commit as 080, point head. |
 | 080 | `a1166b7` | **1.8318** | bypass MLP, waist 32, **quantile** head (N_QUANTILES=3, levels 0.1/0.5/0.9) | **Current champion.** Median-pinball collapsed blue-band biases (u −0.80→−0.095, g −0.62→−0.035). Calibrated bands (coverage 0.777). |
 | 081 | `9ef46e8`* | 2.0208 | backbone ON (frozen), waist **8** (forced), quantile head | Regressed vs 080. Confound: waist narrowed 32→8 (non-bypass path needs backbone_channels=8). Biases returned (u −1.03, g −1.04) → underfitting. |
-| 082 | _this commit_ | _running_ | backbone ON, **decoder tail unfrozen** (PatchExpand[-1] + up_connect[-1] + linear4unpatch) at 0.1× head LR, quantile head, waist 8 | Capacity test. Tail is downstream of the 8-channel input bottleneck; expected to stay near ~2.0 if that bottleneck dominates. |
+| 082 | _prev commit_ | 1.8492 | backbone ON, **decoder tail unfrozen** (PatchExpand[-1] + up_connect[-1] + linear4unpatch) at 0.1× head LR, quantile head, waist 8 | Capacity test. Unfreezing the tail recovered **0.17 mag vs 081** (biases: u −1.03→−0.34, g −1.04→−0.57) → backbone path was capacity-limited, not dead weight. But only **ties** 080 (Δ0.017, within noise) at higher cost + waist-8 bottleneck. No reason to adopt; bypass MLP (080) stays champion. |
+| 083 | _this commit_ | _running_ | **bypass MLP, waist 64** (BYPASS_CHANNELS=64), quantile head, W=2.0/M=12 | Waist-width capacity test on the champion. Clean one-variable A/B vs 080 (waist 32). Beats 1.83 → waist still binding; ties → aleatoric floor reached. Backbone off, BACKBONE_TAIL_LR_MULT=0.0. |
 
 \* Commit is the nearest committed state matching that study's config; the study
 number itself is not in the commit (see note above). Where a study reused an

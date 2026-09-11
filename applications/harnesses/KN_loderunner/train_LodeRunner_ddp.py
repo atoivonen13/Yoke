@@ -324,7 +324,14 @@ def main(args, rank, world_size, local_rank, device):
     # lever is UNFREEZING it (a separate, larger study). Requires BYPASS_CHANNELS
     # = None: the non-bypass path feeds the backbone, which needs exactly
     # backbone_channels=8, so the model rejects a decoupled waist here.
-    BYPASS_BACKBONE = False
+    #
+    # RESULT: 081 (frozen, waist 8) regressed to 2.02; 082 (tail unfrozen, waist
+    # 8) recovered to 1.85 -- backbone path was capacity-limited, not dead weight,
+    # but only TIED the 080 bypass champion (1.83) at higher cost. Conclusion: the
+    # backbone buys nothing here. Study 083 returns to bypass to isolate the WAIST
+    # width (the one lever never tested past 32), which is only decouplable under
+    # bypass. -> BYPASS_BACKBONE = True.
+    BYPASS_BACKBONE = True
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -344,7 +351,14 @@ def main(args, rank, world_size, local_rank, device):
     # NOT a clean bypass-vs-nonbypass A/B (it also narrows the waist). It answers
     # "does the frozen backbone help at the width it requires?", which is the
     # relevant question, but keep the confound in mind reading the result.
-    BYPASS_CHANNELS = None
+    #
+    # Study 083: WAIST-WIDTH capacity test. 080 (waist 32) is champion; 8 (081/082,
+    # forced by the backbone) clearly starves the head (biases return). This widens
+    # the waist to 64 on the bypass champion -- a clean one-variable A/B vs 080. If
+    # it beats 1.83, the waist was still binding (keep widening); if it ties, we are
+    # at the aleatoric floor and the residual is irreducible scatter, not capacity.
+    # Changes conditioner/head shapes -> fresh study (new studyIDX/rundir).
+    BYPASS_CHANNELS = 64
 
     # Study 082 (backbone capacity test). When > 0, the OUTPUT-PROXIMAL decoder
     # tail of the frozen Swin U-Net (final PatchExpand + final up_connect +
@@ -357,7 +371,11 @@ def main(args, rank, world_size, local_rank, device):
     # backbone frozen (studies 071-081 regime; single-group optimizer). Requires
     # BYPASS_BACKBONE=False (the bypass path never runs the backbone, so unfreezing
     # its tail would have no effect).
-    BACKBONE_TAIL_LR_MULT = 0.1
+    #
+    # MUST be 0.0 under bypass (study 083, BYPASS_BACKBONE=True): the backbone never
+    # runs, so unfreezing its tail leaves those params unused -- build_finetune_
+    # optimizer raises to prevent the silent-waste / DDP-unused-param failure.
+    BACKBONE_TAIL_LR_MULT = 0.0
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
