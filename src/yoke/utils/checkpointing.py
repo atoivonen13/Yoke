@@ -17,6 +17,120 @@ from yoke.models.vit.swin.bomberman import (
 )
 
 
+def backbone_tail_modules(model: torch.nn.Module) -> list:
+    """Output-proximal decoder tail of the wrapped Swin U-Net backbone.
+
+    These are the last parameter-bearing modules the backbone runs before its
+    output feeds the wrapper's meanstdmax pool: the final PatchExpand, the final
+    up_connect (SwinConnectDecoder), and ``backbone.linear4unpatch``. With the
+    default ``block_structure=(1,1,3,1)`` the decoder's up_stage2 / up_stage3
+    SwinEncoder loops are empty, so these three modules hold the trainable
+    capacity closest to the loss. Single source of truth so the fresh-study
+    optimizer build and the continuation loader unfreeze exactly the same params.
+
+    Args:
+        model (torch.nn.Module): A ScalarTemporalConditionedLodeRunner_9band whose
+            ``.backbone`` is a LodeRunner (has ``.unet`` and ``.linear4unpatch``).
+
+    Returns:
+        list: The submodules constituting the tail, output-proximal last.
+    """
+    unet = model.backbone.unet
+    return [
+        unet.PatchExpand[-1],
+        unet.up_connect[-1],
+        model.backbone.linear4unpatch,
+    ]
+
+
+def build_finetune_optimizer(
+    model: torch.nn.Module,
+    optimizer_kwargs: dict,
+    backbone_tail_lr_mult: float = 0.0,
+    verbose: bool = False,
+) -> tuple:
+    """Freeze the backbone, set trainable params, and build the AdamW optimizer.
+
+    Always trains ``conditioner`` + ``output_head``. When
+    ``backbone_tail_lr_mult > 0`` it additionally unfreezes the decoder tail
+    (:func:`backbone_tail_modules`) and puts it in a SECOND optimizer param group
+    at ``base_lr * backbone_tail_lr_mult`` -- discriminative fine-tuning of the
+    pretrained weights. When ``0`` (default) the whole backbone stays frozen and a
+    single-group optimizer is built, byte-identical to the legacy frozen regime.
+
+    The per-group LR ratio is returned separately as ``lr_mults`` because
+    ``CosineWithWarmupScheduler`` overwrites each group's ``lr`` every step with
+    one scheduled value; the scheduler must be given these mults to preserve the
+    ratio (per-group ``lr`` set on the optimizer alone would be ignored).
+
+    Args:
+        model (torch.nn.Module): The wrapper model (pre-DDP).
+        optimizer_kwargs (dict): AdamW kwargs; ``optimizer_kwargs["lr"]`` is the
+            head (base) learning rate.
+        backbone_tail_lr_mult (float): Fraction of the head LR for the unfrozen
+            backbone tail. 0 keeps the backbone frozen (no second group).
+        verbose (bool): If True, print trainable-parameter counts (rank-0 only).
+
+    Returns:
+        tuple: ``(optimizer, lr_mults)`` where ``lr_mults`` is a list with one
+        entry per optimizer param group (``[1.0]`` frozen, ``[1.0, mult]`` when
+        the tail is unfrozen), to be passed to the LR scheduler.
+    """
+    for p in model.backbone.parameters():
+        p.requires_grad = False
+    for p in model.conditioner.parameters():
+        p.requires_grad = True
+    for p in model.output_head.parameters():
+        p.requires_grad = True
+
+    head_params = (
+        list(model.conditioner.parameters())
+        + list(model.output_head.parameters())
+    )
+
+    if backbone_tail_lr_mult and backbone_tail_lr_mult > 0.0:
+        # The backbone must actually run for its tail to receive gradients. Under
+        # bypass the forward skips the backbone entirely, so unfreezing the tail
+        # would leave its params unused -- silently wasted, and a hard DDP error
+        # (find_unused_parameters=False). Fail loudly instead.
+        if getattr(model, "bypass_backbone", False):
+            raise ValueError(
+                "backbone_tail_lr_mult > 0 requires bypass_backbone=False; the "
+                "bypass path never runs the backbone, so unfreezing its tail has "
+                "no effect and breaks DDP (unused parameters)."
+            )
+        tail_params = []
+        for mod in backbone_tail_modules(model):
+            for p in mod.parameters():
+                p.requires_grad = True
+                tail_params.append(p)
+
+        base_lr = optimizer_kwargs["lr"]
+        param_groups = [
+            {"params": head_params},
+            {"params": tail_params, "lr": base_lr * backbone_tail_lr_mult},
+        ]
+        lr_mults = [1.0, backbone_tail_lr_mult]
+        optimizer = torch.optim.AdamW(param_groups, **optimizer_kwargs)
+
+        if verbose:
+            n_head = sum(p.numel() for p in head_params)
+            n_tail = sum(p.numel() for p in tail_params)
+            print(
+                f"[finetune] head params: {n_head:,}; unfrozen backbone-tail "
+                f"params: {n_tail:,} (LR mult {backbone_tail_lr_mult})"
+            )
+    else:
+        optimizer = torch.optim.AdamW(head_params, **optimizer_kwargs)
+        lr_mults = [1.0]
+
+        if verbose:
+            n_head = sum(p.numel() for p in head_params)
+            print(f"[finetune] head params: {n_head:,}; backbone frozen")
+
+    return optimizer, lr_mults
+
+
 def save_model_and_optimizer_hdf5(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -442,7 +556,8 @@ def load_direct_loderunner_checkpoint_9band(
     model_args: dict,
     optimizer_kwargs: dict,
     device: torch.device,
-) -> tuple[torch.nn.Module, torch.optim.Optimizer, int]:
+    backbone_tail_lr_mult: float = 0.0,
+) -> tuple:
     """Load a ScalarTemporalConditionedLodeRunner_9band model from a checkpoint.
 
     The 9-band analogue of ``load_direct_loderunner_checkpoint``. Handles two
@@ -454,7 +569,10 @@ def load_direct_loderunner_checkpoint_9band(
         loaded in full and treated as a continuation.
 
     The backbone is frozen and only the conditioner and output-head parameters
-    are trainable.
+    are trainable, UNLESS ``backbone_tail_lr_mult > 0``, in which case the decoder
+    tail is also unfrozen at a reduced LR (see :func:`build_finetune_optimizer`).
+    This MUST match the value used to create the checkpoint, or the rebuilt
+    optimizer's param-group structure will not match the saved optimizer state.
 
     Args:
         checkpoint_path (str): Path to the checkpoint file.
@@ -462,11 +580,15 @@ def load_direct_loderunner_checkpoint_9band(
             none stored.
         optimizer_kwargs (dict): Kwargs for the AdamW optimizer.
         device (torch.device): Device to load the model/optimizer onto.
+        backbone_tail_lr_mult (float): Fraction of the head LR for the unfrozen
+            backbone tail. 0 (default) keeps the backbone fully frozen -- the
+            legacy behavior.
 
     Returns:
         model (torch.nn.Module): The wrapper model.
         optimizer (torch.optim.Optimizer): Optimizer over trainable parameters.
         starting_epoch (int): Epoch to continue training from.
+        lr_mults (list): Per-param-group LR multipliers for the LR scheduler.
     """
     checkpoint_data = torch.load(
         checkpoint_path,
@@ -571,22 +693,14 @@ def load_direct_loderunner_checkpoint_9band(
     noise_scale = checkpoint_data.get("noise_scale", 0.0)
     model.backbone.noise_scale = noise_scale
 
-    # Freeze pretrained backbone
-    for p in model.backbone.parameters():
-        p.requires_grad = False
-
-    # Train conditioner
-    for p in model.conditioner.parameters():
-        p.requires_grad = True
-
-    # Train output head
-    for p in model.output_head.parameters():
-        p.requires_grad = True
-
-    optimizer = torch.optim.AdamW(
-        list(model.conditioner.parameters())
-        + list(model.output_head.parameters()),
-        **optimizer_kwargs,
+    # Freeze the backbone (optionally unfreezing its decoder tail) and build the
+    # optimizer with the SAME param-group structure the fresh-study branch used,
+    # so a saved 2-group optimizer state restores cleanly on the cycle_epochs=1
+    # restart. backbone_tail_lr_mult MUST match the training config.
+    optimizer, lr_mults = build_finetune_optimizer(
+        model,
+        optimizer_kwargs,
+        backbone_tail_lr_mult=backbone_tail_lr_mult,
     )
 
     # Only restore optimizer for TRUE continuation checkpoints
@@ -603,4 +717,4 @@ def load_direct_loderunner_checkpoint_9band(
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(device)
 
-    return model, optimizer, starting_epoch
+    return model, optimizer, starting_epoch, lr_mults
