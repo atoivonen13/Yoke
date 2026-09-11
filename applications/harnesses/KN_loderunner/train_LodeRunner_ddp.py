@@ -396,7 +396,17 @@ def main(args, rank, world_size, local_rank, device):
     # Not a saved checkpoint key: the cycle_epochs=1 restart re-reads it from this
     # config (like BACKBONE_TAIL_LR_MULT), so it MUST stay consistent across the
     # run or the rebuilt optimizer's param groups won't match the saved state.
-    BACKBONE_FINETUNE_SCOPE = "decoder"
+    #
+    # Study 084 (scope="decoder") REGRESSED to 1.9350 @ 100 obj (vs 080=1.8318,
+    # 082=1.8492) -- but 084 ran at BATCH_SIZE=2 (effective 8) to fit the full
+    # decoder's activations in VRAM, while 080/082/083 ran at BATCH_SIZE=5
+    # (effective 20). That confounds scope with batch. Study 085 is the clean
+    # control: the batch-2 TWIN of 082 (scope="tail", backbone ON, mult 0.1). A
+    # batch-2-vs-batch-2 tail-vs-decoder comparison isolates the fine-tune scope
+    # from the batch/LR regime -> "does unfreezing the whole decoder beat
+    # unfreezing just the tail?" Tail scope retains almost no backbone activations,
+    # so batch 2 fits with wide headroom (no OOM risk).
+    BACKBONE_FINETUNE_SCOPE = "tail"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
