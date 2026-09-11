@@ -84,7 +84,14 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 #78,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #79,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #80,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-81,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#81,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#82,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#83,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#84,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+85,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+
+
+
 
 
 
