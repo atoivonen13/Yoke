@@ -31,6 +31,7 @@ from yoke.utils.dataload import make_distributed_dataloader
 from yoke.utils.checkpointing import load_model_and_optimizer
 from yoke.utils.checkpointing import save_model_and_optimizer
 from yoke.utils.checkpointing import load_direct_loderunner_checkpoint_9band
+from yoke.utils.checkpointing import build_finetune_optimizer
 from yoke.utils.parallel import setup_distributed, cleanup_distributed
 from yoke.lr_schedulers import CosineWithWarmupScheduler
 from yoke.helpers import cli
@@ -345,6 +346,19 @@ def main(args, rank, world_size, local_rank, device):
     # relevant question, but keep the confound in mind reading the result.
     BYPASS_CHANNELS = None
 
+    # Study 082 (backbone capacity test). When > 0, the OUTPUT-PROXIMAL decoder
+    # tail of the frozen Swin U-Net (final PatchExpand + final up_connect +
+    # backbone.linear4unpatch) is UNFROZEN and trained at this fraction of the head
+    # LR. With block_structure=(1,1,3,1) the up_stage2/up_stage3 SwinEncoder loops
+    # are empty, so these three modules are the last parameter-bearing stages the
+    # backbone runs before meanstdmax pooling -- the capacity closest to the loss.
+    # 0.1 = 10x smaller LR than the head, standard discriminative fine-tuning of
+    # pretrained weights on a small (~8k-object) set. Set to 0.0 to keep the whole
+    # backbone frozen (studies 071-081 regime; single-group optimizer). Requires
+    # BYPASS_BACKBONE=False (the bypass path never runs the backbone, so unfreezing
+    # its tail would have no effect).
+    BACKBONE_TAIL_LR_MULT = 0.1
+
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
     # time Dt, so they can learn a real per-band decay curve instead of a flat
@@ -526,11 +540,17 @@ def main(args, rank, world_size, local_rank, device):
 
 
     if CONTINUATION:
-        model, optimizer, starting_epoch = load_direct_loderunner_checkpoint_9band(
+        (
+            model,
+            optimizer,
+            starting_epoch,
+            param_group_lr_mults,
+        ) = load_direct_loderunner_checkpoint_9band(
             checkpoint_path=checkpoint,
             model_args=model_args,
             optimizer_kwargs=optimizer_kwargs,
             device=device,
+            backbone_tail_lr_mult=BACKBONE_TAIL_LR_MULT,
         )
 
         if rank == 0:
@@ -609,20 +629,22 @@ def main(args, rank, world_size, local_rank, device):
             phase_fourier_bands=PHASE_FOURIER_BANDS,
         ).to(device)
 
-        # Stage 1: freeze pretrained LodeRunner, train only conditioner + output head
-        for p in model.backbone.parameters():
-            p.requires_grad = False
-
-        for p in model.conditioner.parameters():
-            p.requires_grad = True
-
-        for p in model.output_head.parameters():
-            p.requires_grad = True
-
-        optimizer = torch.optim.AdamW(
-            list(model.conditioner.parameters()) +
-            list(model.output_head.parameters()),
-            **optimizer_kwargs,
+        # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
+        # PROXIMAL decoder tail, then build a 1- or 2-group optimizer. See
+        # BACKBONE_TAIL_LR_MULT in the config above. If test RMSE drops, the floor
+        # is capacity-limited; if train improves but test does not (a gap opens),
+        # the model is now data-limited -- both informative given studies
+        # 081/train==test showed no gap in the tiny-head regime.
+        #
+        # build_finetune_optimizer() is the single source of truth for WHICH
+        # modules are unfrozen and how the param groups / LR mults are built,
+        # shared with the continuation loader so the cycle_epochs=1 restart keeps
+        # the tail trainable and rebuilds the same optimizer group structure.
+        optimizer, param_group_lr_mults = build_finetune_optimizer(
+            model,
+            optimizer_kwargs,
+            backbone_tail_lr_mult=BACKBONE_TAIL_LR_MULT,
+            verbose=(rank == 0),
         )
 
     # Point loss selected by LOSS_TYPE (see config above). "mse" targets the
@@ -710,6 +732,9 @@ def main(args, rank, world_size, local_rank, device):
         num_cycles=num_cycles,
         min_fraction=min_fraction,
         last_epoch=last_epoch,
+        # Preserve the head-vs-backbone-tail LR ratio (Study 082). [1.0] when the
+        # backbone is frozen -> byte-identical to the legacy single-group schedule.
+        lr_mults=param_group_lr_mults,
     )
 
     #############################################

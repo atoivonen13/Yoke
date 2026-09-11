@@ -170,6 +170,12 @@ class CosineWithWarmupScheduler(_LRScheduler):
         min_fraction (float): Fraction of anchor LR at cosine trough
         warmup_steps (int): Number of steps for linear warm up
         last_epoch (int): Last step if restarting
+        lr_mults (list[float] | None): Per-parameter-group multipliers applied to
+            the scheduled LR. Length must equal the number of optimizer param
+            groups. ``None`` (default) applies the same scheduled LR to every
+            group -- byte-identical to the legacy single-group behavior. Use this
+            for discriminative fine-tuning (e.g. a smaller LR on an unfrozen
+            backbone tail than on the freshly-trained head).
 
     """
 
@@ -182,6 +188,7 @@ class CosineWithWarmupScheduler(_LRScheduler):
         num_cycles: float = 0.5,
         min_fraction: float = 0.5,
         last_epoch: int = -1,
+        lr_mults: list = None,
     ) -> None:
         """Initialize scheduler."""
         self.anchor_lr = anchor_lr
@@ -191,6 +198,16 @@ class CosineWithWarmupScheduler(_LRScheduler):
         self.terminal_steps = terminal_steps
 
         self.num_param_groups = len(optimizer.param_groups)
+
+        if lr_mults is None:
+            self.lr_mults = [1.0] * self.num_param_groups
+        else:
+            if len(lr_mults) != self.num_param_groups:
+                raise ValueError(
+                    f"lr_mults has {len(lr_mults)} entries but the optimizer has "
+                    f"{self.num_param_groups} param groups."
+                )
+            self.lr_mults = list(lr_mults)
 
         super().__init__(optimizer, last_epoch)
 
@@ -204,7 +221,7 @@ class CosineWithWarmupScheduler(_LRScheduler):
             min_fraction=self.min_fraction,
             num_cycles=self.num_cycles,
         )
-        return [lr] * self.num_param_groups
+        return [lr * m for m in self.lr_mults]
 
 
 class ConstantWithWarmupScheduler(_LRScheduler):
