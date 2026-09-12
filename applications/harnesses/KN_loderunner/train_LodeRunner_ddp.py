@@ -341,6 +341,29 @@ def main(args, rank, world_size, local_rank, device):
     # a clean shared-encoder / per-task-decoder split. -> BYPASS_BACKBONE = False.
     BYPASS_BACKBONE = False
 
+    # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
+    # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
+    # global-pooled the backbone output, forcing the vision transformer to behave
+    # as a frozen per-channel MLP -- the same job the bypass MLP does, so it ties
+    # by construction. SPATIAL_RENDER replaces that with a hand-rendered 2D field
+    # (rows = time, columns = band; bilinear tent splat per event) + a coordinate
+    # gather that reads the prediction at the target's (row(Dt), band-column)
+    # location. This finally exercises the backbone's 2D windowed attention on
+    # STRUCTURED input. The renderer has no params (the conditioner is dropped); a
+    # small read_head maps the gathered per-band backbone-channel summary ->
+    # n_quantiles. The output contract [B, n_quantiles, n_bands] is unchanged, so
+    # the rollout drivers + eval need no change. Requires BYPASS_BACKBONE=False and
+    # BYPASS_CHANNELS=None (waist pinned to backbone_channels=8). Drops the
+    # conditioner/output_head params -> FRESH study; round-trips via the loaders.
+    #   086a: SPATIAL_RENDER + backbone frozen  (BACKBONE_TAIL_LR_MULT = 0.0)
+    #   086b: SPATIAL_RENDER + tail @ 0.1x LR   (BACKBONE_TAIL_LR_MULT = 0.1)
+    SPATIAL_RENDER = True
+    # Bilinear tent splat full width (px) per event and vertical half-window (px)
+    # pooled around the target row at readout. render_context/horizon default to
+    # CONTEXT_WINDOW_DAYS / TARGET_HORIZON_DAYS below.
+    RENDER_SPLAT = 5
+    GATHER_ROWS_K = 5
+
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
     # channel count, which is sized for the (now-skipped) frozen backbone
@@ -383,7 +406,12 @@ def main(args, rank, world_size, local_rank, device):
     #
     # Study 084: 0.1 (backbone ON). WHICH modules this unfreezes is set by
     # BACKBONE_FINETUNE_SCOPE below.
-    BACKBONE_TAIL_LR_MULT = 0.1
+    #
+    # Study 086a: 0.0 -- SPATIAL_RENDER with the backbone FULLY FROZEN. The cleanest
+    # transfer test: does the pretrained spatial prior alone, given real structure,
+    # beat the bypass head? Only the read_head trains. Flip to 0.1 for 086b (tail
+    # unfrozen @ 0.1x LR, scope="tail") to let the backbone adapt its readout.
+    BACKBONE_TAIL_LR_MULT = 0.0
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
@@ -677,6 +705,11 @@ def main(args, rank, world_size, local_rank, device):
             bypass_backbone=BYPASS_BACKBONE,
             bypass_channels=BYPASS_CHANNELS,
             phase_fourier_bands=PHASE_FOURIER_BANDS,
+            spatial_render=SPATIAL_RENDER,
+            render_context_days=CONTEXT_WINDOW_DAYS,
+            render_horizon_days=TARGET_HORIZON_DAYS,
+            render_splat=RENDER_SPLAT,
+            gather_rows_k=GATHER_ROWS_K,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1104,6 +1137,11 @@ def main(args, rank, world_size, local_rank, device):
                     "bypass_backbone": BYPASS_BACKBONE,
                     "bypass_channels": BYPASS_CHANNELS,
                     "phase_fourier_bands": PHASE_FOURIER_BANDS,
+                    "spatial_render": SPATIAL_RENDER,
+                    "render_context_days": CONTEXT_WINDOW_DAYS,
+                    "render_horizon_days": TARGET_HORIZON_DAYS,
+                    "render_splat": RENDER_SPLAT,
+                    "gather_rows_k": GATHER_ROWS_K,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None

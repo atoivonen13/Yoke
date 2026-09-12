@@ -212,6 +212,14 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     # 0 for legacy checkpoints (no key) -> no phase input. > 0 widens the
     # conditioner first-layer; MUST match to load strict.
     phase_fourier_bands = ckpt.get("phase_fourier_bands", 0)
+    # False for legacy checkpoints (no key) -> tile+global-pool path. True (Study
+    # 086) uses render + gather + read_head, a different trainable-module set;
+    # MUST match to load strict.
+    spatial_render = ckpt.get("spatial_render", False)
+    render_context_days = ckpt.get("render_context_days", None)
+    render_horizon_days = ckpt.get("render_horizon_days", 8.0)
+    render_splat = ckpt.get("render_splat", 5)
+    gather_rows_k = ckpt.get("gather_rows_k", 5)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -229,6 +237,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_backbone:", bypass_backbone)
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
+    print("spatial_render:", spatial_render)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -251,6 +260,11 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         bypass_backbone=bypass_backbone,
         bypass_channels=bypass_channels,
         phase_fourier_bands=phase_fourier_bands,
+        spatial_render=spatial_render,
+        render_context_days=render_context_days,
+        render_horizon_days=render_horizon_days,
+        render_splat=render_splat,
+        gather_rows_k=gather_rows_k,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
