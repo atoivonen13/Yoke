@@ -339,7 +339,11 @@ def main(args, rank, world_size, local_rank, device):
     # frozen. 084 keeps the ENCODER frozen (the shared feature extractor, identical
     # across apps) and fine-tunes the WHOLE bottleneck + decoder at 0.1x LR --
     # a clean shared-encoder / per-task-decoder split. -> BYPASS_BACKBONE = False.
-    BYPASS_BACKBONE = False
+    #
+    # Study 087 (bypass control for 086): TRUE. The no-backbone A/B against 086's
+    # spatial-render path. Must be paired with SPATIAL_RENDER=False (render REQUIRES
+    # the backbone). BACKBONE_TAIL_LR_MULT stays 0.0 (nothing to unfreeze).
+    BYPASS_BACKBONE = True
 
     # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
     # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
@@ -357,7 +361,8 @@ def main(args, rank, world_size, local_rank, device):
     # conditioner/output_head params -> FRESH study; round-trips via the loaders.
     #   086a: SPATIAL_RENDER + backbone frozen  (BACKBONE_TAIL_LR_MULT = 0.0)
     #   086b: SPATIAL_RENDER + tail @ 0.1x LR   (BACKBONE_TAIL_LR_MULT = 0.1)
-    SPATIAL_RENDER = True
+    # Study 087: FALSE -- bypass-MLP control (080 path), BYPASS_BACKBONE=True above.
+    SPATIAL_RENDER = False
     # Bilinear tent splat full width (px) per event and vertical half-window (px)
     # pooled around the target row at readout. render_context/horizon default to
     # CONTEXT_WINDOW_DAYS / TARGET_HORIZON_DAYS below.
