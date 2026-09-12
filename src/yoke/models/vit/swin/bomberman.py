@@ -497,6 +497,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         bypass_backbone: bool = False,
         bypass_channels: int = None,
         phase_fourier_bands: int = 0,
+        spatial_render: bool = False,
+        render_context_days: float = None,
+        render_horizon_days: float = 8.0,
+        render_splat: int = 5,
+        gather_rows_k: int = 5,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -625,6 +630,36 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 ejecta-mass degeneracy. Requires time-window mode. CHANGES the
                 conditioner-first layer shape (fresh study); round-trips via the
                 loaders.
+            spatial_render (bool): When True (default False), the model REPLACES the
+                tile-and-global-pool path with a hand-rendered 2D field + coordinate
+                gather. The light-curve context in ``x`` is scattered into a dense
+                ``[B, backbone_channels, H, W]`` image (rows = TIME, columns = BAND),
+                the pretrained backbone runs on that STRUCTURED field (exercising its
+                windowed spatial attention rather than acting as a per-channel MLP on
+                a constant image), and the prediction is READ OUT of the output field
+                at the target's ``(row(Dt), band-column-block)`` location instead of
+                being globally averaged. The conditioner is unused on this path (the
+                renderer has no parameters); a small ``read_head`` maps the pooled
+                per-channel summary at the target location -> ``n_bands * n_quantiles``.
+                Requires ``bypass_backbone=False`` (the render needs the backbone) and
+                ``bypass_channels is None`` (the waist is pinned to ``backbone_channels``
+                so the pretrained embed kernels match). The output contract is
+                UNCHANGED (``[B, n_quantiles, n_bands]`` monotone), so the rollout
+                drivers and eval need no change. CHANGES the trainable head set and
+                drops the conditioner/output_head, so start a FRESH study; round-trips
+                via the loaders.
+            render_context_days (float): Trailing context span (days) rendered below
+                the anchor row. Defaults to ``context_window_days`` when None.
+            render_horizon_days (float): Forecast span (days) rendered above the anchor
+                row -- the time-axis reaches ``anchor_t + render_horizon_days`` so the
+                target's ``row(Dt)`` for ``Dt`` up to this horizon lands on-canvas.
+                Should match the training ``target_horizon_days``.
+            render_splat (int): Full width/height (pixels) of the bilinear tent splat
+                painted per event, so a single observation covers a patch rather than
+                one pixel (patches are ``patch_size``; a point event is invisible to a
+                ``(10, 5)`` patch embed). The single most important render detail.
+            gather_rows_k (int): Half-height (pixels) of the vertical neighbourhood
+                pooled around the target row ``row(Dt)`` at readout.
         """
         super().__init__()
 
@@ -651,6 +686,26 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 "detection) is derived from the window-mode absolute-time layout."
             )
 
+        if spatial_render:
+            if bypass_backbone:
+                raise ValueError(
+                    "spatial_render=True requires bypass_backbone=False; the "
+                    "rendered field must be processed BY the backbone (the whole "
+                    "point is to exercise its spatial attention)."
+                )
+            if bypass_channels is not None:
+                raise ValueError(
+                    "spatial_render=True requires bypass_channels=None; the "
+                    "rendered field is fed to the pretrained backbone, which needs "
+                    "exactly backbone_channels input, so the waist cannot widen."
+                )
+            if context_window_days is None:
+                raise ValueError(
+                    "spatial_render=True requires time-window mode "
+                    "(context_window_days set); the renderer reads the per-event "
+                    "[value, rel_t, valid, one_hot_band] window layout."
+                )
+
         self.backbone = backbone
         self.context_len = context_len
         self.n_bands = n_bands
@@ -662,6 +717,25 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         self.trend_decay_anchor = trend_decay_anchor
         self.trend_slope_k = trend_slope_k
         self.trend_max_offset = trend_max_offset
+
+        # Spatial-render path config (Study 086). When enabled, forward() renders
+        # x into a structured 2D field, runs the backbone, and gathers the
+        # prediction at the target (row, band-column) instead of tiling a constant
+        # image and global-pooling. See _render_field / _gather_bands.
+        self.spatial_render = spatial_render
+        self.render_context_days = (
+            render_context_days
+            if render_context_days is not None
+            else context_window_days
+        )
+        self.render_horizon_days = render_horizon_days
+        self.render_splat = render_splat
+        self.gather_rows_k = gather_rows_k
+        # Fixed anchor-relative time span mapped onto the H rows: the anchor
+        # (rel_t = max) sits at render_context_days / T_SPAN of the way up, so the
+        # trailing context fills the rows below it and the forecast horizon the
+        # rows above. Registered as plain floats (no params).
+        self._render_t_span = self.render_context_days + self.render_horizon_days
         # Quantile head: 1 -> legacy point regressor (byte-identical); >1 ->
         # per-band quantile regressor. median_idx picks the point forecast and is
         # what the rollout feeds back as context.
@@ -761,29 +835,49 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         else:
             phase_extra = 0
 
-        # Maps the scalar temporal event stream (plus the Fourier Dt encoding and
-        # the anchor-phase encoding, when enabled) into the waist channels. The
-        # final layer emits self.waist (== backbone_channels unless bypass widens
-        # it) -- the pseudo-image the backbone consumes, or the pooled summary fed
-        # straight to the head under bypass.
-        self.conditioner = nn.Sequential(
-            nn.Linear(input_dim + dt_extra + phase_extra, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, self.waist),
-        )
+        # Stored for the Fourier Dt read-head width (spatial path uses it too).
+        self._dt_extra = dt_extra
 
-        # Maps the backbone-channel summary (plus the Fourier Dt encoding, when
-        # enabled) back to one prediction per band. When n_quantiles == 1 the last
-        # layer emits n_bands (byte-identical to the legacy point head); when > 1 it
-        # emits n_bands * n_quantiles, reshaped in forward() to [B, n_quantiles,
-        # n_bands].
-        self.output_head = nn.Sequential(
-            nn.Linear(pool_channels + dt_extra, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, n_bands * n_quantiles),
-        )
+        if self.spatial_render:
+            # Spatial-render path (Study 086): the conditioner and output_head are
+            # REPLACED by a single small read-head. The renderer has no parameters
+            # (it scatters x into the field), the backbone processes the structured
+            # field, and _gather_bands pools the output at the target's (row, band-
+            # column) location into a per-band [B, n_bands, backbone_channels]
+            # summary. The read-head maps each band's backbone-channel vector (plus
+            # the Fourier Dt encoding) -> n_quantiles. nn.Linear acts on the last
+            # axis, so it is applied per-band with shared weights. Building ONLY
+            # this head (not conditioner/output_head) keeps every trainable param
+            # used on the forward path, so DDP's find_unused_parameters=False holds.
+            self.read_head = nn.Sequential(
+                nn.Linear(backbone_channels + dt_extra, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, n_quantiles),
+            )
+        else:
+            # Maps the scalar temporal event stream (plus the Fourier Dt encoding
+            # and the anchor-phase encoding, when enabled) into the waist channels.
+            # The final layer emits self.waist (== backbone_channels unless bypass
+            # widens it) -- the pseudo-image the backbone consumes, or the pooled
+            # summary fed straight to the head under bypass.
+            self.conditioner = nn.Sequential(
+                nn.Linear(input_dim + dt_extra + phase_extra, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, self.waist),
+            )
+
+            # Maps the backbone-channel summary (plus the Fourier Dt encoding, when
+            # enabled) back to one prediction per band. When n_quantiles == 1 the
+            # last layer emits n_bands (byte-identical to the legacy point head);
+            # when > 1 it emits n_bands * n_quantiles, reshaped in forward() to
+            # [B, n_quantiles, n_bands].
+            self.output_head = nn.Sequential(
+                nn.Linear(pool_channels + dt_extra, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, n_bands * n_quantiles),
+            )
 
     def _encode_dt(self, Dt: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Fourier-encode the lead time for the trainable path.
@@ -955,6 +1049,147 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             offset = offset.clamp(-self.trend_max_offset, self.trend_max_offset)
         return v_last + offset
 
+    def _row_of_tau(self, tau: torch.Tensor) -> torch.Tensor:
+        """Map an anchor-relative time (days) to a float image row.
+
+        The row axis spans ``[-render_context_days, +render_horizon_days]`` in
+        anchor-relative days, linearly onto rows ``0..H-1``. The anchor (tau=0)
+        lands on a FIXED reference row for every sample, so all samples are
+        registered identically. Rows increase with time (older context below,
+        forecast horizon above).
+
+        Args:
+            tau (torch.Tensor): Anchor-relative time in days, any shape.
+
+        Returns:
+            torch.Tensor: Float row coordinate, same shape as ``tau`` (unclamped;
+            callers round + clamp before indexing).
+        """
+        H = self.image_size[0]
+        frac = (tau + self.render_context_days) / self._render_t_span
+        return frac * (H - 1)
+
+    def _render_field(self, x_events: torch.Tensor) -> torch.Tensor:
+        """Render the light-curve context into a structured [B, C, H, W] field.
+
+        Rows = TIME (anchor-relative), columns = BAND. Each band owns a contiguous
+        column block of width ``W // n_bands``; the ``n_bands * band_width`` used
+        columns leave any spare right-edge columns zero. Every valid event paints a
+        vertical bilinear tent (half-height ``render_splat // 2``) of its z-scored
+        magnitude across its band's whole column block, so a single observation
+        covers a patch rather than one pixel. Unobserved pixels stay 0 (the
+        normalized mean). The single-channel time-band map is broadcast into all
+        ``backbone_channels`` (render option (a)).
+
+        Args:
+            x_events (torch.Tensor): Window-mode per-event block, shape
+                [B, context_len * (3 + n_bands)], laid out per event as
+                [value, rel_t, valid, one_hot_band(n_bands)].
+
+        Returns:
+            torch.Tensor: Rendered field [B, backbone_channels, H, W].
+        """
+        B = x_events.shape[0]
+        L = self.context_len
+        nb = self.n_bands
+        C = self.backbone_channels
+        H, W = self.image_size
+        device = x_events.device
+
+        ev = x_events.view(B, L, 3 + nb)
+        value = ev[..., 0]  # [B, L]
+        rel_t = ev[..., 1]  # [B, L]
+        valid = ev[..., 2] > 0.5  # [B, L] bool
+        band_idx = ev[..., 3:].argmax(dim=-1)  # [B, L]
+
+        # Anchor rel_t = largest rel_t over valid events (most-recent obs). No
+        # valid event -> 0 (an all-zero field, the normalized mean). tau re-refs
+        # time so the anchor sits at tau=0 (its fixed reference row).
+        neg_inf = torch.finfo(rel_t.dtype).min
+        anchor_rel_t = torch.where(
+            valid, rel_t, torch.full_like(rel_t, neg_inf)
+        ).amax(dim=1)  # [B]
+        anchor_rel_t = torch.where(
+            valid.any(dim=1), anchor_rel_t, torch.zeros_like(anchor_rel_t)
+        )
+        tau = rel_t - anchor_rel_t.unsqueeze(1)  # [B, L]
+
+        row_f = self._row_of_tau(tau)  # [B, L] float rows
+        row_c = row_f.round().long()  # [B, L]
+
+        band_width = W // nb
+        batch_ids = torch.arange(B, device=device).unsqueeze(1).expand(B, L)
+
+        # Accumulate into a compact [B, H, nb] band-time map (one column per band),
+        # expanded to the full column blocks afterwards. Additive index_add over a
+        # small set of vertical tent offsets keeps the scatter fully vectorized (no
+        # per-event Python loop).
+        bt_flat = x_events.new_zeros(B * H * nb)
+        hk = self.render_splat // 2
+        vmask = valid.to(value.dtype)  # [B, L]
+        for dr in range(-hk, hk + 1):
+            w = 1.0 - abs(dr) / (hk + 1)  # tent weight, 1.0 at center
+            rows = (row_c + dr).clamp(0, H - 1)  # [B, L]
+            flat_idx = (
+                batch_ids * (H * nb) + rows * nb + band_idx
+            ).reshape(-1)  # [B*L]
+            contrib = (value * vmask * w).reshape(-1)  # [B*L]
+            bt_flat.index_add_(0, flat_idx, contrib)
+
+        bt = bt_flat.view(B, H, nb)  # [B, H, nb]
+
+        # Expand each band column to its block, then zero-pad any spare columns.
+        cols = bt.repeat_interleave(band_width, dim=2)  # [B, H, nb*band_width]
+        if cols.shape[2] < W:
+            pad = x_events.new_zeros(B, H, W - cols.shape[2])
+            cols = torch.cat([cols, pad], dim=2)  # [B, H, W]
+
+        # Broadcast the single time-band field into all backbone channels.
+        field = cols.unsqueeze(1).expand(B, C, H, W).contiguous()
+        return field
+
+    def _gather_bands(
+        self, pred_img: torch.Tensor, Dt: torch.Tensor
+    ) -> torch.Tensor:
+        """Read the per-band prediction out of the backbone's output field.
+
+        The inverse of :meth:`_render_field`'s coordinate scheme. For each band,
+        pools the backbone output over that band's column block and a small
+        vertical neighbourhood (``+/- gather_rows_k`` rows) around the target row
+        ``row(Dt)``, giving one backbone-channel vector per (sample, band).
+
+        Args:
+            pred_img (torch.Tensor): Backbone output, [B, backbone_channels, H, W].
+            Dt (torch.Tensor): Lead time (days) from the anchor to the target,
+                shape [B] or broadcastable.
+
+        Returns:
+            torch.Tensor: Per-band summary [B, n_bands, backbone_channels].
+        """
+        B, C, H, W = pred_img.shape
+        nb = self.n_bands
+        band_width = W // nb
+        gk = self.gather_rows_k
+        device = pred_img.device
+
+        # Collapse each band's column block: [B, C, H, nb*bw] -> [B, C, H, nb].
+        used = pred_img[..., : nb * band_width]
+        colblock = used.view(B, C, H, nb, band_width).mean(dim=4)  # [B, C, H, nb]
+
+        # Target row per sample, then a vertical window of rows around it.
+        row_t = self._row_of_tau(Dt.reshape(B)).round().long()  # [B]
+        offsets = torch.arange(-gk, gk + 1, device=device)  # [wrows]
+        rows = (row_t.unsqueeze(1) + offsets.unsqueeze(0)).clamp(0, H - 1)  # [B, wr]
+        wr = rows.shape[1]
+
+        # Gather those rows along H and mean-pool them: [B, C, wr, nb] -> [B, C, nb].
+        idx = rows.view(B, 1, wr, 1).expand(B, C, wr, nb)
+        gathered = torch.gather(colblock, 2, idx)  # [B, C, wr, nb]
+        pooled = gathered.mean(dim=2)  # [B, C, nb]
+
+        # -> [B, n_bands, backbone_channels] so the read-head's Linear acts per band.
+        return pooled.transpose(1, 2)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -998,6 +1233,46 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # Fourier Dt encoding for the trainable path ([B, 0] when disabled, so
         # both concats below are no-ops and match the legacy architecture).
         dt_feat = self._encode_dt(Dt, B)
+
+        if self.spatial_render:
+            # -------- Spatial-render path (Study 086) --------
+            # Render the context into a structured field, run the backbone on it
+            # (exercising its 2D windowed attention), and gather the prediction at
+            # the target's (row(Dt), band-column) location. No conditioner / global
+            # pool; the read-head maps the per-band backbone-channel summary (plus
+            # the Fourier Dt encoding) -> n_quantiles, applied per band.
+            field = self._render_field(x_events)  # [B, C, H, W]
+
+            backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
+            backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
+            pred_img = self.backbone(
+                field, backbone_in_vars, backbone_out_vars, Dt
+            )  # [B, C, H, W]
+
+            band_summary = self._gather_bands(pred_img, Dt)  # [B, n_bands, C]
+
+            # Broadcast the Dt encoding across the band axis and concat per band.
+            dt_b = dt_feat.unsqueeze(1).expand(B, self.n_bands, self._dt_extra)
+            head_in = torch.cat([band_summary, dt_b], dim=2)  # [B, n_bands, C+dt]
+            head_out = self.read_head(head_in)  # [B, n_bands, n_quantiles]
+
+            if self.n_quantiles == 1:
+                pred = head_out.squeeze(-1)  # [B, n_bands]
+                if self.predict_delta:
+                    pred = pred + self._band_anchor(x_events, Dt)
+                return pred
+
+            # Quantile head: reorder to [B, n_quantiles, n_bands] and enforce
+            # non-crossing quantiles via cumulative softplus (same scheme as the
+            # legacy quantile path), so the output contract is identical.
+            pred = head_out.permute(0, 2, 1)  # [B, n_quantiles, n_bands]
+            base = pred[:, :1, :]
+            gaps = nn.functional.softplus(pred[:, 1:, :])
+            pred = torch.cat([base, base + torch.cumsum(gaps, dim=1)], dim=1)
+            if self.predict_delta:
+                pred = pred + self._band_anchor(x_events, Dt).unsqueeze(1)
+            return pred  # [B, n_quantiles, n_bands]
+
         # Anchor-phase encoding ([B, 0] when disabled -> no-op concat).
         phase_feat = self._encode_phase(phase_raw, B)
         if phase_feat is None:

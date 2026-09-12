@@ -133,15 +133,21 @@ def build_finetune_optimizer(
     """
     for p in model.backbone.parameters():
         p.requires_grad = False
-    for p in model.conditioner.parameters():
-        p.requires_grad = True
-    for p in model.output_head.parameters():
-        p.requires_grad = True
 
-    head_params = (
-        list(model.conditioner.parameters())
-        + list(model.output_head.parameters())
-    )
+    # The trainable "head" set depends on the wrapper's forward path. The spatial-
+    # render model (Study 086) drops the conditioner/output_head for a single
+    # read_head; the legacy model trains conditioner + output_head. Selecting the
+    # modules that actually run keeps DDP's find_unused_parameters=False valid.
+    if getattr(model, "spatial_render", False):
+        trainable_mods = [model.read_head]
+    else:
+        trainable_mods = [model.conditioner, model.output_head]
+
+    head_params = []
+    for mod in trainable_mods:
+        for p in mod.parameters():
+            p.requires_grad = True
+            head_params.append(p)
 
     if backbone_tail_lr_mult and backbone_tail_lr_mult > 0.0:
         # The backbone must actually run for its tail to receive gradients. Under
@@ -822,6 +828,15 @@ def load_direct_loderunner_checkpoint_9band(
         # conditioner first-layer (input_dim + dt_extra + phase_extra), so it
         # MUST match the training config for the strict load to succeed.
         phase_fourier_bands=checkpoint_data.get("phase_fourier_bands", 0),
+        # False for legacy checkpoints (no key) -> the tile+global-pool path with
+        # a conditioner/output_head. True (Study 086) drops those for a render +
+        # gather + read_head, changing the trainable-module set, so it MUST match
+        # the training config for the strict load to succeed.
+        spatial_render=checkpoint_data.get("spatial_render", False),
+        render_context_days=checkpoint_data.get("render_context_days", None),
+        render_horizon_days=checkpoint_data.get("render_horizon_days", 8.0),
+        render_splat=checkpoint_data.get("render_splat", 5),
+        gather_rows_k=checkpoint_data.get("gather_rows_k", 5),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]
