@@ -51,7 +51,7 @@ from yoke.datasets.kilonova_dataset import NINE_BAND_KEYS
 # Default to the same data the 9-band pipeline trains and computes norm stats on
 # (the Rubin+ZTF set), so the histogram reflects the real training distribution.
 DEFAULT_DATA_GLOB = (
-    "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+    "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
     "rubin_ztf_10000_dataset/lc_*.npz"
 )
 DEFAULT_ERROR_COL = 2
