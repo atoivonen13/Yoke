@@ -512,7 +512,14 @@ def main(args, rank, world_size, local_rank, device):
     # to scheduled-sampling moving difficulty (validation descended), not the
     # anchor, so the trend anchor returns as a production feature. The offset cap
     # (TREND_MAX_OFFSET below) is active while this is True.
-    TREND_DECAY_ANCHOR = True
+    # Study 089b: FALSE -- removes the trend-anchor confound from the dense-context
+    # probe. 089 (dense context + trend anchor) regressed to 2.0153 @ 100 vs 080's
+    # 1.8318; with two variables changed at once (context source + anchor) the
+    # regression can't be pinned. 089b flips only the anchor off (flat-hold), so a
+    # clean read: if it still lands >=1.86, dense context is confirmed useless and
+    # distillation is dead; if it recovers toward 080, the trend anchor was the
+    # culprit, not dense context.
+    TREND_DECAY_ANCHOR = False
     TREND_SLOPE_K = 3
 
     # Cap on the extrapolated anchor offset slope*Dt, in per-band z-score units
