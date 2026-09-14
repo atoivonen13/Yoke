@@ -151,7 +151,7 @@ def resolve_paths(args):
 
     if args.data_glob is None:
         args.data_glob = (
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
         )
 

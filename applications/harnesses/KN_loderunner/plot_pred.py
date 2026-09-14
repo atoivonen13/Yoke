@@ -53,7 +53,7 @@ plt.rcParams["figure.figsize"] = (6, 6)
 #model.load_state_dict(ckpt["model_state_dict"])
 #model.eval()
 
-#file_prefix_list = sorted(glob.glob(f"/net/sescratch1/atoivonen/data/KN_lightcurves/uniform_dataset_20000/lc_*.npz"))
+#file_prefix_list = sorted(glob.glob(f"/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/uniform_dataset_20000/lc_*.npz"))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #ckpt = torch.load("runs/study_005/study005_modelState_epoch0100.pth", map_location=device, weights_only=False)

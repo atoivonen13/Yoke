@@ -136,7 +136,7 @@ parser.add_argument(
     "--kn_realistic_glob",
     type=str,
     default=(
-        "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+        "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
         "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
     ),
     help="Glob for the realistic light-curve files (primary training data).",
@@ -145,7 +145,7 @@ parser.add_argument(
     "--kn_dense_glob",
     type=str,
     default=(
-        "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+        "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
         "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
     ),
     help="Optional glob for the dense light-curve files. When set (and it "
@@ -344,7 +344,9 @@ def main(args, rank, world_size, local_rank, device):
     # spatial-render path. Must be paired with SPATIAL_RENDER=False (render REQUIRES
     # the backbone). BACKBONE_TAIL_LR_MULT stays 0.0 (nothing to unfreeze).
     # Study 088 (render + trend anchor + tail unfrozen): FALSE -- run the backbone.
-    BYPASS_BACKBONE = False
+    # Study 089 (dense-context probe, bypass): TRUE -- bypass MLP path (fast, clean
+    # "is there late-time signal to extract from dense context at all?" test).
+    BYPASS_BACKBONE = True
 
     # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
     # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
@@ -366,7 +368,8 @@ def main(args, rank, world_size, local_rank, device):
     # Study 088: TRUE -- render + backbone, with TREND_DECAY_ANCHOR on and the
     # decoder tail unfrozen (BACKBONE_TAIL_LR_MULT=0.1) so the backbone can adapt
     # its readout (086a frozen collapsed to persistence at 2.94).
-    SPATIAL_RENDER = True
+    # Study 089: FALSE -- bypass MLP for the dense-context ceiling probe.
+    SPATIAL_RENDER = False
     # Bilinear tent splat full width (px) per event and vertical half-window (px)
     # pooled around the target row at readout. render_context/horizon default to
     # CONTEXT_WINDOW_DAYS / TARGET_HORIZON_DAYS below.
@@ -424,7 +427,8 @@ def main(args, rank, world_size, local_rank, device):
     # Study 088: 0.1 -- SPATIAL_RENDER with the decoder tail unfrozen (scope="tail")
     # so the backbone can adapt its readout of the rendered field, instead of the
     # frozen encoder collapsing to persistence as it did in 086a (2.94).
-    BACKBONE_TAIL_LR_MULT = 0.1
+    # Study 089: 0.0 -- bypass path never runs the backbone, so nothing to unfreeze.
+    BACKBONE_TAIL_LR_MULT = 0.0
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
@@ -549,6 +553,27 @@ def main(args, rank, world_size, local_rank, device):
     # 2 d/12 config reproduces the 075 champion exactly.
     CONTEXT_WINDOW_DAYS = 2.0
     MAX_CONTEXT_LEN = 12
+
+    # Study 089 (dense-context CEILING probe). When True, BOTH the training and
+    # validation CONTEXT are drawn from the dense companion set (kn_dense_glob)
+    # instead of the realistic set -- the model sees the smooth, densely-sampled
+    # curve as input rather than the sparse survey detections. This measures the
+    # ceiling: "if the model gets the dense context it wants, how good can late-
+    # time forecasting get?" -- the go/no-go for whether a distillation TEACHER
+    # can be strong enough to be worth distilling from.
+    #
+    # NOT deployable (real inference only has sparse detections); it is a ceiling
+    # probe, and distillation is the mechanism to later recover a sparse-input
+    # student from a strong dense-context teacher.
+    #
+    # HONESTY GUARD: the dense context is still restricted to the SAME
+    # CONTEXT_WINDOW_DAYS (2 d) trailing window -- dense sampling WITHIN the
+    # allowed observing window, NOT dense samples extending up toward the scored
+    # late-time points. This isolates "context richness within the window" and
+    # avoids near-leakage between the (dense) context and the (dense) late-time
+    # eval targets. The realistic-vs-dense TARGET concat below is disabled under
+    # the probe (both context and target come from the dense set already).
+    PROBE_DENSE_CONTEXT = True
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
@@ -943,41 +968,64 @@ def main(args, rank, world_size, local_rank, device):
             append_phase=PHASE_FOURIER_BANDS > 0,
         )
 
-    # Realistic TRAIN objects (always present) plus, if a dense set is provided
-    # and matches files, the SAME train objects viewed densely -- concatenated to
-    # supervise late-time behavior. Validation stays realistic-only (matches the
-    # deployment metric).
-    train_real = _make_9band(args.kn_realistic_glob, train_stems)
-    train_parts = [train_real]
-
-    if args.kn_dense_glob and glob.glob(args.kn_dense_glob):
-        train_dense = _make_9band(args.kn_dense_glob, train_stems)
-        if len(train_dense) > 0:
-            train_parts.append(train_dense)
-            if rank == 0:
-                print(
-                    f"Dense training set added: {len(train_dense)} samples "
-                    f"(realistic: {len(train_real)} samples).",
-                    flush=True,
-                )
-        elif rank == 0:
+    if PROBE_DENSE_CONTEXT:
+        # Study 089 dense-context ceiling probe: BOTH train and val CONTEXT come
+        # from the dense set (the model sees the smooth curve as input). The 2 d
+        # window (CONTEXT_WINDOW_DAYS, applied inside _make_9band) still bounds the
+        # context, so this is dense-WITHIN-window, not leakage toward the scored
+        # late-time points. No realistic/dense concat -- the dense set is both the
+        # context and the supervision here.
+        if not (args.kn_dense_glob and glob.glob(args.kn_dense_glob)):
+            raise FileNotFoundError(
+                "PROBE_DENSE_CONTEXT=True but kn_dense_glob matched no files: "
+                f"{args.kn_dense_glob!r}. The probe requires the dense set."
+            )
+        train_dataset = _make_9band(args.kn_dense_glob, train_stems)
+        val_dataset = _make_9band(args.kn_dense_glob, val_stems)
+        if rank == 0:
             print(
-                "Dense glob matched files but yielded 0 samples for the train "
-                "split; training on realistic set only.",
+                f"PROBE_DENSE_CONTEXT: train+val context from DENSE set "
+                f"({len(train_dataset)} train / {len(val_dataset)} val samples), "
+                f"bounded to {CONTEXT_WINDOW_DAYS} d window. NOT deployable "
+                "(ceiling probe).",
                 flush=True,
             )
-    elif rank == 0 and args.kn_dense_glob:
-        print(
-            "Dense glob set but matched no files; training on realistic set "
-            "only.",
-            flush=True,
+    else:
+        # Realistic TRAIN objects (always present) plus, if a dense set is provided
+        # and matches files, the SAME train objects viewed densely -- concatenated to
+        # supervise late-time behavior. Validation stays realistic-only (matches the
+        # deployment metric).
+        train_real = _make_9band(args.kn_realistic_glob, train_stems)
+        train_parts = [train_real]
+
+        if args.kn_dense_glob and glob.glob(args.kn_dense_glob):
+            train_dense = _make_9band(args.kn_dense_glob, train_stems)
+            if len(train_dense) > 0:
+                train_parts.append(train_dense)
+                if rank == 0:
+                    print(
+                        f"Dense training set added: {len(train_dense)} samples "
+                        f"(realistic: {len(train_real)} samples).",
+                        flush=True,
+                    )
+            elif rank == 0:
+                print(
+                    "Dense glob matched files but yielded 0 samples for the train "
+                    "split; training on realistic set only.",
+                    flush=True,
+                )
+        elif rank == 0 and args.kn_dense_glob:
+            print(
+                "Dense glob set but matched no files; training on realistic set "
+                "only.",
+                flush=True,
+            )
+
+        train_dataset = (
+            ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         )
 
-    train_dataset = (
-        ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
-    )
-
-    val_dataset = _make_9band(args.kn_realistic_glob, val_stems)
+        val_dataset = _make_9band(args.kn_realistic_glob, val_stems)
 
 
     # NOTE: For DDP the batch_size is the per-GPU batch_size!!!
@@ -1169,6 +1217,7 @@ def main(args, rank, world_size, local_rank, device):
                     "context_window_days": CONTEXT_WINDOW_DAYS,
                     "max_context_len": MAX_CONTEXT_LEN,
                     "target_horizon_days": TARGET_HORIZON_DAYS,
+                    "probe_dense_context": PROBE_DENSE_CONTEXT,
                     "train_filelist": args.train_filelist,
                     "validation_filelist": args.validation_filelist,
                     "kn_realistic_glob": args.kn_realistic_glob,

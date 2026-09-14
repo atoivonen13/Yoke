@@ -312,6 +312,7 @@ def eval_object(
     late_time_max_days,
     uniform_stream: tuple | None = None,
     rollout: bool = False,
+    probe_dense_context: bool = False,
 ):
     """Score one object's late-time dense truth against a realistic-context forecast.
 
@@ -343,23 +344,37 @@ def eval_object(
     if r_t.shape[0] < 1 or d_t.shape[0] < 1:
         return None
 
-    # Phase zero = the first realistic detection (the observed trigger).
+    # Phase zero = the first REALISTIC detection (the observed trigger). Kept as
+    # the realistic trigger even under the dense-context probe, so the scored
+    # late-time region (below) is IDENTICAL to the normal eval and the RMSE is
+    # directly comparable -- only the context SOURCE changes.
     t0 = float(r_t[0])
 
-    # The cutoff splits context from forecast: the model may only see realistic
+    # Context source. Normally the realistic stream (matches deployment). Under
+    # the dense-context ceiling probe (study 089), the context is drawn from the
+    # DENSE stream instead -- the smooth, densely-sampled curve the model was
+    # trained on with PROBE_DENSE_CONTEXT=True -- still truncated at the same
+    # cutoff below, so it is dense-WITHIN-window, not leakage toward the scored
+    # points. drop_upper_limits was already applied when the streams were read.
+    if probe_dense_context:
+        c_t, c_v, c_b = d_t, d_v, d_b
+    else:
+        c_t, c_v, c_b = r_t, r_v, r_b
+
+    # The cutoff splits context from forecast: the model may only see context
     # detections up to the cutoff phase, and must FORECAST everything after it
     # (scored against the dense truth). Truncating the context here -- rather
-    # than feeding the whole realistic stream and only scoring late points --
-    # makes every object forecast from the same phase boundary, instead of from
-    # wherever its realistic coverage happens to end. (Without this, a
-    # bright/well-covered object whose realistic detections run to ~14 d has an
-    # almost-zero forecast horizon and the curve collapses to a stub.)
-    ctx_mask = (r_t - t0) <= late_time_cutoff_days
+    # than feeding the whole stream and only scoring late points -- makes every
+    # object forecast from the same phase boundary, instead of from wherever its
+    # coverage happens to end. (Without this, a bright/well-covered object whose
+    # detections run to ~14 d has an almost-zero forecast horizon and the curve
+    # collapses to a stub.)
+    ctx_mask = (c_t - t0) <= late_time_cutoff_days
     if not np.any(ctx_mask):
         return None
-    r_t_ctx = r_t[ctx_mask]
-    r_v_ctx = r_v[ctx_mask]
-    r_b_ctx = r_b[ctx_mask]
+    r_t_ctx = c_t[ctx_mask]
+    r_v_ctx = c_v[ctx_mask]
+    r_b_ctx = c_b[ctx_mask]
     last_real_t = float(r_t_ctx[-1])
 
     # Score the forecast only within the phase band cutoff < phase <= max_days.
@@ -368,9 +383,10 @@ def eval_object(
     if not np.any(late_mask):
         return None
 
-    # Seed context from the truncated realistic stream: trailing window ending
-    # at the last pre-cutoff realistic detection, normalized as in training.
-    # build_context_input subtracts win_t[0], so absolute times are fine here.
+    # Seed context from the truncated context stream (realistic, or dense under
+    # the probe): trailing window ending at the last pre-cutoff detection,
+    # normalized as in training. build_context_input subtracts win_t[0], so
+    # absolute times are fine here.
     r_v_norm = (r_v_ctx - means[r_b_ctx]) / (stds[r_b_ctx] + EPS)
     win_v, win_t, win_b = _select_window(
         ctx_t=list(r_t_ctx.astype(np.float32)),
@@ -591,7 +607,7 @@ def get_args():
         "--realistic_glob",
         type=str,
         default=(
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
         ),
         help="Glob for the realistic light-curve files (observing context).",
@@ -600,7 +616,7 @@ def get_args():
         "--dense_glob",
         type=str,
         default=(
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
         ),
         help="Glob for the dense light-curve files (late-time truth). Defaults to "
@@ -612,7 +628,7 @@ def get_args():
         "--uniform_glob",
         type=str,
         default=(
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
         ),
         help="Optional glob for a UNIFORM-grid, noise-free, no-limiting-mag "
@@ -676,6 +692,17 @@ def get_args():
         "context before the next late-time point (the true inference path), "
         "instead of the default DIRECT single-pass forecast from a fixed "
         "pre-cutoff context. Comparing the two isolates rollout drift.",
+    )
+    p.add_argument(
+        "--probe_dense_context",
+        action="store_true",
+        help="Study 089 dense-context CEILING probe. Build the model's CONTEXT "
+        "from the DENSE set (same object, dense_glob) instead of the realistic "
+        "set, still truncated at --late_time_cutoff_days (dense-WITHIN-window, "
+        "not leakage toward the scored points). Scoring is unchanged (dense truth "
+        "at cutoff < phase <= max_days). Use this to eval a model TRAINED with "
+        "PROBE_DENSE_CONTEXT=True, so train and eval both feed dense context and "
+        "the number is the true dense-context ceiling. NOT the deployable path.",
     )
     return p.parse_args()
 
@@ -741,6 +768,12 @@ def main():
         f"Realistic files: {len(real_map)}; dense files: {len(dense_map)}; "
         f"paired & in-split: {len(stems)}"
     )
+    if args.probe_dense_context:
+        print(
+            "PROBE_DENSE_CONTEXT: model CONTEXT drawn from the DENSE set "
+            f"(truncated at {args.late_time_cutoff_days} d), scored against dense "
+            "truth. Dense-context CEILING probe -- NOT the deployable path."
+        )
     if args.max_objects > 0:
         stems = stems[: args.max_objects]
 
@@ -768,6 +801,7 @@ def main():
             args.late_time_max_days,
             uniform_stream=uniform_stream,
             rollout=args.rollout,
+            probe_dense_context=args.probe_dense_context,
         )
         if result is None:
             continue

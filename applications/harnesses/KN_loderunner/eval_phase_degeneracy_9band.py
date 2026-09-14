@@ -192,7 +192,7 @@ def get_args():
         "--realistic_glob",
         type=str,
         default=(
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
         ),
         help="Glob for the realistic light-curve files (observing context).",
@@ -201,7 +201,7 @@ def get_args():
         "--dense_glob",
         type=str,
         default=(
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
         ),
         help="Glob for the dense light-curve files (late-time truth).",
@@ -224,7 +224,7 @@ def get_args():
         "--uniform_glob",
         type=str,
         default=(
-            "/net/sescratch1/atoivonen/data/KN_lightcurves/"
+            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
             "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
         ),
         help="Glob for the UNIFORM-grid companion set. Only used as a FALLBACK "
