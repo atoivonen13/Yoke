@@ -343,7 +343,8 @@ def main(args, rank, world_size, local_rank, device):
     # Study 087 (bypass control for 086): TRUE. The no-backbone A/B against 086's
     # spatial-render path. Must be paired with SPATIAL_RENDER=False (render REQUIRES
     # the backbone). BACKBONE_TAIL_LR_MULT stays 0.0 (nothing to unfreeze).
-    BYPASS_BACKBONE = True
+    # Study 088 (render + trend anchor + tail unfrozen): FALSE -- run the backbone.
+    BYPASS_BACKBONE = False
 
     # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
     # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
@@ -362,7 +363,10 @@ def main(args, rank, world_size, local_rank, device):
     #   086a: SPATIAL_RENDER + backbone frozen  (BACKBONE_TAIL_LR_MULT = 0.0)
     #   086b: SPATIAL_RENDER + tail @ 0.1x LR   (BACKBONE_TAIL_LR_MULT = 0.1)
     # Study 087: FALSE -- bypass-MLP control (080 path), BYPASS_BACKBONE=True above.
-    SPATIAL_RENDER = False
+    # Study 088: TRUE -- render + backbone, with TREND_DECAY_ANCHOR on and the
+    # decoder tail unfrozen (BACKBONE_TAIL_LR_MULT=0.1) so the backbone can adapt
+    # its readout (086a frozen collapsed to persistence at 2.94).
+    SPATIAL_RENDER = True
     # Bilinear tent splat full width (px) per event and vertical half-window (px)
     # pooled around the target row at readout. render_context/horizon default to
     # CONTEXT_WINDOW_DAYS / TARGET_HORIZON_DAYS below.
@@ -416,7 +420,11 @@ def main(args, rank, world_size, local_rank, device):
     # transfer test: does the pretrained spatial prior alone, given real structure,
     # beat the bypass head? Only the read_head trains. Flip to 0.1 for 086b (tail
     # unfrozen @ 0.1x LR, scope="tail") to let the backbone adapt its readout.
-    BACKBONE_TAIL_LR_MULT = 0.0
+    #
+    # Study 088: 0.1 -- SPATIAL_RENDER with the decoder tail unfrozen (scope="tail")
+    # so the backbone can adapt its readout of the rendered field, instead of the
+    # frozen encoder collapsing to persistence as it did in 086a (2.94).
+    BACKBONE_TAIL_LR_MULT = 0.1
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
