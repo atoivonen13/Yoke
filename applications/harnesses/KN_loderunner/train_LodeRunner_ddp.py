@@ -398,7 +398,11 @@ def main(args, rank, world_size, local_rank, device):
     # Study 084: MUST be None. The non-bypass path feeds the frozen backbone, which
     # needs exactly backbone_channels=8, so bomberman.py raises on a decoupled waist
     # with the backbone on. Waist returns to 8 (the pretrained input width).
-    BYPASS_CHANNELS = None
+    #
+    # Study 091: 32 to match the 080 champion. Valid only with BYPASS_BACKBONE=True
+    # (set above). 089/090 left this None (waist 8) which confounded the dense-context
+    # probe with a capacity drop; 091 restores 32 so context source is the sole delta.
+    BYPASS_CHANNELS = 32
 
     # Study 082 (backbone capacity test). When > 0, the OUTPUT-PROXIMAL decoder
     # tail of the frozen Swin U-Net (final PatchExpand + final up_connect +
@@ -516,10 +520,14 @@ def main(args, rank, world_size, local_rank, device):
     # probe. 089 (dense context + trend anchor) regressed to 2.0153 @ 100 vs 080's
     # 1.8318; with two variables changed at once (context source + anchor) the
     # regression can't be pinned. 089b flips only the anchor off (flat-hold), so a
-    # clean read: if it still lands >=1.86, dense context is confirmed useless and
-    # distillation is dead; if it recovers toward 080, the trend anchor was the
-    # culprit, not dense context.
-    TREND_DECAY_ANCHOR = False
+    # Study 091: back to TRUE to match the 080 champion. 089/090 were run at
+    # BYPASS_CHANNELS=None (waist 8), so their regression vs 080 (waist 32) was
+    # confounded by the waist drop -- 089 (waist 8, dense) 2.0153 landed right on
+    # 081 (waist 8, sparse) 2.0208, i.e. dense context was ~neutral, the waist did
+    # the damage. 091 pins waist=32 AND anchor=True so context source is the ONLY
+    # difference from 080 (1.8318 @100). Clean go/no-go: >=~1.86 -> dense context
+    # is useless, distillation dead; well below -> real teacher signal to distill.
+    TREND_DECAY_ANCHOR = True
     TREND_SLOPE_K = 3
 
     # Cap on the extrapolated anchor offset slope*Dt, in per-band z-score units
