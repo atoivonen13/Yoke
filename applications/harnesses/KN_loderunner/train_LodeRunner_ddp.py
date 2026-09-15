@@ -589,12 +589,19 @@ def main(args, rank, world_size, local_rank, device):
     # eval targets. The realistic-vs-dense TARGET concat below is disabled under
     # the probe (both context and target come from the dense set already).
     #
-    # Study 092: FALSE -- sparse-context REPRODUCTION control. With waist=32 and
-    # trend anchor (both restored for 091), flipping the context source back to
-    # sparse makes this config identical to the 080 champion. Expected ~1.83 @100.
-    # If it reproduces 080, the harness hasn't drifted and the 091 dense regression
-    # (+0.22) is a real context effect, not a code change.
-    PROBE_DENSE_CONTEXT = False
+    # Study 094: TRUE -- the CLEAN distillation go/no-go. 093 (sparse, batch 5)
+    # reproduced 080 at 1.8792 @1000, re-anchoring the batch-5 regime. 094 is its
+    # dense-context twin: identical config (waist 32, trend anchor, BATCH_SIZE=5),
+    # only PROBE_DENSE_CONTEXT flipped on, so context source is the SOLE difference
+    # from 093. Compare 094 to 093 (1.8792), NOT to 080 or the batch-2 runs.
+    #   094 << 1.88  -> dense context has extractable late-time signal -> build the
+    #                   teacher->student distillation pipeline.
+    #   094 ~= 1.88+ -> dense context neutral/harmful -> distillation dead (clean call).
+    # Eval MUST pass --probe_dense_context so train/eval both feed dense context.
+    #
+    # (Prior note, study 092: FALSE was the sparse reproduction control; 093 is that
+    # run at batch 5 and it reproduced 080 cleanly, so the harness has NOT drifted.)
+    PROBE_DENSE_CONTEXT = True
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]

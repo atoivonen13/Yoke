@@ -30,37 +30,54 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 086a | _this commit_ | 2.9360 (100) | **SPATIAL RENDER** + backbone **frozen**, waist 8, quantile head | **Interface fix, not a config toggle.** Root cause of the 080-tie: 081–085 tiled the conditioner's [B,8] vector into a spatially-**constant** image and global-pooled the output, forcing the Swin backbone to act as a frozen per-channel MLP (the bypass MLP's exact job → ties by construction). 086 renders the light curve as a 2D field (rows=time, cols=band, bilinear tent splat/event) and **gathers** the prediction at the target's (row(Dt), band-col) instead of global-pooling — finally exercising 2D windowed attention on structured input. Conditioner/output_head dropped for a small `read_head`; output contract [B,Q,9] unchanged (rollout/eval need no change). 086a = frozen backbone (only read_head trains). **Catastrophic (+1.10 vs 080).** Persistence collapse: the gather reads rows 224–1119 (forecast region), which is ZERO by construction — only context rows 0–224 get splatted (~0.44% of the field non-zero). A frozen encoder cannot manufacture signal in the empty readout region. Root failure of the whole render line. |
 | 087 | _this commit_ | 2.1899 (100) | **bypass MLP control** (SPATIAL_RENDER=False, BYPASS_BACKBONE=True), waist per config, quantile head | Bypass sanity control run alongside the render experiments (NOT the 080 champion config — differs in other flags). Beats render 086a by ~0.75 but still well above 080, i.e. render is far worse than plain bypass. Confirms the render interface is the problem, not the task. |
 | 088 | _this commit_ | 2.4136 (100) | SPATIAL RENDER + **tail unfrozen** @ 0.1× LR (scope="tail") + **TREND_DECAY_ANCHOR**, waist 8, quantile head | Render + partial backbone unfreeze + trend anchor, the best attempt to rescue the render line. Recovered +0.52 vs 086a (2.94→2.41) — tail unfreeze lets the backbone push *some* signal into the forecast rows — but still loses to bypass 087 (2.19) and is ~0.55 above 080. Under-fades rather than collapses. **Render line abandoned after this:** even with unfreeze + anchor, gathering from a structurally-empty region can't beat the bypass MLP. |
-| 089 | `cb2bba9` | 2.0153 (100) | **DENSE-CONTEXT probe** (PROBE_DENSE_CONTEXT=True), bypass MLP, **waist 8** (BYPASS_CHANNELS=None), trend anchor, quantile head | Ceiling probe for distillation: draw model context from the DENSE set (all in-window detections, truncated at 2 d — dense-within-window, not leakage), scored region unchanged so RMSE is comparable. **Go/no-go = does privileged dense context beat sparse 080?** CONFOUNDED as a 080 comparison: waist was 8, not 32 (None pins waist to backbone_channels=8). Lands right on 081 (waist 8, sparse) 2.0208 → at fixed waist 8, dense context is ~neutral (2.02→2.02); the gap vs 080 is the waist, not the context. 091 removes the confound. |
-| 090 | `cb2bba9` | 1.9616 (100) | dense-context probe, bypass MLP, **waist 8**, **TREND_DECAY_ANCHOR=False** (flat-hold), quantile head | 089 with the anchor flipped off. NOT anchor-matched to 080 (080 uses trend), so it introduces a variable rather than removing one — my initial framing was backwards. Useful only as: (089 vs 090) at fixed dense+waist-8, flat-hold beats trend by ~0.05; and confirms dense context loses to sparse 080 under both anchors. Still waist-8 confounded vs 080. |
-| 091 | `cb2bba9` | 2.0555 (100) | **DENSE-CONTEXT probe, CLEAN** — bypass MLP, **waist 32**, **trend anchor** (both matched to 080), quantile head | **The true single-variable test: context source is the ONLY difference from 080 (1.8318 @100).** Dense context **regresses +0.22** — and is the *worst* of the dense runs, worse than the waist-8 dense runs (089 2.0153, 090 1.9616). So at full capacity dense context actively HURTS, and hurts more, not less. Deepest blue under-fade yet (ztfg −1.06, u −0.75, i −0.71, r −0.63). **Definitive no-go for distillation:** a teacher with privileged dense context forecasts *worse* than the sparse student — nothing to transfer. Late-time info genuinely isn't in the 2 d window regardless of sampling density. |
+| 089 | `cb2bba9` | 2.0153 (100) | **DENSE-CONTEXT probe** (PROBE_DENSE_CONTEXT=True), bypass MLP, **waist 8** (BYPASS_CHANNELS=None), trend anchor, quantile head, **BATCH_SIZE=2** | Ceiling probe for distillation: draw model context from the DENSE set (all in-window detections, truncated at 2 d — dense-within-window, not leakage), scored region unchanged so RMSE is comparable. **Go/no-go = does privileged dense context help?** Two confounds vs the 080 champion (see ⚠️ banner below): (1) waist 8 not 32; (2) **batch 2 not 5**. Compare only within the batch-2 family (090/091/092). |
+| 090 | `cb2bba9` | 1.9616 (100) | dense-context probe, bypass MLP, **waist 8**, **TREND_DECAY_ANCHOR=False** (flat-hold), quantile head, **BATCH_SIZE=2** | 089 with the anchor flipped off. Within-regime read: (089 vs 090) at fixed dense+waist-8+batch-2, flat-hold beats trend by ~0.05. NOT comparable to 080 (batch + waist + anchor all differ). |
+| 091 | `cb2bba9` | 2.0555 (100) | **DENSE-CONTEXT probe** — bypass MLP, **waist 32**, **trend anchor**, quantile head, **BATCH_SIZE=2** | Intended as the clean single-variable test vs 080, but **it is NOT** — 080 ran batch 5, this ran batch 2 (see ⚠️). ~~"Definitive no-go, dense regresses +0.22 vs 080"~~ **RETRACTED:** that compared batch-2 dense against batch-5 sparse; the offset was mostly the batch cut, present in every batch-2 run. The valid comparison is same-regime: **091 (dense, batch 2) 2.0555 vs 092 (sparse, batch 2) 2.1289 → dense slightly BEATS sparse by ~0.07** (within the ±0.068 @100 noise). Dense context is NOT harmful; distillation is NOT ruled out. Needs a batch-5 rerun (093+) to settle. |
+| 092 | `19b6fd7` | 2.1289 (100) | sparse-context reproduction control, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=2** | Meant to reproduce 080 (~1.83). **Failed to — landed 2.1289 (+0.30).** Diagnosis: code path is byte-identical to 080 (dataset/epoch/eval/optimizer all verified unchanged); the drift is the **launch regime** — the active CSV row runs BATCH_SIZE=2, but 080 ran batch 5 (eff. 20). STUDY_LOG already records the batch 5→2 penalty as ~0.045 (082→085); here the full batch-2 + schedule effect is ~0.30. So 092 is "080's architecture, batch-2 regime," not a reproduction. **This run is what exposed the batch confound in 089–091.** Reproduction retried at batch 5 as 093. |
+| 093 | `19b6fd7` | **1.8792 (1000)** / 1.9121 (100) | sparse-context reproduction of 080, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | **✅ CLEAN REPRODUCTION of 080** (1.8582 @1000). Δ = **+0.021 @1000**, within noise. Confirms (1) no harness drift — current code + moved data + optimizer-builder refactor all reproduce the champion; (2) the batch confound was the whole 092 story (batch 2→5 recovered +0.22 @100); (3) the @100 residual vs 080 was eval-size optimism (1.9121@100 → 1.8792@1000). **Re-anchors the batch-5 reference regime.** One difference: bias signature flipped — several bands positive (u +0.14, g +0.12, ztfi +0.14) vs 080's persistent negative under-fade. Same RMSE, different minimum; the blue under-fade is largely gone here. **093 is now the sparse batch-5 baseline for the distillation go/no-go** (needs a dense batch-5 twin to compare, evaluated with --probe_dense_context). |
+
+> ⚠️ **BATCH CONFOUND (studies 089–092).** All four ran at **BATCH_SIZE=2**
+> (the reduced regime introduced for 084/085 to fit VRAM), while champion **080
+> ran batch 5** (eff. 20). The batch cut alone costs ~0.045 mag (082→085), and the
+> full batch-2 + shortened schedule costs ~0.30 here (092 vs 080). **Therefore any
+> comparison of an 089–092 number to 080's 1.8318 is invalid** — the gap is mostly
+> batch, not the variable under test. Within the batch-2 family the comparisons are
+> clean: at matched regime **dense context ≈ or slightly beats sparse** (091 2.0555
+> vs 092 2.1289), so the earlier "dense context hurts → distillation dead" call was
+> an artifact and is **retracted**. **Resolved by 093:** the batch-5 sparse
+> reproduction landed 1.8792 @1000 (Δ +0.021 vs 080) — clean, no drift. Batch was
+> the whole confound. The distillation go/no-go now needs a **dense batch-5 twin**
+> compared to 093 (1.8792), not 080.
 
 **Eval-size note:** 100-object evals run ~0.03 mag optimistic vs 1000-object
 (080: 1.8318 → 1.8582). Quote the **1000-object** number when comparing studies;
 the 100-obj bootstrap CI half-width alone is ±0.068.
 
-## Conclusion (as of study 091)
+## Conclusion (as of study 092)
 
 Model is at the **aleatoric floor** (~1.86 late-time RMSE at 1000 objects),
-confirmed **6 ways**: capacity (waist 32→64 flat, 083), backbone (082 tie), data
-(no train/test gap), spatial render (086–088 all worse), and now
-**context density** (091: dense context regresses +0.22 vs sparse 080, and is
-worst at full waist). The last is the most direct: enriching the *input itself*
-doesn't help, so the late-time 2→10 d signal is genuinely not present in the 2 d
-context window regardless of sampling density.
+confirmed **4 ways**: capacity (waist 32→64 flat, 083), backbone (082 tie), data
+(no train/test gap), and spatial render (086–088 all worse).
 
-**Two lines closed:**
+**One line closed, one still open:**
 - **Spatial render (086–088): dead.** The gather reads a forecast region that is
   zero by construction (~0.44% of the field non-zero); a mostly-frozen encoder
   can't manufacture signal there. Best rescue (088, tail-unfreeze + trend anchor)
   still lost to plain bypass. Abandoned.
-- **Distillation: ruled out empirically (091).** A dense-context teacher forecasts
-  *worse* than the sparse student — no privileged signal to transfer.
+- **Distillation: STILL OPEN.** The 089–091 "no-go" was **retracted** — it rested
+  on comparing batch-2 dense runs against batch-5 sparse 080 (see ⚠️ banner). **093
+  (sparse, batch 5) reproduced 080 cleanly** (1.8792 @1000, Δ +0.021), confirming
+  the batch confound was the whole story and re-anchoring the batch-5 regime.
+  Whether a dense-context teacher genuinely beats the sparse student is still
+  **undetermined**; the actual go/no-go is a **dense batch-5 twin** compared to
+  093 (1.8792), evaluated with `--probe_dense_context`.
 
 **Champion: study 080** — bypass MLP, waist 32, quantile head, trend anchor
-(1.8582 @1000). Remaining signal is NOT capacity, architecture, or context
-density: it's (a) per-band systematic bias (ztfg/u still −0.8 to −0.9) and
-(b) context CONTENT (photometric errors, per-band recency), not anything we can
-reach by feeding more or rendering differently.
+(1.8582 @1000), reproduced by **093** (1.8792 @1000) in the current code. Its
+remaining error is likely (a) per-band systematic bias and (b) context CONTENT
+(photometric errors, per-band recency). **Batch-5 is the reference regime** (084–092
+were all batch-2 and are not directly comparable to it); 093 re-anchors it and is
+the sparse baseline all future dense/distillation runs must be compared against.
 
 \* Commit is the nearest committed state matching that study's config; the study
 number itself is not in the commit (see note above). Where a study reused an

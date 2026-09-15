@@ -96,7 +96,12 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 #   87 = SPATIAL_RENDER=False, BYPASS_BACKBONE=True  (bypass MLP = 080 path)
 86,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #87,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-
+#88,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#89,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#90,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#91,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#92,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+93,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 
 
