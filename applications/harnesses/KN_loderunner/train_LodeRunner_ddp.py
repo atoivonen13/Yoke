@@ -601,7 +601,11 @@ def main(args, rank, world_size, local_rank, device):
     #
     # (Prior note, study 092: FALSE was the sparse reproduction control; 093 is that
     # run at batch 5 and it reproduced 080 cleanly, so the harness has NOT drifted.)
-    PROBE_DENSE_CONTEXT = True
+    #
+    # Study 095: FALSE -- distillation settled (094 no-go), back to the deployable
+    # sparse path. 095 tests the 7 d-horizon task redefinition (TARGET_HORIZON_DAYS=5)
+    # on sparse context, so it is the 093 champion config with a shorter horizon.
+    PROBE_DENSE_CONTEXT = False
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
@@ -612,7 +616,12 @@ def main(args, rank, world_size, local_rank, device):
     # rollouts forecast out to ~12d. Set from the plot_observation_histograms.py
     # "Supervised Δt vs forecast horizon" panel (the h=1 tail is the uncovered
     # region). Leave None to supervise the immediate next event as before.
-    TARGET_HORIZON_DAYS = 8.0
+    # Study 095: 5.0 (was 8.0). Task redefinition -- forecast horizon shrunk from
+    # 10 d to 7 d PHASE (from trigger), context window kept at 2 d. This is a
+    # lead-time-from-anchor value, offset from phase by the 2 d window:
+    # phase = lead + CONTEXT_WINDOW_DAYS, so phase 7 -> lead 5. The eval's
+    # --late_time_max_days must be set to 7.0 to match (phase-from-trigger).
+    TARGET_HORIZON_DAYS = 5.0
     # In window mode the model's first layer is sized by the padded width.
     WRAPPER_CONTEXT_LEN = (
         MAX_CONTEXT_LEN if CONTEXT_WINDOW_DAYS is not None else CONTEXT_LEN
