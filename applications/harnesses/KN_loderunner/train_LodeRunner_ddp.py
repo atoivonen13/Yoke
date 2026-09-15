@@ -588,7 +588,13 @@ def main(args, rank, world_size, local_rank, device):
     # avoids near-leakage between the (dense) context and the (dense) late-time
     # eval targets. The realistic-vs-dense TARGET concat below is disabled under
     # the probe (both context and target come from the dense set already).
-    PROBE_DENSE_CONTEXT = True
+    #
+    # Study 092: FALSE -- sparse-context REPRODUCTION control. With waist=32 and
+    # trend anchor (both restored for 091), flipping the context source back to
+    # sparse makes this config identical to the 080 champion. Expected ~1.83 @100.
+    # If it reproduces 080, the harness hasn't drifted and the 091 dense regression
+    # (+0.22) is a real context effect, not a code change.
+    PROBE_DENSE_CONTEXT = False
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
