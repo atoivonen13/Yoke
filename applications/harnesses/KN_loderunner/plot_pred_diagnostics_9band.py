@@ -132,12 +132,15 @@ def get_args():
     parser.add_argument(
         "--fixed_forecast_max_days",
         type=float,
-        default=10.0,
-        help="Cap (days past the last context event) on the smooth fixed-context "
-        "forecast sweep. The sweep would otherwise extend to the last true event "
-        "of each curve, which can run well past the region we care about and into "
-        "the unsupervised tail. Set to match the eval's --late_time_max_days so "
-        "both scripts show the same forecast horizon.",
+        default=5.0,
+        help="Cap on the smooth fixed-context forecast sweep, measured as LEAD "
+        "TIME (days past the last context event / anchor) -- NOT phase from "
+        "trigger. The sweep would otherwise extend to the last true event of each "
+        "curve, well into the unsupervised tail. Relates to the eval's "
+        "--late_time_max_days (which is phase-from-trigger) by the context window: "
+        "phase = lead + CONTEXT_WINDOW_DAYS. Study 095: default 5 (lead) matches "
+        "the 7 d phase horizon (5 + 2 d context) and the model's "
+        "TARGET_HORIZON_DAYS=5. Was 10 for the 2->10 d studies (<=094).",
     )
     parser.add_argument(
         "--norm_stats_path",
