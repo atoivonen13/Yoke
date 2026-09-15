@@ -290,7 +290,11 @@ def main(args, rank, world_size, local_rank, device):
     # 1.84 (MAE should improve). This run is NOT RMSE-comparable to 075 by design.
     # Fresh study: the head's last-layer width changes with N_QUANTILES, so start
     # at epoch 0 -- do NOT restart from a point (N_QUANTILES=1) checkpoint.
-    N_QUANTILES = 3
+    # Study 098: 1 -- point head + Huber (LOSS_TYPE below). Reverts the quantile
+    # head that made 080 champion (its 0.5-pinball collapsed the blue-band bias),
+    # so RMSE may regress; the point of the run is a diagnostic on the objective,
+    # not a champion attempt. NOT RMSE-comparable to the quantile studies (080-097).
+    N_QUANTILES = 1
     QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
@@ -301,7 +305,7 @@ def main(args, rank, world_size, local_rank, device):
     # confounded by a smaller effective batch and is still not L2). Ignored when
     # N_QUANTILES > 1 (the pinball loss is used instead). Recorded loss values
     # are not comparable across loss types -- start an "mse" run as a fresh study.
-    LOSS_TYPE = "mse"  # "huber" | "mse"
+    LOSS_TYPE = "huber"  # "huber" | "mse"  (Study 098: huber, delta=0.1)
 
     # Global grad-norm clip applied before optimizer.step(). Huber(delta=0.1)
     # implicitly bounded per-sample gradients; MSE does not, so its ~3-sigma

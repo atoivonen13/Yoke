@@ -429,15 +429,18 @@ def main():
         "--logy",
         dest="logy",
         action="store_true",
-        default=True,
-        help="Use log scale on y-axis. This is the default.",
+        default=False,
+        help="Use log scale on y-axis. A log axis compresses the ~0.05-0.9 "
+        "aleatoric spread so the small (few-%) shift in the median that "
+        "corresponds to a real eval-RMSE change is invisible; linear (the "
+        "default) resolves it.",
     )
 
     parser.add_argument(
         "--linear",
         dest="logy",
         action="store_false",
-        help="Use linear y-axis.",
+        help="Use linear y-axis. This is the default.",
     )
 
     parser.add_argument(
