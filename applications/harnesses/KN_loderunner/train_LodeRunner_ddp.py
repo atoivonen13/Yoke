@@ -527,7 +527,12 @@ def main(args, rank, world_size, local_rank, device):
     # the damage. 091 pins waist=32 AND anchor=True so context source is the ONLY
     # difference from 080 (1.8318 @100). Clean go/no-go: >=~1.86 -> dense context
     # is useless, distillation dead; well below -> real teacher signal to distill.
-    TREND_DECAY_ANCHOR = True
+    # Study 097: FALSE -- anchor OFF, the rollout-off twin of 096 (which was anchor
+    # ON, 1.7896 @1000 on 2->7). Direct A/B for how much of 096's number is the
+    # analytic trend extrapolation vs the learned head: if 097 >> 1.7896 the anchor
+    # is doing the forecasting; if ~equal the head learned it. Only the anchor flag
+    # changes from 096 (sparse, waist 32, batch 5, rollout 1, horizon 5 / 2->7).
+    TREND_DECAY_ANCHOR = False
     TREND_SLOPE_K = 3
 
     # Cap on the extrapolated anchor offset slope*Dt, in per-band z-score units

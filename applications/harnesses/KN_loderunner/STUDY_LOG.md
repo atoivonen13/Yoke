@@ -36,6 +36,9 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 092 | `19b6fd7` | 2.1289 (100) | sparse-context reproduction control, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=2** | Meant to reproduce 080 (~1.83). **Failed to — landed 2.1289 (+0.30).** Diagnosis: code path is byte-identical to 080 (dataset/epoch/eval/optimizer all verified unchanged); the drift is the **launch regime** — the active CSV row runs BATCH_SIZE=2, but 080 ran batch 5 (eff. 20). STUDY_LOG already records the batch 5→2 penalty as ~0.045 (082→085); here the full batch-2 + schedule effect is ~0.30. So 092 is "080's architecture, batch-2 regime," not a reproduction. **This run is what exposed the batch confound in 089–091.** Reproduction retried at batch 5 as 093. |
 | 093 | `19b6fd7` | **1.8792 (1000)** / 1.9121 (100) | sparse-context reproduction of 080, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | **✅ CLEAN REPRODUCTION of 080** (1.8582 @1000). Δ = **+0.021 @1000**, within noise. Confirms (1) no harness drift — current code + moved data + optimizer-builder refactor all reproduce the champion; (2) the batch confound was the whole 092 story (batch 2→5 recovered +0.22 @100); (3) the @100 residual vs 080 was eval-size optimism (1.9121@100 → 1.8792@1000). **Re-anchors the batch-5 reference regime.** One difference: bias signature flipped — several bands positive (u +0.14, g +0.12, ztfi +0.14) vs 080's persistent negative under-fade. Same RMSE, different minimum; the blue under-fade is largely gone here. **093 is now the sparse batch-5 baseline for the distillation go/no-go** (needs a dense batch-5 twin to compare, evaluated with --probe_dense_context). |
 | 094 | `19b6fd7` | **1.8733 (1000)** | **DENSE-CONTEXT twin of 093** (PROBE_DENSE_CONTEXT=True), bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | **THE CLEAN DISTILLATION GO/NO-GO.** Identical to 093 in every knob (waist 32, trend anchor, batch 5); context source is the SOLE difference. Result: **Δ = −0.006 @1000 vs 093** (1.8733 vs 1.8792) — dense context is statistically **indistinguishable** from sparse, far inside the noise floor. **DISTILLATION = NO-GO, clean call.** Privileged dense in-window context buys nothing, so a dense-context teacher is no stronger than the sparse student → nothing to transfer. Confirms the late-time 2→10 d signal is genuinely absent from the 2 d window regardless of sampling density — an information limit, not capacity or modeling. This is the correctly-controlled version of the retracted 089–091 claim. |
+| 095 | _TBD_ | 1.9168 (1000, 998 obj / 12485 pts) | **SHORTER HORIZON: scored 2→7 d** (TARGET_HORIZON_DAYS 8→5, eval `--late_time_max_days 7`), scheduled sampling **ON** (n_rollout_steps=12), sparse context, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | ⚠️ **NOT comparable to ≤094** (those scored 2→**10**; this scores 2→**7**, an easier near-region population → different RMSE by construction, see 🔻 banner). Sole purpose was to establish the shorter horizon + serve as the scheduled-sampling-**ON** baseline for the 096 twin. Clean same-region comparison is **095 vs 096 only**. |
+| 096 | _TBD_ | **1.7896 (1000, 998 obj / 12485 pts)** / 1.7104 (100, 1218 pts) | **scheduled sampling OFF** (n_rollout_steps 12→**1**), scored 2→7 d, sparse context, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | **Rollout-off twin of 095 — clean single-variable test.** Everything matched to 095 (region, horizon, context, waist, anchor, batch); only scheduled sampling differs. Result: **Δ = −0.127 @1000 vs 095** (1.7896 vs 1.9168), well outside the ±0.02 @1000 noise → **scheduled sampling was HURTING.** 12-step rollout optimized for an autoregressive task never run at eval (direct single-pass) — paid its cost, never collected its benefit. Cleanest bias signature of the campaign (ztfi −0.08, i +0.04, z +0.21, y −0.06 near-centered; residual offenders are the known blue-band limit: u −1.29, g −0.41, ztfg −0.50, r −0.52). @100→@1000 gap (1.7104→1.7896, +0.079) confirms the eval-size optimism model. **Confirmed a genuine win by the 093-on-2→7 baseline below:** 096 beats the champion 1.8677 by −0.078 on the identical region. Caveat: 096 is a horizon-5 *specialist* (can't forecast 7→10 d); this is a win within the 7-day deployment target, not strict domination of the horizon-8 generalist. |
+| 093′ | `19b6fd7` | 1.8677 (1000, 998 obj / 12485 pts) | **093 checkpoint re-scored on 2→7 d** (eval `--late_time_max_days 7`, no retrain), scheduled sampling ON (as-trained), sparse, waist 32, trend anchor, batch 5 | **The owed same-region baseline** — makes 095/096 comparable to the champion. Not a new training run; identical weights to 093, only the scored region shrank 2→10 → 2→7. **Δ vs 093-on-2→10 = −0.012** (1.8677 vs 1.8792): dropping the 7→10 d points barely helps → the 2→7 region is **NOT meaningfully easier**, so 096's low number is not a region artifact. **Δ vs 096 = +0.078** (096 wins): scheduled-sampling-off beats the champion on the matched region — a second, independent confirmation of the 095↔096 twin result. Bias all-positive here (ztfi +0.25, i +0.27, z +0.18, y +0.28, g +0.27) — different minimum than 096's blue-negative signature; same RMSE-class, different failure mode. |
 
 > ⚠️ **BATCH CONFOUND (studies 089–092).** All four ran at **BATCH_SIZE=2**
 > (the reduced regime introduced for 084/085 to fit VRAM), while champion **080
@@ -50,9 +53,42 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 > (Δ −0.006 vs 093) — batch was the whole confound, and at matched regime dense
 > context ≈ sparse. Distillation is a clean **no-go** (see 094).
 
+> 🔻 **HORIZON-REGION CHANGE (studies 095+).** Starting at 095 the scored region
+> is **2 < phase ≤ 7 d** (was 2 < phase ≤ 10 d for ≤094). The shorter horizon
+> scores an **easier, nearer** population, so its RMSE is **lower by construction**
+> and is **NOT comparable** to the 080/093 champion (1.88 on 2→10) or any ≤094 row.
+> Valid same-region comparisons among these runs are only **095 ↔ 096 ↔ 093′**
+> (all 2→7). **Owed baseline — now RESOLVED (093′):** re-scoring the 093 checkpoint
+> on 2→7 (no retrain) gave **1.8677**, only −0.012 vs its own 2→10 number → the
+> 2→7 region is **not meaningfully easier**, so 096's 1.7896 is a **real** win
+> (−0.078 vs the champion on the matched region), not a region artifact. Reference
+> frames: eval
+> `--late_time_max_days` is **phase from trigger**; train `TARGET_HORIZON_DAYS` is
+> **lead from anchor**; phase = lead + CONTEXT_WINDOW_DAYS (2 d), so 7 d phase ↔
+> lead 5.
+
 **Eval-size note:** 100-object evals run ~0.03 mag optimistic vs 1000-object
 (080: 1.8318 → 1.8582). Quote the **1000-object** number when comparing studies;
 the 100-obj bootstrap CI half-width alone is ±0.068.
+
+## Update (studies 095–096): scheduled sampling was hurting
+
+**First lever to move the floor since 080.** Turning scheduled sampling OFF
+(n_rollout_steps 12→1) improved late-time RMSE by **−0.078 mag** against the
+champion on the matched 2→7 region (096 1.7896 vs 093′ 1.8677), confirmed two
+independent ways: the direct 095↔096 twin (−0.127, rollout the only variable) and
+096-vs-093′ (−0.078, same region). Root cause: 12-step rollout optimized for an
+autoregressive inference path we never run — eval is **DIRECT single-pass**, so the
+rollout training was a pure train/eval task mismatch, paying exposure-bias cost with
+no matching benefit. The 2→7 region itself is not meaningfully easier (093′ vs 093:
+−0.012), so the gain is real, not a region artifact.
+
+**Caveat — specialist vs generalist.** 096 trains to horizon 5 (phase 7), so it is a
+7-day *specialist* and cannot forecast 7→10 d; it wins **within the 7-day deployment
+target**, not by dominating the horizon-8 generalist. **Next:** retrain rollout-off
+at horizon 8 to claim the general champion (strong prior it lands below 093's 1.8792
+on 2→10). Note TARGET_HORIZON_DAYS uniform-Δt multi-lead sampling is a SEPARATE
+mechanism from rollout and is preserved at n_rollout_steps=1.
 
 ## Conclusion (as of study 094)
 
