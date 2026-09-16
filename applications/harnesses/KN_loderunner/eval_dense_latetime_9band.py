@@ -667,14 +667,14 @@ def get_args():
     p.add_argument(
         "--late_time_max_days",
         type=float,
-        default=7.0,
+        default=10.0,
         help="Upper bound (phase from first realistic detection) on the scored "
         "forecast region. Dense points beyond this are ignored, so the forecast "
-        "is judged only over cutoff < phase <= this horizon. Study 095: shrunk "
-        "10 -> 7 d to match the reduced training horizon (TARGET_HORIZON_DAYS=5, "
-        "i.e. lead 5 + 2 d context = phase 7). NOTE: scored region is now "
-        "2 < phase <= 7, so RMSE is NOT comparable to the 2->10 d studies "
-        "(<=094) -- it drops the hardest 7->10 d points.",
+        "is judged only over cutoff < phase <= this horizon. Study 101: restored "
+        "7 -> 10 d (TARGET_HORIZON_DAYS=8, i.e. lead 8 + 2 d context = phase 10) so "
+        "the scored region is 2 < phase <= 10, matching the 080/093 champion and "
+        "all studies <=094. For a 7 d-horizon model (studies 095-100) pass "
+        "--late_time_max_days 7.0 to match its training horizon.",
     )
     p.add_argument("--outdir", type=str, default=None)
     p.add_argument(

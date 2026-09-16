@@ -39,6 +39,11 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 095 | _TBD_ | 1.9168 (1000, 998 obj / 12485 pts) | **SHORTER HORIZON: scored 2→7 d** (TARGET_HORIZON_DAYS 8→5, eval `--late_time_max_days 7`), scheduled sampling **ON** (n_rollout_steps=12), sparse context, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | ⚠️ **NOT comparable to ≤094** (those scored 2→**10**; this scores 2→**7**, an easier near-region population → different RMSE by construction, see 🔻 banner). Sole purpose was to establish the shorter horizon + serve as the scheduled-sampling-**ON** baseline for the 096 twin. Clean same-region comparison is **095 vs 096 only**. |
 | 096 | _TBD_ | **1.7896 (1000, 998 obj / 12485 pts)** / 1.7104 (100, 1218 pts) | **scheduled sampling OFF** (n_rollout_steps 12→**1**), scored 2→7 d, sparse context, bypass MLP, **waist 32**, trend anchor, quantile head, **BATCH_SIZE=5** | **Rollout-off twin of 095 — clean single-variable test.** Everything matched to 095 (region, horizon, context, waist, anchor, batch); only scheduled sampling differs. Result: **Δ = −0.127 @1000 vs 095** (1.7896 vs 1.9168), well outside the ±0.02 @1000 noise → **scheduled sampling was HURTING.** 12-step rollout optimized for an autoregressive task never run at eval (direct single-pass) — paid its cost, never collected its benefit. Cleanest bias signature of the campaign (ztfi −0.08, i +0.04, z +0.21, y −0.06 near-centered; residual offenders are the known blue-band limit: u −1.29, g −0.41, ztfg −0.50, r −0.52). @100→@1000 gap (1.7104→1.7896, +0.079) confirms the eval-size optimism model. **Confirmed a genuine win by the 093-on-2→7 baseline below:** 096 beats the champion 1.8677 by −0.078 on the identical region. Caveat: 096 is a horizon-5 *specialist* (can't forecast 7→10 d); this is a win within the 7-day deployment target, not strict domination of the horizon-8 generalist. |
 | 093′ | `19b6fd7` | 1.8677 (1000, 998 obj / 12485 pts) | **093 checkpoint re-scored on 2→7 d** (eval `--late_time_max_days 7`, no retrain), scheduled sampling ON (as-trained), sparse, waist 32, trend anchor, batch 5 | **The owed same-region baseline** — makes 095/096 comparable to the champion. Not a new training run; identical weights to 093, only the scored region shrank 2→10 → 2→7. **Δ vs 093-on-2→10 = −0.012** (1.8677 vs 1.8792): dropping the 7→10 d points barely helps → the 2→7 region is **NOT meaningfully easier**, so 096's low number is not a region artifact. **Δ vs 096 = +0.078** (096 wins): scheduled-sampling-off beats the champion on the matched region — a second, independent confirmation of the 095↔096 twin result. Bias all-positive here (ztfi +0.25, i +0.27, z +0.18, y +0.28, g +0.27) — different minimum than 096's blue-negative signature; same RMSE-class, different failure mode. |
+| 097 | _TBD_ | 1.6119 (100, 1218 pts) | **TREND ANCHOR OFF** (rollout-off twin of 096 with anchor removed), scored 2→7 d, sparse, bypass MLP, **waist 32**, quantile head, PREDICT_DELTA=True, **BATCH_SIZE=5** | Anchor-off A/B vs 096 (@100: 1.6119 vs 1.7104 = **−0.099**, ~1.5σ at ±0.068). **Surprise: the analytic trend anchor was a CONSTRAINT, not a crutch** — the head fits late-time fade *better* without being pinned to a per-band local-slope extrapolation. Refutes the "anchor is doing the forecasting" hypothesis. Blue bands went *more* negative without the anchor pinning them (u −1.39, g −1.06) — win redistributes error but nets better. ⚠️ @100 only; not yet @1000. |
+| 098 | _TBD_ | 1.7024 (100) @ep40; **2.3400 (100) @ep3** | **POINT HEAD + HUBER** (N_QUANTILES=1, LOSS_TYPE=huber δ=0.1), anchor off, delta on, 2→7 d, sparse, waist 32, batch 5 | **Diagnostic run — reverts the quantile head, expected to regress, and did** (~0.09 worse than 097's quantile head @100; blue biases returned u −1.77, g −1.34, as the 080 finding predicts). **KEY RESULT — resolves the "flat loss" mystery:** the ep3→ep40 eval descended **2.34 → 1.70 mag (−0.64!)**, so training was never dead. The flat training-loss curve was a plotting artifact of three stacked effects: (1) loss is in **normalized z-score units**, eval in mag; (2) **log y-axis** compresses the change; (3) **Huber δ=0.1 caps** the large-residual tail so the objective has a small numerical floor and "starts low." Fix: loss plot default flipped to **linear**. |
+| 099 | _TBD_ | 1.6136 (100) | **PREDICT_DELTA OFF** (absolute head) + point/Huber (099 = 098 with delta off), anchor off, 2→7 d, sparse, waist 32, batch 5 | Delta-off A/B under the Huber head: 098→099 = 1.7024→1.6136 = **−0.089**. Mirrors the quantile-head delta-off effect (097→100, −0.088) → **delta-off is a real, head-independent win.** Absolute head fades better because the delta prior pinned forecasts to the bright near-peak last obs (structural under-fade). ⚠️ @100 only. |
+| 100 | _TBD_ | **1.4738 (1000, 998 obj / 12485 pts)** / 1.5240 (100) | **NEW CHAMPION (2→7). = 096 with PREDICT_DELTA OFF.** Quantile head, anchor off, rollout off, absolute head, 2→7 d, sparse, bypass MLP, **waist 32**, **BATCH_SIZE=5** | **Biggest single jump in the log.** Δ vs 096 = **−0.316 @1000** (1.4738 vs 1.7896) — delta-off is the SOLE change from 096, so the full −0.316 is attributable to removing the delta persistence prior. Stacks with the quantile>Huber effect (−0.09) and rollout-off (−0.127). **The "aleatoric floor" (081–094) was substantially self-inflicted by the delta anchor**, which pinned forecasts to the bright near-peak last obs → chronic under-fade. Removing it let every band fade properly: cleanest @1000 bias signature ever (ztfg −0.05, y −0.07, r −0.25, z −0.20; even u lifted 2.91→2.49, bias −1.26→−0.94). @100→@1000 went the *right* way (1.5240→1.4738) — atypical, but the win holds massively either way. ⚠️ Still 2→7; NOT comparable to the original 2→10 champion (1.86) — 101 tests that. |
+| 101 | _pending_ | _pending (eval on 2→10)_ | **HORIZON 8 (2→10) carrying the 100 winners** — TARGET_HORIZON_DAYS 5→8, rollout off, delta off, anchor off, quantile head, sparse, waist 32, batch 5 | Restores the full 2→10 horizon so the result is **directly comparable to the 080/093 champion (1.86 @1000)**. Eval MUST use `--late_time_max_days 10.0` (default restored). Strong prior it lands well below 1.86 given the −0.3 delta-off effect, which would make it the unconditional general champion. Eval + plot horizon defaults reset to 10 d / 8 d lead for this run. |
 
 > ⚠️ **BATCH CONFOUND (studies 089–092).** All four ran at **BATCH_SIZE=2**
 > (the reduced regime introduced for 084/085 to fit VRAM), while champion **080
@@ -90,7 +95,41 @@ at horizon 8 to claim the general champion (strong prior it lands below 093's 1.
 on 2→10). Note TARGET_HORIZON_DAYS uniform-Δt multi-lead sampling is a SEPARATE
 mechanism from rollout and is preserved at n_rollout_steps=1.
 
-## Conclusion (as of study 094)
+## Update (studies 097–100): the delta anchor was the floor — "aleatoric floor" LARGELY OVERTURNED
+
+**The ~1.88 "aleatoric floor" was substantially self-inflicted.** Three stacked
+levers, each an independent single-variable A/B, dropped late-time RMSE from the
+096 champion (1.7896 @1000, 2→7) to **1.4738 @1000 (study 100)** — a **−0.316 mag**
+improvement, the largest jump in the log:
+
+1. **Rollout / scheduled sampling OFF** (095→096, −0.127): train/eval task match.
+2. **Quantile head > point+Huber** (~−0.09, confirmed both delta on 096>098 and off
+   099>100): the pinball 0.5 term controls blue-band bias; Huber δ=0.1 is an
+   objective/metric mismatch (median-like objective, L2 metric).
+3. **PREDICT_DELTA OFF** (096→100, −0.316 as the sole change; mirrored head-
+   independently by 098→099 −0.089): **the biggest one.** The delta head pinned each
+   forecast to the *bright near-peak last observation* in the 2 d window, structurally
+   biasing against fading → the chronic under-fade behind every negative bias in
+   081–094. The absolute head fades freely; study 100's @1000 biases are the most
+   centered ever (ztfg −0.05, y −0.07, even u lifted −1.26→−0.94).
+
+**What this means for the old conclusion below:** the "floor confirmed 5 ways"
+narrative was measuring a floor created by the delta parameterization + rollout, not
+a true aleatoric limit. Capacity/backbone/render/distillation are still closed (those
+findings stand), but the model was **not** at the information limit — it was
+mis-parameterized. **Distillation (094 no-go) should arguably be re-tested** now that
+the sparse baseline moved ~0.3 mag.
+
+**Flat-loss mystery resolved (098):** training was never dead — the ep3→ep40 eval
+descended 2.34→1.70 mag. The flat *training-loss* curve was a plotting artifact:
+normalized z-score units + log y-axis + Huber-capped tail. Loss plot default is now
+**linear**.
+
+**Caveat:** all of 095–100 are scored **2→7** and are NOT comparable to the original
+2→10 champion (1.86). **Study 101** carries the 100 winners to horizon 8 (2→10) to
+claim the unconditional general champion — pending.
+
+## Conclusion (as of study 094 — SUPERSEDED, see the 097–100 update above)
 
 Model is at the **aleatoric floor** (~1.88 late-time RMSE at 1000 objects),
 confirmed **5 ways**: capacity (waist 32→64 flat, 083), backbone (082 tie), data

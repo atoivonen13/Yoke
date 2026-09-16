@@ -639,7 +639,11 @@ def main(args, rank, world_size, local_rank, device):
     # lead-time-from-anchor value, offset from phase by the 2 d window:
     # phase = lead + CONTEXT_WINDOW_DAYS, so phase 7 -> lead 5. The eval's
     # --late_time_max_days must be set to 7.0 to match (phase-from-trigger).
-    TARGET_HORIZON_DAYS = 5.0
+    # Study 101: 8.0 (back to phase 10, the ORIGINAL 2->10 region). Carries the
+    # 100 winners forward (rollout off, delta off, quantile head) but restores the
+    # full horizon so the result is DIRECTLY comparable to the 080/093 champion
+    # (1.86 @1000 on 2->10). Eval MUST use --late_time_max_days 10.0 to match.
+    TARGET_HORIZON_DAYS = 8.0
     # In window mode the model's first layer is sized by the padded width.
     WRAPPER_CONTEXT_LEN = (
         MAX_CONTEXT_LEN if CONTEXT_WINDOW_DAYS is not None else CONTEXT_LEN
