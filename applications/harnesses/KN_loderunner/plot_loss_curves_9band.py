@@ -112,21 +112,26 @@ def main():
         ),
     )
 
-    # Scheduled-sampling regime shading. 9-band runs anneal the teacher-forcing
-    # ratio, so shade the warmup / anneal / free-run regimes by default. These
-    # must match the schedule in training_input.tmpl / training_START.input.
+    # Scheduled-sampling regime shading. OFF by default: scheduled sampling has
+    # been disabled since study 096 (n_rollout_steps=1, the direct single-pass
+    # regime), so the teacher-forcing ratio never anneals and the warmup/anneal/
+    # free-run bands are meaningless. Pass --shade_regimes only for a run that
+    # actually anneals (n_rollout_steps>1); match the schedule in
+    # training_input.tmpl / training_START.input.
     parser.add_argument(
         "--shade_regimes",
         dest="shade_regimes",
         action="store_true",
-        default=True,
-        help="Shade the teacher-forcing warmup/anneal/free-run regimes. Default.",
+        default=False,
+        help="Shade the teacher-forcing warmup/anneal/free-run regimes. Only "
+        "meaningful when scheduled sampling is on (n_rollout_steps>1); off by "
+        "default since the current regime is direct single-pass.",
     )
     parser.add_argument(
         "--no_shade_regimes",
         dest="shade_regimes",
         action="store_false",
-        help="Disable teacher-forcing regime shading.",
+        help="Disable teacher-forcing regime shading. This is the default.",
     )
     parser.add_argument(
         "--tf_ramp_start_epoch",

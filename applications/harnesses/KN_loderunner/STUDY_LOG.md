@@ -2,8 +2,9 @@
 
 Dense late-time 9-band forecasting. Metric: **late-time RMSE (mag)**, phase
 2 d < t ≤ 10 d, unless noted (studies 095–100 use 2 d < t ≤ 7 d; see 🔻 banner).
-Eval via `eval_dense_latetime_9band.py`. **Current champion: study 101, 1.4640
-@1000 on 2→10** (quantile head, delta OFF, anchor OFF, rollout OFF).
+Eval via `eval_dense_latetime_9band.py`. **Current champion: study 104, 1.4287
+@1000 on 2→10** (backbone ON + tail unfrozen, waist 8, quantile head, delta OFF,
+anchor OFF, rollout OFF).
 
 **Why this file exists:** `studyIDX` is a launch-time template placeholder
 (`<studyIDX>` in `training_input.tmpl`), filled on the cluster and written only to
@@ -45,7 +46,11 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 098 | _TBD_ | 1.7024 (100) @ep40; **2.3400 (100) @ep3** | **POINT HEAD + HUBER** (N_QUANTILES=1, LOSS_TYPE=huber δ=0.1), anchor off, delta on, 2→7 d, sparse, waist 32, batch 5 | **Diagnostic run — reverts the quantile head, expected to regress, and did** (~0.09 worse than 097's quantile head @100; blue biases returned u −1.77, g −1.34, as the 080 finding predicts). **KEY RESULT — resolves the "flat loss" mystery:** the ep3→ep40 eval descended **2.34 → 1.70 mag (−0.64!)**, so training was never dead. The flat training-loss curve was a plotting artifact of three stacked effects: (1) loss is in **normalized z-score units**, eval in mag; (2) **log y-axis** compresses the change; (3) **Huber δ=0.1 caps** the large-residual tail so the objective has a small numerical floor and "starts low." Fix: loss plot default flipped to **linear**. |
 | 099 | _TBD_ | 1.6136 (100) | **PREDICT_DELTA OFF** (absolute head) + point/Huber (099 = 098 with delta off), anchor off, 2→7 d, sparse, waist 32, batch 5 | Delta-off A/B under the Huber head: 098→099 = 1.7024→1.6136 = **−0.089**. Mirrors the quantile-head delta-off effect (097→100, −0.088) → **delta-off is a real, head-independent win.** Absolute head fades better because the delta prior pinned forecasts to the bright near-peak last obs (structural under-fade). ⚠️ @100 only. |
 | 100 | _TBD_ | **1.4738 (1000, 998 obj / 12485 pts)** / 1.5240 (100) | **NEW CHAMPION (2→7). = 096 with PREDICT_DELTA OFF.** Quantile head, anchor off, rollout off, absolute head, 2→7 d, sparse, bypass MLP, **waist 32**, **BATCH_SIZE=5** | **Biggest single jump in the log.** Δ vs 096 = **−0.316 @1000** (1.4738 vs 1.7896) — delta-off is the SOLE change from 096, so the full −0.316 is attributable to removing the delta persistence prior. Stacks with the quantile>Huber effect (−0.09) and rollout-off (−0.127). **The "aleatoric floor" (081–094) was substantially self-inflicted by the delta anchor**, which pinned forecasts to the bright near-peak last obs → chronic under-fade. Removing it let every band fade properly: cleanest @1000 bias signature ever (ztfg −0.05, y −0.07, r −0.25, z −0.20; even u lifted 2.91→2.49, bias −1.26→−0.94). @100→@1000 went the *right* way (1.5240→1.4738) — atypical, but the win holds massively either way. ⚠️ Still 2→7; NOT comparable to the original 2→10 champion (1.86) — 101 tests that. |
-| 101 | _TBD_ | **1.4640 (1000, 17589 pts, 2→10)** / 1.6222 (100) | **★ NEW UNCONDITIONAL CHAMPION.** HORIZON 8 (2→10) carrying the 100 winners — TARGET_HORIZON_DAYS 5→8, **rollout off, delta off, anchor off, quantile head**, sparse, waist 32, batch 5 | **Beats the original 080 champion (1.8582 @1000, same 2→10 region) by −0.394 mag.** The delta-off + rollout-off wins are NOT artifacts of the easier 2→7 region — they carry to the full horizon. Like 100, @100→@1000 went the *right* way (1.6222→1.4640): the model generalizes to the full set better than the subset. Biases confirm the mechanism at the hard horizon: **u collapsed −1.0/−1.3 → −0.67**, i −0.07, z −0.07, r −0.16. Residual offenders ztfg −0.75 / g −0.64 = the genuine blue-band info limit in the 7→10 d tail. Eval used `--late_time_max_days 10.0` (default restored); plot default `--fixed_forecast_max_days 8`. |
+| 101 | _TBD_ | **1.4640 (1000, 17589 pts, 2→10)** / 1.6222 (100) | **★ UNCONDITIONAL CHAMPION (superseded by 104).** HORIZON 8 (2→10) carrying the 100 winners — TARGET_HORIZON_DAYS 5→8, **rollout off, delta off, anchor off, quantile head**, sparse, waist 32, batch 5 | **Beats the original 080 champion (1.8582 @1000, same 2→10 region) by −0.394 mag.** The delta-off + rollout-off wins are NOT artifacts of the easier 2→7 region — they carry to the full horizon. Like 100, @100→@1000 went the *right* way (1.6222→1.4640): the model generalizes to the full set better than the subset. Biases confirm the mechanism at the hard horizon: **u collapsed −1.0/−1.3 → −0.67**, i −0.07, z −0.07, r −0.16. Residual offenders ztfg −0.75 / g −0.64 = the genuine blue-band info limit in the 7→10 d tail. Eval used `--late_time_max_days 10.0` (default restored); plot default `--fixed_forecast_max_days 8`. |
+| 102 | _TBD_ | **1.4562 (1000, 17589 pts, 2→10)** | **DENSE-CONTEXT twin of 101** (PROBE_DENSE_CONTEXT=True), else identical to 101 (waist 32, delta/anchor/rollout off, quantile, batch 5) | **Distillation re-test against the NEW floor.** After the floor moved ~0.4 mag (delta/rollout fixes), re-ran the go/no-go: does privileged dense in-window context help now? **Δ = −0.008 @1000 vs 101** (1.4562 vs 1.4640) — again statistically indistinguishable, deep inside the ±0.068 noise. **DISTILLATION STILL NO-GO**, now confirmed at the post-delta floor (was 094: Δ −0.006 at the old floor). The late-time signal is genuinely absent from the 2 d window regardless of sampling density — an information limit that survived the ~0.4 mag improvement. |
+| 103 | _TBD_ | **1.4978 (1000, 17589 pts, 2→10)** | **WAIST-8 BYPASS CONTROL.** 101 with BYPASS_CHANNELS 32→**None** (waist 32→8), backbone still OFF, sparse, quantile, delta/anchor/rollout off, batch 5 | **Isolates the pure waist-narrowing cost** so the backbone-on run (104, forced to waist 8) has a fair matched-waist partner. **Δ = +0.034 @1000 vs 101** (1.4978 vs 1.4640) — narrowing the waist 32→8 costs a small but real 0.034 mag (just outside noise). This is the capacity penalty any backbone-on run must first recover before it can claim a net win. Biases mostly negative (u −0.56, g −0.44, r −0.35, z −0.21) — mild under-fade from the tighter waist. **103, not 101, is the correct comparison for 104.** |
+| 105 | _TBD_ | _pending_ | **SPATIAL RENDER + INTERPOLATED CONTEXT** (RENDER_INTERPOLATE=True) — draw each band's context as continuous piecewise-linear segments between detections instead of sparse tent dots; backbone ON + tail unfrozen (as 104-ish render mode), waist 8, quantile, delta/anchor/rollout off, batch 5 | **Revives the render line with a denser encoding of the SAME context info** ("use more of the pixels"). Fills the ~107 blank rows between sparse detections in the 2 d context window (verified: a 3-detection band goes 13→224 nonzero rows; singleton bands fall back to the tent splat so no coverage is lost). ⚠️ **Fills only the CONTEXT region; the forecast region stays 0** — this tests whether continuous context helps the backbone *propagate* into the empty readout, NOT the readout gap itself (forecast-row prefill is the deferred next step). Baseline to beat: render was ~2.2–2.9 in 086–088 but that predated the delta/rollout/backbone fixes; the real target is the 104 champion (1.4287). |
+| 104 | _TBD_ | **1.4287 (1000, 17589 pts, 2→10)** / 1.4876 (100) | **★ NEW UNCONDITIONAL CHAMPION.** = 103 + **BACKBONE ON, tail unfrozen** (BYPASS_BACKBONE=False, BACKBONE_TAIL_LR_MULT=0.1, scope="tail"), waist 8 (forced), sparse, quantile, delta/anchor/rollout off, batch 5 | **First time in the whole campaign the backbone HELPED.** Two clean reads: (1) **vs the matched control 103** (waist 8, backbone off): Δ = **−0.069 @1000** (1.4287 vs 1.4978) — at identical waist the unfrozen backbone tail adds real signal the bypass MLP cannot. (2) **vs old champion 101** (waist 32, backbone off): Δ = **−0.035** even while paying the +0.034 waist-8 penalty → the backbone contribution (~0.07) more than covers the capacity it gave up. **Overturns the 082/085/086 verdict** that backbone-on merely ties the MLP: that held under *frozen* constant-image mode; the *unfrozen tail* changes the story. Atypically, @1000 (1.4287) came in BELOW @100 (1.4876) — the @100 was pessimistic here. Biases: u −0.86 (still the dominant offender, RMSE 2.40), g −0.50, z −0.42; reds/y tight (r −0.15, i −0.18, y +0.20). Residual blue-band under-fade is where **redshift conditioning** should bite next. |
 
 > ⚠️ **BATCH CONFOUND (studies 089–092).** All four ran at **BATCH_SIZE=2**
 > (the reduced regime introduced for 084/085 to fit VRAM), while champion **080
@@ -131,28 +136,38 @@ normalized z-score units + log y-axis + Huber-capped tail. Loss plot default is 
 2→10 champion (1.86). **Study 101** carries the 100 winners to horizon 8 (2→10) to
 claim the unconditional general champion — pending.
 
-## ★ CURRENT CHAMPION (study 101): 1.4640 @1000 on 2→10
+## ★ CURRENT CHAMPION (study 104): 1.4287 @1000 on 2→10
 
-**Config:** bypass MLP, waist 32, **quantile head (3, levels 0.1/0.5/0.9)**,
+**Config:** **backbone ON, tail unfrozen** (BYPASS_BACKBONE = False,
+BACKBONE_TAIL_LR_MULT = 0.1, BACKBONE_FINETUNE_SCOPE = "tail"), **waist 8** (forced
+by backbone-on: BYPASS_CHANNELS = None), **quantile head (3, levels 0.1/0.5/0.9)**,
 **PREDICT_DELTA = False** (absolute head), **TREND_DECAY_ANCHOR = False**,
 **n_rollout_steps = 1** (scheduled sampling off), TARGET_HORIZON_DAYS = 8, sparse
 context, BATCH_SIZE = 5. Eval on 2→10 with `--late_time_max_days 10.0`.
 
-**Result: 1.4640 @1000, −0.394 mag below the old 080 champion (1.8582)** on the
-identical 2→10 region — the largest improvement in the campaign, from three stacked
-single-variable levers (rollout-off −0.127, quantile>Huber ~−0.09, **delta-off the
-big one**). The "~1.88 aleatoric floor" (studies 081–094) was NOT an information
-limit — it was created by the delta persistence prior (pinned forecasts to the
-bright near-peak last obs → chronic under-fade) plus scheduled-sampling task
-mismatch. Removing both let every band fade properly (u bias −1.0/−1.3 → −0.67).
+**Result: 1.4287 @1000.** Two clean reads (all @1000, all 2→10):
+- **vs matched-waist control 103** (waist 8, backbone OFF): **−0.069** — at
+  identical waist the unfrozen backbone tail adds real signal the bypass MLP can't.
+- **vs prior champion 101** (waist 32, backbone OFF): **−0.035**, even while paying
+  the +0.034 waist-8 capacity penalty (isolated by 103).
+
+**This overturns the 082/085/086 verdict** that turning the backbone on merely ties
+the bypass MLP. That held under *frozen constant-image* mode (which forces the
+backbone into the MLP's exact job); the **unfrozen tail** breaks the tie. First win
+from the backbone in the whole campaign.
+
+**Predecessor context:** the ~1.88 "aleatoric floor" (studies 081–094) was NOT an
+information limit — the delta persistence prior + scheduled-sampling mismatch
+created it. Studies 096–101 removed both (rollout-off −0.127, quantile>Huber ~−0.09,
+delta-off ~−0.32) to reach 1.4640; 104 then adds the backbone lever on top.
 
 **Still open / next:**
-- **Blue-band tail** (ztfg −0.75, g −0.64 @2→10) is the remaining real limit —
-  hardest at 7→10 d. Candidate for the redshift conditioning-scalar idea (deferred).
-- **Re-test distillation** (dense-context twin of 101): the 094 no-go was measured
-  against a floor that has since moved ~0.4 mag, so it should be re-run.
-- **Re-test capacity/backbone** (082/083): those ties were also against the old
-  floor and may now differ.
+- **Blue-band tail** (u −0.86 RMSE 2.40, g −0.50 @2→10) is the dominant remaining
+  error — the PRIMARY next lever is the **redshift conditioning-scalar idea**
+  (see memory), now that the backbone lever is banked.
+- **Distillation is settled NO-GO** at the new floor too (102: Δ −0.008 vs 101).
+- **Re-test capacity** (waist/backbone-decoder scope, 084) and **spatial render**
+  (088) against the new floor — lower priority than redshift.
 
 ## Conclusion (as of study 094 — SUPERSEDED by studies 095–101; see above)
 
@@ -195,6 +210,9 @@ earlier commit's code with only a config toggle, the same hash is listed.
 
 - **075 champion (pre-quantile):** `e6883db` — bypass MLP, waist 32, point head.
 - **080 champion (superseded):** `a1166b7` — 075 + quantile head; 1.8582 @1000.
-- **101 champion (current):** bypass MLP, waist 32, quantile head, delta OFF,
+- **101 champion (superseded):** bypass MLP, waist 32, quantile head, delta OFF,
   anchor OFF, rollout OFF; **1.4640 @1000 on 2→10.**
+- **104 champion (current):** backbone ON + tail unfrozen (mult 0.1, scope="tail"),
+  waist 8, quantile head, delta OFF, anchor OFF, rollout OFF; **1.4287 @1000 on
+  2→10.** First backbone-on win; beats matched-waist control 103 (1.4978) by −0.069.
 - **081/082 backbone experiments:** `9ef46e8` and later — backbone un-bypassed.
