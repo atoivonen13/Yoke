@@ -382,18 +382,12 @@ def main(args, rank, world_size, local_rank, device):
     # decoder tail unfrozen (BACKBONE_TAIL_LR_MULT=0.1) so the backbone can adapt
     # its readout (086a frozen collapsed to persistence at 2.94).
     # Study 089: FALSE -- bypass MLP for the dense-context ceiling probe.
-    SPATIAL_RENDER = True
+    SPATIAL_RENDER = False
     # Bilinear tent splat full width (px) per event and vertical half-window (px)
     # pooled around the target row at readout. render_context/horizon default to
     # CONTEXT_WINDOW_DAYS / TARGET_HORIZON_DAYS below.
     RENDER_SPLAT = 5
     GATHER_ROWS_K = 5
-    # Study 105: draw each band's context as continuous piecewise-linear segments
-    # connecting its detections (filling the ~107 blank rows between sparse events)
-    # instead of isolated tent splats -- "use more of the pixels" to encode the SAME
-    # context information more densely. Only fills the context region; the forecast
-    # region stays 0 (prefill is a separate deferred step). Requires SPATIAL_RENDER.
-    RENDER_INTERPOLATE = True
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -483,7 +477,18 @@ def main(args, rank, world_size, local_rank, device):
     # from the batch/LR regime -> "does unfreezing the whole decoder beat
     # unfreezing just the tail?" Tail scope retains almost no backbone activations,
     # so batch 2 fits with wide headroom (no OOM risk).
-    BACKBONE_FINETUNE_SCOPE = "tail"
+    #
+    # Study 106: "decoder" -- re-tests scope against the 104 champion (1.4287) at
+    # BATCH_SIZE=5, delta/anchor/rollout off, waist 8. Clean single-variable A/B vs
+    # 104 (sole change is tail->decoder): does unfreezing the bottleneck + the 8
+    # up_stage1 attention blocks beat the thin tail now that the backbone
+    # demonstrably HELPS? The only prior data point (085 tail 1.8939 beat 084
+    # decoder 1.9350 at batch 2) says tail is the sweet spot, but it was confounded
+    # (batch 2, delta-on, old floor) -- 106 confirms or overturns it cleanly.
+    # NOTE: decoder scope keeps the full decoder's activations, so watch VRAM at
+    # batch 5; if it OOMs, this is the one run that may need batch 2 (a confound to
+    # note, not the 104-matched read).
+    BACKBONE_FINETUNE_SCOPE = "decoder"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
@@ -840,7 +845,6 @@ def main(args, rank, world_size, local_rank, device):
             render_context_days=CONTEXT_WINDOW_DAYS,
             render_horizon_days=TARGET_HORIZON_DAYS,
             render_splat=RENDER_SPLAT,
-            render_interpolate=RENDER_INTERPOLATE,
             gather_rows_k=GATHER_ROWS_K,
         ).to(device)
 
@@ -1296,7 +1300,6 @@ def main(args, rank, world_size, local_rank, device):
                     "render_context_days": CONTEXT_WINDOW_DAYS,
                     "render_horizon_days": TARGET_HORIZON_DAYS,
                     "render_splat": RENDER_SPLAT,
-                    "render_interpolate": RENDER_INTERPOLATE,
                     "gather_rows_k": GATHER_ROWS_K,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
