@@ -488,7 +488,16 @@ def main(args, rank, world_size, local_rank, device):
     # NOTE: decoder scope keeps the full decoder's activations, so watch VRAM at
     # batch 5; if it OOMs, this is the one run that may need batch 2 (a confound to
     # note, not the 104-matched read).
-    BACKBONE_FINETUNE_SCOPE = "decoder"
+    # STUDY 107 (sole change: decoder->full): the unfreeze ladder has helped at
+    # every rung so far -- tail (104, 1.4287) then decoder (106, 1.4178). "full"
+    # unfreezes the last frozen block, the shared encoder (embeddings + U-Net DOWN
+    # path), so the ENTIRE pretrained backbone trains end-to-end at the same 0.1x
+    # discriminative LR. This is the top of the ladder: there is no further scope
+    # to unfreeze. My priors on this model are unreliable (see the study log) --
+    # read the @1000 eval, not @100. NOTE: unfreezing the encoder adds the DOWN-path
+    # activations to the autograd graph; watch VRAM at batch 5 and drop to batch 2
+    # only if it OOMs (a confound to note against the 106-matched read).
+    BACKBONE_FINETUNE_SCOPE = "full"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead

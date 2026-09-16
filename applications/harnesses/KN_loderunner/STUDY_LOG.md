@@ -2,8 +2,8 @@
 
 Dense late-time 9-band forecasting. Metric: **late-time RMSE (mag)**, phase
 2 d < t ≤ 10 d, unless noted (studies 095–100 use 2 d < t ≤ 7 d; see 🔻 banner).
-Eval via `eval_dense_latetime_9band.py`. **Current champion: study 104, 1.4287
-@1000 on 2→10** (backbone ON + tail unfrozen, waist 8, quantile head, delta OFF,
+Eval via `eval_dense_latetime_9band.py`. **Current champion: study 106, 1.4178
+@1000 on 2→10** (backbone ON + DECODER unfrozen, waist 8, quantile head, delta OFF,
 anchor OFF, rollout OFF).
 
 **Why this file exists:** `studyIDX` is a launch-time template placeholder
@@ -49,7 +49,8 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 101 | _TBD_ | **1.4640 (1000, 17589 pts, 2→10)** / 1.6222 (100) | **★ UNCONDITIONAL CHAMPION (superseded by 104).** HORIZON 8 (2→10) carrying the 100 winners — TARGET_HORIZON_DAYS 5→8, **rollout off, delta off, anchor off, quantile head**, sparse, waist 32, batch 5 | **Beats the original 080 champion (1.8582 @1000, same 2→10 region) by −0.394 mag.** The delta-off + rollout-off wins are NOT artifacts of the easier 2→7 region — they carry to the full horizon. Like 100, @100→@1000 went the *right* way (1.6222→1.4640): the model generalizes to the full set better than the subset. Biases confirm the mechanism at the hard horizon: **u collapsed −1.0/−1.3 → −0.67**, i −0.07, z −0.07, r −0.16. Residual offenders ztfg −0.75 / g −0.64 = the genuine blue-band info limit in the 7→10 d tail. Eval used `--late_time_max_days 10.0` (default restored); plot default `--fixed_forecast_max_days 8`. |
 | 102 | _TBD_ | **1.4562 (1000, 17589 pts, 2→10)** | **DENSE-CONTEXT twin of 101** (PROBE_DENSE_CONTEXT=True), else identical to 101 (waist 32, delta/anchor/rollout off, quantile, batch 5) | **Distillation re-test against the NEW floor.** After the floor moved ~0.4 mag (delta/rollout fixes), re-ran the go/no-go: does privileged dense in-window context help now? **Δ = −0.008 @1000 vs 101** (1.4562 vs 1.4640) — again statistically indistinguishable, deep inside the ±0.068 noise. **DISTILLATION STILL NO-GO**, now confirmed at the post-delta floor (was 094: Δ −0.006 at the old floor). The late-time signal is genuinely absent from the 2 d window regardless of sampling density — an information limit that survived the ~0.4 mag improvement. |
 | 103 | _TBD_ | **1.4978 (1000, 17589 pts, 2→10)** | **WAIST-8 BYPASS CONTROL.** 101 with BYPASS_CHANNELS 32→**None** (waist 32→8), backbone still OFF, sparse, quantile, delta/anchor/rollout off, batch 5 | **Isolates the pure waist-narrowing cost** so the backbone-on run (104, forced to waist 8) has a fair matched-waist partner. **Δ = +0.034 @1000 vs 101** (1.4978 vs 1.4640) — narrowing the waist 32→8 costs a small but real 0.034 mag (just outside noise). This is the capacity penalty any backbone-on run must first recover before it can claim a net win. Biases mostly negative (u −0.56, g −0.44, r −0.35, z −0.21) — mild under-fade from the tighter waist. **103, not 101, is the correct comparison for 104.** |
-| 106 | _TBD_ | _pending_ | **FINE-TUNE SCOPE = "decoder"** — 104 champion with the SOLE change BACKBONE_FINETUNE_SCOPE tail→decoder (unfreezes bottleneck_stage4 + up_stage1's 8 SwinEncoder2 attention blocks + all up_connect + all PatchExpand + linear4unpatch @ 0.1× head LR; encoder still frozen). Backbone ON, waist 8, quantile, delta/anchor/rollout off, batch 5 | **Clean single-variable re-test of fine-tune scope at the new floor.** 104 (tail) won −0.069 by unfreezing only the thin output tail; 106 asks whether unfreezing the whole decoder's attention capacity beats it now that the backbone demonstrably helps. **Prior (confounded) data says tail wins:** 085 (tail) 1.8939 beat 084 (decoder) 1.9350 at batch 2 — but that was batch 2 + delta-on + old floor. 106 is the batch-5, delta-off, new-floor read. Target to beat: **104 = 1.4287 @1000**. ⚠️ More trainable params against an information-limited signal (distillation no-go ×2) risks overfitting; if train improves but val worsens, the fix is lowering the LR mult, not this scope. Watch VRAM at batch 5 (full decoder activations). |
+| 106 | _TBD_ | **1.4178 (1000, 17589 pts, 2→10)** / 1.5186 (100) | **★ NEW UNCONDITIONAL CHAMPION. FINE-TUNE SCOPE = "decoder"** — 104 champion with the SOLE change BACKBONE_FINETUNE_SCOPE tail→decoder (unfreezes bottleneck_stage4 + up_stage1's 8 SwinEncoder2 attention blocks + all up_connect + all PatchExpand + linear4unpatch @ 0.1× head LR; encoder still frozen). Backbone ON, waist 8, quantile, delta/anchor/rollout off, batch 5 | **Δ = −0.011 @1000 vs 104** (1.4178 vs 1.4287) — unfreezing the whole decoder beats the thin tail once the confounds are removed. **OVERTURNS the 085>084 prior** (which said tail>decoder): that comparison was batch-2 + delta-on + old-floor; at batch 5, delta-off, new floor the verdict reverses. **@100 MISLED, @1000 was the arbiter:** 106 @100 (1.5186) was WORSE than 104 @100 (1.4876), but 106's @100→@1000 tightening (−0.101) nearly doubled 104's (−0.059) → decoder scope generalizes to the full set better than tail. The feared overfitting (more params vs an information-limited signal) did NOT materialize at full eval. Biases improved: u lifted (RMSE 2.37→2.21, bias −0.30→−0.14), ztfr/ztfi/y near-centered; residual under-fade now ztfg −0.44, i −0.44. **Lesson reinforced: never call a scope/config verdict on @100 alone.** |
+| 107 | _RUNNING_ | _TBD_ | **FINE-TUNE SCOPE = "full"** — 106 champion with the SOLE change BACKBONE_FINETUNE_SCOPE decoder→full (adds the last frozen block, the shared ENCODER: parallel_embed + var_embed_layer + agg_vars + pos_embed + temporal_encoding + dwn_stage1/2/3 + down_connect + PatchMerge, on top of the decoder set, so the ENTIRE pretrained backbone trains end-to-end @ 0.1× head LR). Backbone ON, waist 8, quantile, delta/anchor/rollout off, batch 5 | **Top of the unfreeze ladder** — no further scope to unfreeze after this. Tests whether adapting the shared feature extractor to the KN task beats keeping it frozen: does the encoder that was pretrained on a different multiphysics domain still hold back the blue-band tail? Ladder so far monotonic down: tail (104, 1.4287) → decoder (106, 1.4178). **@1000 is the arbiter — 106's @100 was misleading (WORSE than 104), only @1000 revealed the win; do not call this on @100.** Watch VRAM: DOWN-path activations now in the graph at batch 5 (drop to batch 2 only if OOM, a confound to note). Expected risks either way: encoder overfit to the info-limited signal, or a real net win if the domain gap matters. |
 | 105 | _TBD_ | **3.0752 (100, 1759 pts)** | **SPATIAL RENDER + INTERPOLATED CONTEXT** (RENDER_INTERPOLATE=True) — draw each band's context as continuous piecewise-linear segments between detections instead of sparse tent dots; backbone ON + tail unfrozen, waist 8, quantile, delta/anchor/rollout off, batch 5 | **DECISIVE NO-GO — densifying context does NOT rescue render.** Worse than even plain-tent render (086a 2.94, 088 2.41) and +1.6 mag above the 104 champion (1.4287) @100; no @1000 needed. The interpolation worked as built (verified 13→224 nonzero rows for a 3-detection band), so the failure is not the encoding — it's the **structurally-empty forecast region the gather still reads from**, exactly the caveat this run deliberately did not address. **Bias signature flipped to strongly POSITIVE** (all bands +0.6 to +1.9; g +1.74, y +1.94) vs the champion's negative under-fade: the fingerprint of the readout collapsing toward the normalized mean (row=0 ⇒ mean magnitude ⇒ far too bright vs the faint faded tail). Richer context gave the encoder a curve to look at but nothing to READ where it matters. **Confirms (3rd time) the render readout gap is the real defect;** the only untried fix is forecast-region PREFILL (persistence/trend prior into the readout rows), the deferred step. Interpolate-only lever = dead. |
 | 104 | _TBD_ | **1.4287 (1000, 17589 pts, 2→10)** / 1.4876 (100) | **★ NEW UNCONDITIONAL CHAMPION.** = 103 + **BACKBONE ON, tail unfrozen** (BYPASS_BACKBONE=False, BACKBONE_TAIL_LR_MULT=0.1, scope="tail"), waist 8 (forced), sparse, quantile, delta/anchor/rollout off, batch 5 | **First time in the whole campaign the backbone HELPED.** Two clean reads: (1) **vs the matched control 103** (waist 8, backbone off): Δ = **−0.069 @1000** (1.4287 vs 1.4978) — at identical waist the unfrozen backbone tail adds real signal the bypass MLP cannot. (2) **vs old champion 101** (waist 32, backbone off): Δ = **−0.035** even while paying the +0.034 waist-8 penalty → the backbone contribution (~0.07) more than covers the capacity it gave up. **Overturns the 082/085/086 verdict** that backbone-on merely ties the MLP: that held under *frozen* constant-image mode; the *unfrozen tail* changes the story. Atypically, @1000 (1.4287) came in BELOW @100 (1.4876) — the @100 was pessimistic here. Biases: u −0.86 (still the dominant offender, RMSE 2.40), g −0.50, z −0.42; reds/y tight (r −0.15, i −0.18, y +0.20). Residual blue-band under-fade is where **redshift conditioning** should bite next. |
 
@@ -137,25 +138,30 @@ normalized z-score units + log y-axis + Huber-capped tail. Loss plot default is 
 2→10 champion (1.86). **Study 101** carries the 100 winners to horizon 8 (2→10) to
 claim the unconditional general champion — pending.
 
-## ★ CURRENT CHAMPION (study 104): 1.4287 @1000 on 2→10
+## ★ CURRENT CHAMPION (study 106): 1.4178 @1000 on 2→10
 
-**Config:** **backbone ON, tail unfrozen** (BYPASS_BACKBONE = False,
-BACKBONE_TAIL_LR_MULT = 0.1, BACKBONE_FINETUNE_SCOPE = "tail"), **waist 8** (forced
-by backbone-on: BYPASS_CHANNELS = None), **quantile head (3, levels 0.1/0.5/0.9)**,
+**Config:** **backbone ON, DECODER unfrozen** (BYPASS_BACKBONE = False,
+BACKBONE_TAIL_LR_MULT = 0.1, BACKBONE_FINETUNE_SCOPE = "decoder" — bottleneck +
+whole decoder unfrozen @ 0.1× head LR, encoder still frozen), **waist 8** (forced by
+backbone-on: BYPASS_CHANNELS = None), **quantile head (3, levels 0.1/0.5/0.9)**,
 **PREDICT_DELTA = False** (absolute head), **TREND_DECAY_ANCHOR = False**,
 **n_rollout_steps = 1** (scheduled sampling off), TARGET_HORIZON_DAYS = 8, sparse
 context, BATCH_SIZE = 5. Eval on 2→10 with `--late_time_max_days 10.0`.
 
-**Result: 1.4287 @1000.** Two clean reads (all @1000, all 2→10):
-- **vs matched-waist control 103** (waist 8, backbone OFF): **−0.069** — at
-  identical waist the unfrozen backbone tail adds real signal the bypass MLP can't.
-- **vs prior champion 101** (waist 32, backbone OFF): **−0.035**, even while paying
-  the +0.034 waist-8 capacity penalty (isolated by 103).
+**Result: 1.4178 @1000, −0.011 vs the study-104 tail-scope champion** (1.4287).
+Unfreezing the whole decoder (not just the thin output tail) is a small but real
+win once the confounds are stripped. **Overturns the old 085>084 "tail beats
+decoder" finding** — that was batch-2 + delta-on + old-floor; at batch 5, delta-off,
+new floor the verdict reverses. **Methodological note: 106's @100 (1.5186) was WORSE
+than 104's @100 (1.4876); only the @1000 revealed the win** (106 tightened −0.101
+@100→@1000 vs 104's −0.059). The feared overfitting from more trainable params vs an
+information-limited signal did not appear at full eval.
 
-**This overturns the 082/085/086 verdict** that turning the backbone on merely ties
-the bypass MLP. That held under *frozen constant-image* mode (which forces the
-backbone into the MLP's exact job); the **unfrozen tail** breaks the tie. First win
-from the backbone in the whole campaign.
+**Backbone-on lineage (all beat the bypass MLP):** 103 (waist-8 bypass control,
+backbone OFF) 1.4978 → 104 (tail unfrozen) 1.4287 → 106 (decoder unfrozen) 1.4178.
+This overturns the 082/085/086 verdict that the backbone merely ties the bypass MLP
+(that held under *frozen constant-image* mode); unfreezing progressively more of the
+decoder keeps helping.
 
 **Predecessor context:** the ~1.88 "aleatoric floor" (studies 081–094) was NOT an
 information limit — the delta persistence prior + scheduled-sampling mismatch
@@ -163,12 +169,21 @@ created it. Studies 096–101 removed both (rollout-off −0.127, quantile>Huber
 delta-off ~−0.32) to reach 1.4640; 104 then adds the backbone lever on top.
 
 **Still open / next:**
-- **Blue-band tail** (u −0.86 RMSE 2.40, g −0.50 @2→10) is the dominant remaining
-  error — the PRIMARY next lever is the **redshift conditioning-scalar idea**
-  (see memory), now that the backbone lever is banked.
+- **Unfreeze scope ladder — TOP RUNG RUNNING (107):** tail (104, 1.4287) → decoder
+  (106, 1.4178) each helped; 107 now unfreezes the ENCODER too ("full" scope, wired
+  in checkpointing.py via `backbone_full_modules`). This is the last rung — the whole
+  pretrained backbone is trainable, nothing left to unfreeze. Kept the SAME 0.1× mult
+  (user: "stick with the same LR for now"). NOTE for a future run: the encoder is the
+  largest param block with the least task-specific reason to move, so if 107 overfits,
+  a LOWER encoder-only mult (e.g. 0.03) is the natural follow-up — but the current
+  2-group optimizer applies one mult to ALL unfrozen pretrained weights; a slower
+  encoder-only rate would need a 3rd param group.
+- **Blue-band tail** (ztfg −0.44, u RMSE 2.21 @2→10) is the dominant remaining
+  error. The redshift conditioning-scalar idea targets it but is PARKED (may not be
+  available for real events — deployability concern raised by user).
 - **Distillation is settled NO-GO** at the new floor too (102: Δ −0.008 vs 101).
-- **Re-test capacity** (waist/backbone-decoder scope, 084) and **spatial render**
-  (088) against the new floor — lower priority than redshift.
+- **Spatial render is DEAD** (105: interpolate-only 3.08; the empty forecast readout
+  region is the structural defect, only forecast-region prefill could fix it).
 
 ## Conclusion (as of study 094 — SUPERSEDED by studies 095–101; see above)
 
@@ -213,7 +228,10 @@ earlier commit's code with only a config toggle, the same hash is listed.
 - **080 champion (superseded):** `a1166b7` — 075 + quantile head; 1.8582 @1000.
 - **101 champion (superseded):** bypass MLP, waist 32, quantile head, delta OFF,
   anchor OFF, rollout OFF; **1.4640 @1000 on 2→10.**
-- **104 champion (current):** backbone ON + tail unfrozen (mult 0.1, scope="tail"),
-  waist 8, quantile head, delta OFF, anchor OFF, rollout OFF; **1.4287 @1000 on
-  2→10.** First backbone-on win; beats matched-waist control 103 (1.4978) by −0.069.
+- **104 champion (superseded):** backbone ON + tail unfrozen (mult 0.1,
+  scope="tail"), waist 8, quantile head, delta OFF, anchor OFF, rollout OFF;
+  **1.4287 @1000 on 2→10.** First backbone-on win; beat control 103 (1.4978) by −0.069.
+- **106 champion (current):** 104 with scope="decoder" (whole decoder + bottleneck
+  unfrozen @ 0.1× LR, encoder frozen); **1.4178 @1000 on 2→10.** Beats 104 tail scope
+  by −0.011. Won on @1000 despite a worse @100 — decoder scope generalizes better.
 - **081/082 backbone experiments:** `9ef46e8` and later — backbone un-bypassed.
