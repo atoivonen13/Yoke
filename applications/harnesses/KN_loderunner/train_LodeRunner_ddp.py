@@ -294,7 +294,11 @@ def main(args, rank, world_size, local_rank, device):
     # head that made 080 champion (its 0.5-pinball collapsed the blue-band bias),
     # so RMSE may regress; the point of the run is a diagnostic on the objective,
     # not a champion attempt. NOT RMSE-comparable to the quantile studies (080-097).
-    N_QUANTILES = 1
+    # Study 100: 3 -- back to the quantile/pinball head (the champion objective).
+    # 098's point+Huber confirmed the log's prediction (blue biases returned, RMSE
+    # ~0.09 worse @100), so return to the pinball head whose 0.5 term controls the
+    # blue-band bias. LOSS_TYPE below is ignored when N_QUANTILES > 1.
+    N_QUANTILES = 3
     QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
