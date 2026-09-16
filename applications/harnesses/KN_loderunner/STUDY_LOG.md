@@ -1,7 +1,9 @@
 # KN LodeRunner — study log
 
 Dense late-time 9-band forecasting. Metric: **late-time RMSE (mag)**, phase
-2 d < t ≤ 10 d, unless noted. Eval via `eval_dense_latetime_9band.py`.
+2 d < t ≤ 10 d, unless noted (studies 095–100 use 2 d < t ≤ 7 d; see 🔻 banner).
+Eval via `eval_dense_latetime_9band.py`. **Current champion: study 101, 1.4640
+@1000 on 2→10** (quantile head, delta OFF, anchor OFF, rollout OFF).
 
 **Why this file exists:** `studyIDX` is a launch-time template placeholder
 (`<studyIDX>` in `training_input.tmpl`), filled on the cluster and written only to
@@ -43,7 +45,7 @@ Noise floor: run-to-run seed noise ≈ 0.05–0.07 mag; 1000-object bootstrap CI
 | 098 | _TBD_ | 1.7024 (100) @ep40; **2.3400 (100) @ep3** | **POINT HEAD + HUBER** (N_QUANTILES=1, LOSS_TYPE=huber δ=0.1), anchor off, delta on, 2→7 d, sparse, waist 32, batch 5 | **Diagnostic run — reverts the quantile head, expected to regress, and did** (~0.09 worse than 097's quantile head @100; blue biases returned u −1.77, g −1.34, as the 080 finding predicts). **KEY RESULT — resolves the "flat loss" mystery:** the ep3→ep40 eval descended **2.34 → 1.70 mag (−0.64!)**, so training was never dead. The flat training-loss curve was a plotting artifact of three stacked effects: (1) loss is in **normalized z-score units**, eval in mag; (2) **log y-axis** compresses the change; (3) **Huber δ=0.1 caps** the large-residual tail so the objective has a small numerical floor and "starts low." Fix: loss plot default flipped to **linear**. |
 | 099 | _TBD_ | 1.6136 (100) | **PREDICT_DELTA OFF** (absolute head) + point/Huber (099 = 098 with delta off), anchor off, 2→7 d, sparse, waist 32, batch 5 | Delta-off A/B under the Huber head: 098→099 = 1.7024→1.6136 = **−0.089**. Mirrors the quantile-head delta-off effect (097→100, −0.088) → **delta-off is a real, head-independent win.** Absolute head fades better because the delta prior pinned forecasts to the bright near-peak last obs (structural under-fade). ⚠️ @100 only. |
 | 100 | _TBD_ | **1.4738 (1000, 998 obj / 12485 pts)** / 1.5240 (100) | **NEW CHAMPION (2→7). = 096 with PREDICT_DELTA OFF.** Quantile head, anchor off, rollout off, absolute head, 2→7 d, sparse, bypass MLP, **waist 32**, **BATCH_SIZE=5** | **Biggest single jump in the log.** Δ vs 096 = **−0.316 @1000** (1.4738 vs 1.7896) — delta-off is the SOLE change from 096, so the full −0.316 is attributable to removing the delta persistence prior. Stacks with the quantile>Huber effect (−0.09) and rollout-off (−0.127). **The "aleatoric floor" (081–094) was substantially self-inflicted by the delta anchor**, which pinned forecasts to the bright near-peak last obs → chronic under-fade. Removing it let every band fade properly: cleanest @1000 bias signature ever (ztfg −0.05, y −0.07, r −0.25, z −0.20; even u lifted 2.91→2.49, bias −1.26→−0.94). @100→@1000 went the *right* way (1.5240→1.4738) — atypical, but the win holds massively either way. ⚠️ Still 2→7; NOT comparable to the original 2→10 champion (1.86) — 101 tests that. |
-| 101 | _pending_ | _pending (eval on 2→10)_ | **HORIZON 8 (2→10) carrying the 100 winners** — TARGET_HORIZON_DAYS 5→8, rollout off, delta off, anchor off, quantile head, sparse, waist 32, batch 5 | Restores the full 2→10 horizon so the result is **directly comparable to the 080/093 champion (1.86 @1000)**. Eval MUST use `--late_time_max_days 10.0` (default restored). Strong prior it lands well below 1.86 given the −0.3 delta-off effect, which would make it the unconditional general champion. Eval + plot horizon defaults reset to 10 d / 8 d lead for this run. |
+| 101 | _TBD_ | **1.4640 (1000, 17589 pts, 2→10)** / 1.6222 (100) | **★ NEW UNCONDITIONAL CHAMPION.** HORIZON 8 (2→10) carrying the 100 winners — TARGET_HORIZON_DAYS 5→8, **rollout off, delta off, anchor off, quantile head**, sparse, waist 32, batch 5 | **Beats the original 080 champion (1.8582 @1000, same 2→10 region) by −0.394 mag.** The delta-off + rollout-off wins are NOT artifacts of the easier 2→7 region — they carry to the full horizon. Like 100, @100→@1000 went the *right* way (1.6222→1.4640): the model generalizes to the full set better than the subset. Biases confirm the mechanism at the hard horizon: **u collapsed −1.0/−1.3 → −0.67**, i −0.07, z −0.07, r −0.16. Residual offenders ztfg −0.75 / g −0.64 = the genuine blue-band info limit in the 7→10 d tail. Eval used `--late_time_max_days 10.0` (default restored); plot default `--fixed_forecast_max_days 8`. |
 
 > ⚠️ **BATCH CONFOUND (studies 089–092).** All four ran at **BATCH_SIZE=2**
 > (the reduced regime introduced for 084/085 to fit VRAM), while champion **080
@@ -129,7 +131,36 @@ normalized z-score units + log y-axis + Huber-capped tail. Loss plot default is 
 2→10 champion (1.86). **Study 101** carries the 100 winners to horizon 8 (2→10) to
 claim the unconditional general champion — pending.
 
-## Conclusion (as of study 094 — SUPERSEDED, see the 097–100 update above)
+## ★ CURRENT CHAMPION (study 101): 1.4640 @1000 on 2→10
+
+**Config:** bypass MLP, waist 32, **quantile head (3, levels 0.1/0.5/0.9)**,
+**PREDICT_DELTA = False** (absolute head), **TREND_DECAY_ANCHOR = False**,
+**n_rollout_steps = 1** (scheduled sampling off), TARGET_HORIZON_DAYS = 8, sparse
+context, BATCH_SIZE = 5. Eval on 2→10 with `--late_time_max_days 10.0`.
+
+**Result: 1.4640 @1000, −0.394 mag below the old 080 champion (1.8582)** on the
+identical 2→10 region — the largest improvement in the campaign, from three stacked
+single-variable levers (rollout-off −0.127, quantile>Huber ~−0.09, **delta-off the
+big one**). The "~1.88 aleatoric floor" (studies 081–094) was NOT an information
+limit — it was created by the delta persistence prior (pinned forecasts to the
+bright near-peak last obs → chronic under-fade) plus scheduled-sampling task
+mismatch. Removing both let every band fade properly (u bias −1.0/−1.3 → −0.67).
+
+**Still open / next:**
+- **Blue-band tail** (ztfg −0.75, g −0.64 @2→10) is the remaining real limit —
+  hardest at 7→10 d. Candidate for the redshift conditioning-scalar idea (deferred).
+- **Re-test distillation** (dense-context twin of 101): the 094 no-go was measured
+  against a floor that has since moved ~0.4 mag, so it should be re-run.
+- **Re-test capacity/backbone** (082/083): those ties were also against the old
+  floor and may now differ.
+
+## Conclusion (as of study 094 — SUPERSEDED by studies 095–101; see above)
+
+> ⚠️ The framing below is **retained for history but is WRONG.** The "aleatoric
+> floor confirmed 5 ways" was measuring a floor created by the delta
+> parameterization + rollout, not a true information limit. Study 101 (1.4640)
+> broke it by −0.39 mag. The capacity/backbone/render/data findings still stand as
+> individual results, but the *conclusion that ~1.88 was irreducible* does not.
 
 Model is at the **aleatoric floor** (~1.88 late-time RMSE at 1000 objects),
 confirmed **5 ways**: capacity (waist 32→64 flat, 083), backbone (082 tie), data
@@ -163,5 +194,7 @@ earlier commit's code with only a config toggle, the same hash is listed.
 ## Baseline map (quick reference)
 
 - **075 champion (pre-quantile):** `e6883db` — bypass MLP, waist 32, point head.
-- **080 champion (current):** `a1166b7` — same as 075 + quantile head.
+- **080 champion (superseded):** `a1166b7` — 075 + quantile head; 1.8582 @1000.
+- **101 champion (current):** bypass MLP, waist 32, quantile head, delta OFF,
+  anchor OFF, rollout OFF; **1.4640 @1000 on 2→10.**
 - **081/082 backbone experiments:** `9ef46e8` and later — backbone un-bypassed.

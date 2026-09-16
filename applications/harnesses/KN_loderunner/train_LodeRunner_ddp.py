@@ -623,7 +623,19 @@ def main(args, rank, world_size, local_rank, device):
     # Study 095: FALSE -- distillation settled (094 no-go), back to the deployable
     # sparse path. 095 tests the 7 d-horizon task redefinition (TARGET_HORIZON_DAYS=5)
     # on sparse context, so it is the 093 champion config with a shorter horizon.
-    PROBE_DENSE_CONTEXT = False
+    #
+    # Study 102: TRUE -- distillation RE-TEST. The 094 no-go was measured against the
+    # old ~1.88 floor, which we now know was a delta-prior/rollout artifact (101 broke
+    # it to 1.4640). 102 is the dense-context twin of the 101 CHAMPION: identical
+    # config (quantile head, delta OFF, anchor OFF, rollout OFF, waist 32, horizon 8,
+    # batch 5), only PROBE_DENSE_CONTEXT flipped on -> context source is the SOLE
+    # difference from 101. Compare 102 to 101 (1.4640 @1000 on 2->10), NOT to 094/080.
+    #   102 << 1.4640 -> dense context has extractable signal the old parameterization
+    #                    masked -> distillation is back on the table.
+    #   102 ~= 1.4640 -> dense context still neutral -> distillation stays dead; the
+    #                    residual (blue-band tail) is genuinely photometry-limited.
+    # Eval MUST pass --probe_dense_context AND --late_time_max_days 10.0.
+    PROBE_DENSE_CONTEXT = True
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
