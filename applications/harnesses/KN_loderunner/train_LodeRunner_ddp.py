@@ -410,7 +410,14 @@ def main(args, rank, world_size, local_rank, device):
     # Study 091: 32 to match the 080 champion. Valid only with BYPASS_BACKBONE=True
     # (set above). 089/090 left this None (waist 8) which confounded the dense-context
     # probe with a capacity drop; 091 restores 32 so context source is the sole delta.
-    BYPASS_CHANNELS = 32
+    # Study 103: None (waist 8) -- the WAIST-8 BYPASS CONTROL. Backbone-on forces
+    # waist 8 (bomberman.py raises on a decoupled waist with the backbone on), so
+    # before re-testing the backbone we need its same-waist bypass baseline. 103 is
+    # the 101 champion with ONLY the waist dropped 32->8; the next run turns the
+    # backbone on at waist 8, and (backbone-run vs 103) then isolates the backbone
+    # cleanly -- avoiding the 081 confound where backbone-on AND waist-drop moved
+    # together. Compare 103 to 101 (1.4640) to read the pure waist 32->8 cost.
+    BYPASS_CHANNELS = None
 
     # Study 082 (backbone capacity test). When > 0, the OUTPUT-PROXIMAL decoder
     # tail of the frozen Swin U-Net (final PatchExpand + final up_connect +
@@ -635,7 +642,9 @@ def main(args, rank, world_size, local_rank, device):
     #   102 ~= 1.4640 -> dense context still neutral -> distillation stays dead; the
     #                    residual (blue-band tail) is genuinely photometry-limited.
     # Eval MUST pass --probe_dense_context AND --late_time_max_days 10.0.
-    PROBE_DENSE_CONTEXT = True
+    # Study 103: FALSE -- distillation re-settled (102 no-go, Δ −0.008 vs 101), back
+    # to the deployable sparse path for the waist-8 bypass control.
+    PROBE_DENSE_CONTEXT = False
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
