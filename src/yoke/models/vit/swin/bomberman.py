@@ -501,7 +501,6 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         render_context_days: float = None,
         render_horizon_days: float = 8.0,
         render_splat: int = 5,
-        render_interpolate: bool = False,
         gather_rows_k: int = 5,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
@@ -659,15 +658,6 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 painted per event, so a single observation covers a patch rather than
                 one pixel (patches are ``patch_size``; a point event is invisible to a
                 ``(10, 5)`` patch embed). The single most important render detail.
-            render_interpolate (bool): When True, draw each band's context as
-                piecewise-linear segments connecting consecutive valid detections in
-                time (z-scored magnitude interpolated along the row axis) instead of
-                isolated tent splats. This fills the ~107 blank rows between sparse
-                detections within the 2 d context window, so the backbone sees a
-                continuous curve to trace rather than dots to find. Only affects the
-                CONTEXT region (bottom of the field); the forecast region stays 0
-                (that gap is a separate, deferred prefill step). Bands with a single
-                valid detection fall back to the tent splat so no coverage is lost.
             gather_rows_k (int): Half-height (pixels) of the vertical neighbourhood
                 pooled around the target row ``row(Dt)`` at readout.
         """
@@ -740,7 +730,6 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         )
         self.render_horizon_days = render_horizon_days
         self.render_splat = render_splat
-        self.render_interpolate = render_interpolate
         self.gather_rows_k = gather_rows_k
         # Fixed anchor-relative time span mapped onto the H rows: the anchor
         # (rel_t = max) sits at render_context_days / T_SPAN of the way up, so the
@@ -1085,15 +1074,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
         Rows = TIME (anchor-relative), columns = BAND. Each band owns a contiguous
         column block of width ``W // n_bands``; the ``n_bands * band_width`` used
-        columns leave any spare right-edge columns zero. With ``render_interpolate``
-        False (default), every valid event paints a vertical bilinear tent
-        (half-height ``render_splat // 2``) of its z-scored magnitude across its
-        band's whole column block, so a single observation covers a patch rather than
-        one pixel. With ``render_interpolate`` True, each band is instead drawn as
-        piecewise-linear segments connecting its consecutive detections (a continuous
-        curve filling the blank rows between sparse events), with lone detections
-        falling back to the tent splat. Either way, unobserved pixels stay 0 (the
-        normalized mean) and the single-channel time-band map is broadcast into all
+        columns leave any spare right-edge columns zero. Every valid event paints a
+        vertical bilinear tent (half-height ``render_splat // 2``) of its z-scored
+        magnitude across its band's whole column block, so a single observation
+        covers a patch rather than one pixel. Unobserved pixels stay 0 (the
+        normalized mean). The single-channel time-band map is broadcast into all
         ``backbone_channels`` (render option (a)).
 
         Args:
@@ -1134,86 +1119,24 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
         band_width = W // nb
         batch_ids = torch.arange(B, device=device).unsqueeze(1).expand(B, L)
+
+        # Accumulate into a compact [B, H, nb] band-time map (one column per band),
+        # expanded to the full column blocks afterwards. Additive index_add over a
+        # small set of vertical tent offsets keeps the scatter fully vectorized (no
+        # per-event Python loop).
+        bt_flat = x_events.new_zeros(B * H * nb)
         hk = self.render_splat // 2
         vmask = valid.to(value.dtype)  # [B, L]
+        for dr in range(-hk, hk + 1):
+            w = 1.0 - abs(dr) / (hk + 1)  # tent weight, 1.0 at center
+            rows = (row_c + dr).clamp(0, H - 1)  # [B, L]
+            flat_idx = (
+                batch_ids * (H * nb) + rows * nb + band_idx
+            ).reshape(-1)  # [B*L]
+            contrib = (value * vmask * w).reshape(-1)  # [B*L]
+            bt_flat.index_add_(0, flat_idx, contrib)
 
-        if self.render_interpolate:
-            # Draw each band as piecewise-linear segments connecting its consecutive
-            # valid detections, filling the ~107 blank rows between sparse events with
-            # a continuous curve. For each band we sort its events by row, then for
-            # every image row query the bracketing detections via a batched
-            # searchsorted and linearly interpolate. Rows outside a band's observed
-            # span stay 0 (no extrapolation). Bands with a single detection get no
-            # segment, so a tent-splat fallback below keeps them visible.
-            bt = x_events.new_zeros(B, H, nb)
-            q = (
-                torch.arange(H, device=device, dtype=value.dtype)
-                .unsqueeze(0)
-                .expand(B, H)
-                .contiguous()
-            )  # [B, H] query rows
-            row_val = row_c.to(value.dtype)  # [B, L]
-            for b in range(nb):
-                bmask = valid & (band_idx == b)  # [B, L]
-                cnt = bmask.sum(dim=1, keepdim=True)  # [B, 1]
-                # Send other-band / invalid events to a large finite row so they sort
-                # to the end and never bracket a real query row.
-                far = float(H) * 10.0
-                r_b = torch.where(bmask, row_val, row_val.new_full((), far))
-                v_b = torch.where(bmask, value, value.new_zeros(()))
-                order = torch.argsort(r_b, dim=1)  # [B, L] ascending
-                r_sorted = torch.gather(r_b, 1, order)  # [B, L]
-                v_sorted = torch.gather(v_b, 1, order)  # [B, L]
-
-                idx = torch.searchsorted(r_sorted, q)  # [B, H] in 0..L
-                right = idx.clamp(max=L - 1)
-                left = (idx - 1).clamp(min=0)
-                rl = torch.gather(r_sorted, 1, left)
-                rr = torch.gather(r_sorted, 1, right)
-                vl = torch.gather(v_sorted, 1, left)
-                vr = torch.gather(v_sorted, 1, right)
-
-                # A query row is inside the observed span iff it has a detection both
-                # strictly before (idx >= 1) and at-or-after within the real count
-                # (idx <= cnt - 1), and the band has >= 2 detections.
-                seg = (idx >= 1) & (idx <= (cnt - 1)) & (cnt >= 2)
-                t = (q - rl) / (rr - rl).clamp(min=1e-6)
-                interp = vl + t * (vr - vl)
-                bt[:, :, b] = torch.where(seg, interp, bt[:, :, b])
-
-            # Singleton fallback: tent-splat only events in bands with exactly one
-            # valid detection, so a lone point still paints a patch instead of
-            # vanishing (interpolation draws nothing for a single node).
-            band_counts = torch.zeros(B, nb, device=device, dtype=value.dtype)
-            band_counts.scatter_add_(1, band_idx, vmask)  # [B, nb]
-            per_event_cnt = torch.gather(band_counts, 1, band_idx)  # [B, L]
-            single = vmask * (per_event_cnt <= 1.0).to(value.dtype)  # [B, L]
-            single_flat = x_events.new_zeros(B * H * nb)
-            for dr in range(-hk, hk + 1):
-                w = 1.0 - abs(dr) / (hk + 1)
-                rows = (row_c + dr).clamp(0, H - 1)
-                flat_idx = (
-                    batch_ids * (H * nb) + rows * nb + band_idx
-                ).reshape(-1)
-                contrib = (value * single * w).reshape(-1)
-                single_flat.index_add_(0, flat_idx, contrib)
-            bt = bt + single_flat.view(B, H, nb)
-        else:
-            # Accumulate into a compact [B, H, nb] band-time map (one column per band),
-            # expanded to the full column blocks afterwards. Additive index_add over a
-            # small set of vertical tent offsets keeps the scatter fully vectorized (no
-            # per-event Python loop).
-            bt_flat = x_events.new_zeros(B * H * nb)
-            for dr in range(-hk, hk + 1):
-                w = 1.0 - abs(dr) / (hk + 1)  # tent weight, 1.0 at center
-                rows = (row_c + dr).clamp(0, H - 1)  # [B, L]
-                flat_idx = (
-                    batch_ids * (H * nb) + rows * nb + band_idx
-                ).reshape(-1)  # [B*L]
-                contrib = (value * vmask * w).reshape(-1)  # [B*L]
-                bt_flat.index_add_(0, flat_idx, contrib)
-
-            bt = bt_flat.view(B, H, nb)  # [B, H, nb]
+        bt = bt_flat.view(B, H, nb)  # [B, H, nb]
 
         # Expand each band column to its block, then zero-pad any spare columns.
         cols = bt.repeat_interleave(band_width, dim=2)  # [B, H, nb*band_width]

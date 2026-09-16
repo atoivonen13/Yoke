@@ -253,7 +253,6 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     render_context_days = ckpt.get("render_context_days", None)
     render_horizon_days = ckpt.get("render_horizon_days", 8.0)
     render_splat = ckpt.get("render_splat", 5)
-    render_interpolate = ckpt.get("render_interpolate", False)
     gather_rows_k = ckpt.get("gather_rows_k", 5)
 
     print("Loaded checkpoint:", ckpt_path)
@@ -277,7 +276,6 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
     print("spatial_render:", spatial_render)
-    print("render_interpolate:", render_interpolate)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -304,7 +302,6 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         render_context_days=render_context_days,
         render_horizon_days=render_horizon_days,
         render_splat=render_splat,
-        render_interpolate=render_interpolate,
         gather_rows_k=gather_rows_k,
     ).to(device)
 
