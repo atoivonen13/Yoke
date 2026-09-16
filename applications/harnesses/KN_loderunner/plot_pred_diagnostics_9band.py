@@ -132,15 +132,15 @@ def get_args():
     parser.add_argument(
         "--fixed_forecast_max_days",
         type=float,
-        default=5.0,
+        default=8.0,
         help="Cap on the smooth fixed-context forecast sweep, measured as LEAD "
         "TIME (days past the last context event / anchor) -- NOT phase from "
         "trigger. The sweep would otherwise extend to the last true event of each "
         "curve, well into the unsupervised tail. Relates to the eval's "
         "--late_time_max_days (which is phase-from-trigger) by the context window: "
-        "phase = lead + CONTEXT_WINDOW_DAYS. Study 095: default 5 (lead) matches "
-        "the 7 d phase horizon (5 + 2 d context) and the model's "
-        "TARGET_HORIZON_DAYS=5. Was 10 for the 2->10 d studies (<=094).",
+        "phase = lead + CONTEXT_WINDOW_DAYS. Study 101: default 8 (lead) matches "
+        "the 10 d phase horizon (8 + 2 d context) and the model's "
+        "TARGET_HORIZON_DAYS=8. For a 7 d-horizon model (095-100) pass 5.",
     )
     parser.add_argument(
         "--norm_stats_path",
