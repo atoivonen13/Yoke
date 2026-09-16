@@ -85,6 +85,44 @@ def backbone_decoder_modules(model: torch.nn.Module) -> list:
     ]
 
 
+def backbone_full_modules(model: torch.nn.Module) -> list:
+    """The ENTIRE parameter-bearing pretrained LodeRunner backbone.
+
+    A superset of :func:`backbone_decoder_modules`: the whole bottleneck + decoder
+    set PLUS the previously-frozen encoder -- the wrapper embedding stack
+    (``parallel_embed``, ``var_embed_layer``, ``agg_vars``, ``pos_embed``,
+    ``temporal_encoding``) and the U-Net DOWN path (``dwn_stage1/2/3``,
+    ``down_connect``, ``PatchMerge``). Together with the decoder this covers every
+    module that receives weights from ``study005_modelState_epoch0100.pth``;
+    ``backbone.unpatch`` is a parameterless reshape, so with this scope the whole
+    pretrained backbone is trainable. This is the "full" fine-tune scope: adapt the
+    entire backbone end-to-end (still at the discriminative ``backbone_tail_lr_mult``
+    LR), no longer treating the encoder as a frozen shared feature extractor.
+
+    Args:
+        model (torch.nn.Module): A ScalarTemporalConditionedLodeRunner_9band whose
+            ``.backbone`` is a LodeRunner (has ``.unet`` and ``.linear4unpatch``).
+
+    Returns:
+        list: Every parameter-bearing backbone submodule, encoder + decoder.
+    """
+    backbone = model.backbone
+    unet = backbone.unet
+    encoder_mods = [
+        backbone.parallel_embed,
+        backbone.var_embed_layer,
+        backbone.agg_vars,
+        backbone.pos_embed,
+        backbone.temporal_encoding,
+        *unet.dwn_stage1,
+        *unet.dwn_stage2,
+        *unet.dwn_stage3,
+        *unet.down_connect,
+        *unet.PatchMerge,
+    ]
+    return encoder_mods + backbone_decoder_modules(model)
+
+
 def build_finetune_optimizer(
     model: torch.nn.Module,
     optimizer_kwargs: dict,
@@ -109,6 +147,8 @@ def build_finetune_optimizer(
       - ``"decoder"``: the whole bottleneck + decoder
         (:func:`backbone_decoder_modules`), leaving the encoder frozen as a shared
         feature extractor -- study 084.
+      - ``"full"``: the ENTIRE pretrained backbone, encoder + decoder
+        (:func:`backbone_full_modules`) -- study 107.
 
     The per-group LR ratio is returned separately as ``lr_mults`` because
     ``CosineWithWarmupScheduler`` overwrites each group's ``lr`` every step with
@@ -123,7 +163,8 @@ def build_finetune_optimizer(
             backbone modules. 0 keeps the backbone frozen (no second group).
         backbone_finetune_scope (str): Which backbone modules the second group
             unfreezes when ``backbone_tail_lr_mult > 0`` -- ``"tail"`` (default,
-            study 082) or ``"decoder"`` (study 084). Ignored when the mult is 0.
+            study 082), ``"decoder"`` (study 084), or ``"full"`` (study 107,
+            entire encoder + decoder). Ignored when the mult is 0.
         verbose (bool): If True, print trainable-parameter counts (rank-0 only).
 
     Returns:
@@ -164,10 +205,12 @@ def build_finetune_optimizer(
             finetune_mods = backbone_tail_modules(model)
         elif backbone_finetune_scope == "decoder":
             finetune_mods = backbone_decoder_modules(model)
+        elif backbone_finetune_scope == "full":
+            finetune_mods = backbone_full_modules(model)
         else:
             raise ValueError(
-                "backbone_finetune_scope must be 'tail' or 'decoder', got "
-                f"{backbone_finetune_scope!r}."
+                "backbone_finetune_scope must be 'tail', 'decoder', or 'full', "
+                f"got {backbone_finetune_scope!r}."
             )
         tail_params = []
         for mod in finetune_mods:
