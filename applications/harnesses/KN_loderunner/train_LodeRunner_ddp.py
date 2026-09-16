@@ -382,12 +382,18 @@ def main(args, rank, world_size, local_rank, device):
     # decoder tail unfrozen (BACKBONE_TAIL_LR_MULT=0.1) so the backbone can adapt
     # its readout (086a frozen collapsed to persistence at 2.94).
     # Study 089: FALSE -- bypass MLP for the dense-context ceiling probe.
-    SPATIAL_RENDER = False
+    SPATIAL_RENDER = True
     # Bilinear tent splat full width (px) per event and vertical half-window (px)
     # pooled around the target row at readout. render_context/horizon default to
     # CONTEXT_WINDOW_DAYS / TARGET_HORIZON_DAYS below.
     RENDER_SPLAT = 5
     GATHER_ROWS_K = 5
+    # Study 105: draw each band's context as continuous piecewise-linear segments
+    # connecting its detections (filling the ~107 blank rows between sparse events)
+    # instead of isolated tent splats -- "use more of the pixels" to encode the SAME
+    # context information more densely. Only fills the context region; the forecast
+    # region stays 0 (prefill is a separate deferred step). Requires SPATIAL_RENDER.
+    RENDER_INTERPOLATE = True
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -834,6 +840,7 @@ def main(args, rank, world_size, local_rank, device):
             render_context_days=CONTEXT_WINDOW_DAYS,
             render_horizon_days=TARGET_HORIZON_DAYS,
             render_splat=RENDER_SPLAT,
+            render_interpolate=RENDER_INTERPOLATE,
             gather_rows_k=GATHER_ROWS_K,
         ).to(device)
 
@@ -1289,6 +1296,7 @@ def main(args, rank, world_size, local_rank, device):
                     "render_context_days": CONTEXT_WINDOW_DAYS,
                     "render_horizon_days": TARGET_HORIZON_DAYS,
                     "render_splat": RENDER_SPLAT,
+                    "render_interpolate": RENDER_INTERPOLATE,
                     "gather_rows_k": GATHER_ROWS_K,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
