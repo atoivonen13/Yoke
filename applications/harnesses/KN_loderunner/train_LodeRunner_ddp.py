@@ -354,7 +354,12 @@ def main(args, rank, world_size, local_rank, device):
     # Study 088 (render + trend anchor + tail unfrozen): FALSE -- run the backbone.
     # Study 089 (dense-context probe, bypass): TRUE -- bypass MLP path (fast, clean
     # "is there late-time signal to extract from dense context at all?" test).
-    BYPASS_BACKBONE = True
+    # Study 104: FALSE -- backbone ON, tail unfrozen (082/085 mode) re-tested against
+    # the new 1.46 floor. Waist is forced to 8 (BYPASS_CHANNELS=None), so the clean
+    # A/B partner is 103 (bypass, waist 8) -- NOT the waist-32 champion 101. Compare
+    # 104 vs 103 to isolate the backbone at matched waist. Requires SPATIAL_RENDER
+    # =False and BACKBONE_TAIL_LR_MULT=0.1 (scope="tail") below.
+    BYPASS_BACKBONE = False
 
     # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
     # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
@@ -447,7 +452,9 @@ def main(args, rank, world_size, local_rank, device):
     # so the backbone can adapt its readout of the rendered field, instead of the
     # frozen encoder collapsing to persistence as it did in 086a (2.94).
     # Study 089: 0.0 -- bypass path never runs the backbone, so nothing to unfreeze.
-    BACKBONE_TAIL_LR_MULT = 0.0
+    # Study 104: 0.1 -- backbone ON, output-proximal tail unfrozen @ 0.1x head LR
+    # (scope="tail" below). The 082/085 fine-tune mode re-tested at the new floor.
+    BACKBONE_TAIL_LR_MULT = 0.1
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
