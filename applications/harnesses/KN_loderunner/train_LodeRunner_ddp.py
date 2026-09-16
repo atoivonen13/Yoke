@@ -496,7 +496,12 @@ def main(args, rank, world_size, local_rank, device):
     # load strict=True; the flag is saved and restored by the loaders. Requires
     # window mode (needs the per-event validity flag). Set False for the absolute
     # head (byte-identical numerics to the pre-delta model).
-    PREDICT_DELTA = True
+    # Study 099: FALSE -- absolute head. Tests whether predicting an absolute
+    # magnitude beats the delta-from-last-obs parameterization. Delta gives a strong
+    # persistence prior at init (forecast starts AT the last obs); absolute must
+    # reconstruct the zero-point, so expect a larger lead-0 offset unless the head
+    # learns it. Safe with TREND_DECAY_ANCHOR=False (the anchor requires delta).
+    PREDICT_DELTA = False
 
     # Trend/decay anchor (delta head only). When True, the per-band anchor the
     # head predicts a residual on top of is no longer the flat last-observed value
