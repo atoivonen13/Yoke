@@ -460,7 +460,10 @@ def main(args, rank, world_size, local_rank, device):
     # unfrozen); this tests whether the decoder itself also wants a slower rate. The
     # head (conditioner + output_head) still trains at full anchor_lr; only the
     # unfrozen pretrained decoder slows to 0.03x. Read the @1000 eval, not @100.
-    BACKBONE_TAIL_LR_MULT = 0.03
+    # Study 110 restores 0.1 (the 106 champion value) so the EMA change is the SOLE
+    # variable vs the champion; 108's 0.03 @1000 is still pending, so we do NOT
+    # stack the unproven LR change under the EMA test.
+    BACKBONE_TAIL_LR_MULT = 0.1
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:

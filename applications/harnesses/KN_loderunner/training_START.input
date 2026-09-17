@@ -38,7 +38,7 @@ kn_rubin_ztf_val.txt
 --tf_ramp_epochs
 12
 --ema_decay
-0.1
+0.99
 --trn_rcrd_filename
 ./training_study<studyIDX>_epoch<epochIDX>.csv
 --val_rcrd_filename
@@ -52,7 +52,7 @@ kn_rubin_ztf_val.txt
 --Knodes
 <KNODES>
 --total_epochs
-60
+40
 --cycle_epochs
 1
 --train_batches
