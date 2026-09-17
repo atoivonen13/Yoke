@@ -315,7 +315,7 @@ def main(args, rank, world_size, local_rank, device):
     # a monotonic 111->112 improvement is strong evidence it is NOT seed). Risk:
     # too much weight starves the outer quantiles -> they decalibrate and the blue
     # bias creeps back (098: a bare point head did exactly that). Read @1000.
-    QUANTILE_WEIGHTS = (1.0, 8.0, 1.0)
+    QUANTILE_WEIGHTS = (1.0, 3.0, 1.0)
 
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
     # down-weights every residual > 0.1 -- i.e. exactly the large-residual tail
@@ -735,7 +735,19 @@ def main(args, rank, world_size, local_rank, device):
     # Upper-limit (non-detection) observations are flagged by a non-finite
     # uncertainty in ERROR_COL. Drop them so the model trains only on real
     # detections; normalization statistics are computed the same way.
-    DROP_UPPER_LIMITS = True
+    #
+    # Study 113: instead of dropping ULs, KEEP them as flagged CONTEXT (never as
+    # targets) via UL_AS_FLAGGED_CONTEXT below. A UL value is a one-sided bound
+    # ("fainter than this limiting magnitude"), so it is fed with an extra
+    # is_upper_limit per-event channel and excluded from target enumeration. The
+    # ZTF bands hit their detection floor earliest and carry the most ULs, so
+    # this injects late-time faint-tail information exactly where ztfg plateaus.
+    # When UL_AS_FLAGGED_CONTEXT is True the dataset requires DROP_UPPER_LIMITS
+    # False (the ULs must survive the stream build to be flagged); norm stats are
+    # still computed detections-only (a bound is not a measurement) via the
+    # explicit drop_upper_limits=True on the normalization call below.
+    UL_AS_FLAGGED_CONTEXT = True
+    DROP_UPPER_LIMITS = not UL_AS_FLAGGED_CONTEXT
 
     # Per-band loss weighting. Targets are per-band z-scored, so an equal-weight
     # loss lets the large-dynamic-range blue bands (u, g fade to mag ~28-30) be
@@ -876,6 +888,7 @@ def main(args, rank, world_size, local_rank, device):
             render_horizon_days=TARGET_HORIZON_DAYS,
             render_splat=RENDER_SPLAT,
             gather_rows_k=GATHER_ROWS_K,
+            upper_limit_channel=UL_AS_FLAGGED_CONTEXT,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1045,7 +1058,10 @@ def main(args, rank, world_size, local_rank, device):
             band_keys=BAND_KEYS,
             value_col=VALUE_COL,
             error_col=ERROR_COL,
-            drop_upper_limits=DROP_UPPER_LIMITS,
+            # Always detections-only: an upper-limit value is a one-sided bound,
+            # not a measurement, so it must not skew the per-band mean/std even
+            # when UL_AS_FLAGGED_CONTEXT keeps ULs in the event stream.
+            drop_upper_limits=True,
             file_prefix_list=train_norm_files,
         )
 
@@ -1094,6 +1110,7 @@ def main(args, rank, world_size, local_rank, device):
             data_glob=data_glob,
             object_ids=object_ids,
             append_phase=PHASE_FOURIER_BANDS > 0,
+            ul_as_flagged_context=UL_AS_FLAGGED_CONTEXT,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1331,6 +1348,7 @@ def main(args, rank, world_size, local_rank, device):
                     "render_horizon_days": TARGET_HORIZON_DAYS,
                     "render_splat": RENDER_SPLAT,
                     "gather_rows_k": GATHER_ROWS_K,
+                    "upper_limit_channel": UL_AS_FLAGGED_CONTEXT,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
