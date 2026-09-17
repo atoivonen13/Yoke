@@ -308,9 +308,14 @@ def main(args, rank, world_size, local_rank, device):
     # combine spends 2/3 of the gradient positioning the q10/q90 band we don't
     # score. Study 111: up-weight the median 3x vs each outer quantile
     # (weights (1,3,1) -> normalized (0.2,0.6,0.2)) so more capacity goes to the
-    # point forecast. Sole change vs the 106 champion. Read @1000; a Δ ≲0.03 is
-    # inside the ±0.02 seed floor and needs a re-run to confirm.
-    QUANTILE_WEIGHTS = (1.0, 3.0, 1.0)
+    # point forecast. 1.3800 @1000 -- promising (best-ever u 2.15, systematic
+    # under-fade shift = real mechanism), but ~0.02 vs the honest ~1.40 center is
+    # near the seed floor. Study 112 PUSHES to (1,8,1) -> normalized (0.1,0.8,0.1):
+    # if the mechanism is real, more median weight should extend the u/g gain (and
+    # a monotonic 111->112 improvement is strong evidence it is NOT seed). Risk:
+    # too much weight starves the outer quantiles -> they decalibrate and the blue
+    # bias creeps back (098: a bare point head did exactly that). Read @1000.
+    QUANTILE_WEIGHTS = (1.0, 8.0, 1.0)
 
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
     # down-weights every residual > 0.1 -- i.e. exactly the large-residual tail
