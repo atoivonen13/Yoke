@@ -454,7 +454,13 @@ def main(args, rank, world_size, local_rank, device):
     # Study 089: 0.0 -- bypass path never runs the backbone, so nothing to unfreeze.
     # Study 104: 0.1 -- backbone ON, output-proximal tail unfrozen @ 0.1x head LR
     # (scope="tail" below). The 082/085 fine-tune mode re-tested at the new floor.
-    BACKBONE_TAIL_LR_MULT = 0.1
+    # Study 108 (sole change 0.1->0.03): 106 (decoder scope) champion with the
+    # backbone group LR mult lowered 0.1->0.03. Motivation: 107 showed the pretrained
+    # weights OVER-move at 0.1x (bias flipped under->over-fade when the encoder was
+    # unfrozen); this tests whether the decoder itself also wants a slower rate. The
+    # head (conditioner + output_head) still trains at full anchor_lr; only the
+    # unfrozen pretrained decoder slows to 0.03x. Read the @1000 eval, not @100.
+    BACKBONE_TAIL_LR_MULT = 0.03
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
@@ -488,16 +494,12 @@ def main(args, rank, world_size, local_rank, device):
     # NOTE: decoder scope keeps the full decoder's activations, so watch VRAM at
     # batch 5; if it OOMs, this is the one run that may need batch 2 (a confound to
     # note, not the 104-matched read).
-    # STUDY 107 (sole change: decoder->full): the unfreeze ladder has helped at
-    # every rung so far -- tail (104, 1.4287) then decoder (106, 1.4178). "full"
-    # unfreezes the last frozen block, the shared encoder (embeddings + U-Net DOWN
-    # path), so the ENTIRE pretrained backbone trains end-to-end at the same 0.1x
-    # discriminative LR. This is the top of the ladder: there is no further scope
-    # to unfreeze. My priors on this model are unreliable (see the study log) --
-    # read the @1000 eval, not @100. NOTE: unfreezing the encoder adds the DOWN-path
-    # activations to the autograd graph; watch VRAM at batch 5 and drop to batch 2
-    # only if it OOMs (a confound to note against the 106-matched read).
-    BACKBONE_FINETUNE_SCOPE = "full"
+    # Unfreeze scope ladder SETTLED: tail (104, 1.4287) -> decoder (106, 1.4178,
+    # CHAMPION) -> full (107, 1.4279, regressed). Unfreezing the shared encoder at
+    # 0.1x hurt (bias flipped under->over-fade); the encoder is best left frozen as
+    # a feature extractor. Restored to the champion "decoder" scope. "full" remains
+    # wired in checkpointing.py if a lower encoder-only LR is ever tried (3rd group).
+    BACKBONE_FINETUNE_SCOPE = "decoder"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
