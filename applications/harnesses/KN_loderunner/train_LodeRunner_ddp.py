@@ -301,6 +301,17 @@ def main(args, rank, world_size, local_rank, device):
     N_QUANTILES = 3
     QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 
+    # Per-quantile weights for the pinball combine (normalized to sum to 1 inside
+    # PinballLoss, so the loss scale / effective LR is unchanged; only RELATIVE
+    # emphasis shifts). None = the legacy equal (mean) reduction. RMSE is L2/mean
+    # and is driven by the MEDIAN (index n_quantiles//2), but the equal-weight
+    # combine spends 2/3 of the gradient positioning the q10/q90 band we don't
+    # score. Study 111: up-weight the median 3x vs each outer quantile
+    # (weights (1,3,1) -> normalized (0.2,0.6,0.2)) so more capacity goes to the
+    # point forecast. Sole change vs the 106 champion. Read @1000; a Δ ≲0.03 is
+    # inside the ±0.02 seed floor and needs a re-run to confirm.
+    QUANTILE_WEIGHTS = (1.0, 3.0, 1.0)
+
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
     # down-weights every residual > 0.1 -- i.e. exactly the large-residual tail
     # that dominates RMSE, so the objective is close to L1/median while the
@@ -890,7 +901,7 @@ def main(args, rank, world_size, local_rank, device):
     # PinballLoss collapses its quantile axis internally so the epoch/rollout
     # masking and reduction are unchanged.
     if N_QUANTILES > 1:
-        loss_fn = PinballLoss(QUANTILE_LEVELS).to(device)
+        loss_fn = PinballLoss(QUANTILE_LEVELS, QUANTILE_WEIGHTS).to(device)
     elif LOSS_TYPE == "mse":
         loss_fn = nn.MSELoss(reduction="none")
     elif LOSS_TYPE == "huber":
