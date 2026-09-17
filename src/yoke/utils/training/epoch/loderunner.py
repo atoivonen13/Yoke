@@ -36,17 +36,39 @@ class PinballLoss(torch.nn.Module):
     ``pred`` is the ``q``-th quantile of the target distribution.
     """
 
-    def __init__(self, quantile_levels: tuple) -> None:
-        """Store the quantile levels as a non-trainable buffer.
+    def __init__(
+        self, quantile_levels: tuple, quantile_weights: tuple = None
+    ) -> None:
+        """Store the quantile levels (and optional per-quantile weights) as buffers.
 
         Args:
             quantile_levels (tuple): Quantile levels in (0, 1), e.g.
                 ``(0.1, 0.5, 0.9)``. Order must match the model's head output.
+            quantile_weights (tuple | None): Optional per-quantile weights for the
+                combine over the quantile axis. ``None`` (default) recovers the
+                original equal (mean) reduction -- byte-identical to the legacy
+                behavior. When given, the weights are NORMALIZED to sum to 1.0 so
+                the overall loss scale (and thus the effective LR) is unchanged;
+                only the RELATIVE emphasis shifts. Use this to up-weight the median
+                term (the point forecast RMSE cares about) vs the outer band
+                quantiles. Length must equal ``len(quantile_levels)``.
         """
         super().__init__()
         self.register_buffer(
             "levels", torch.tensor(quantile_levels, dtype=torch.float32)
         )
+        if quantile_weights is None:
+            # Uniform weights == the original mean reduction over the quantile axis.
+            w = torch.ones(len(quantile_levels), dtype=torch.float32)
+        else:
+            if len(quantile_weights) != len(quantile_levels):
+                raise ValueError(
+                    f"quantile_weights has {len(quantile_weights)} entries but "
+                    f"quantile_levels has {len(quantile_levels)}."
+                )
+            w = torch.tensor(quantile_weights, dtype=torch.float32)
+        # Normalize to sum to 1 so a weighted combine matches the mean's scale.
+        self.register_buffer("weights", w / w.sum())
 
     def forward(
         self, pred: torch.Tensor, target: torch.Tensor
@@ -68,13 +90,17 @@ class PinballLoss(torch.nn.Module):
             e = target.unsqueeze(1) - pred  # [B, Q, n_bands]
             lv = self.levels.view(1, -1, 1)  # [1, Q, 1]
             per_q = torch.maximum(lv * e, (lv - 1.0) * e)  # [B, Q, n_bands]
-            return per_q.mean(dim=1)  # [B, n_bands]
+            # Weighted combine over the quantile axis (weights sum to 1, so this
+            # equals .mean() when weights are uniform).
+            w = self.weights.view(1, -1, 1)  # [1, Q, 1]
+            return (per_q * w).sum(dim=1)  # [B, n_bands]
 
         # Rollout: [B, Q] vs [B].
         e = target.unsqueeze(1) - pred  # [B, Q]
         lv = self.levels.view(1, -1)  # [1, Q]
         per_q = torch.maximum(lv * e, (lv - 1.0) * e)  # [B, Q]
-        return per_q.mean(dim=1)  # [B]
+        w = self.weights.view(1, -1)  # [1, Q]
+        return (per_q * w).sum(dim=1)  # [B]
 
 
 def _check_pred_target_shapes(
