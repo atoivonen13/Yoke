@@ -414,6 +414,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         data_glob: str = None,
         object_ids: set = None,
         append_phase: bool = False,
+        ul_as_flagged_context: bool = False,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -481,6 +482,18 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 on the flattened ``x`` in window mode, for models built with
                 ``phase_fourier_bands > 0`` (which slice it back off in ``forward``).
                 Window mode only. When False the layout is unchanged.
+            ul_as_flagged_context (bool): If True (default False), upper-limit
+                (non-detection) rows are KEPT in the merged event stream as
+                CONTEXT (never as supervised targets) and flagged with an extra
+                ``is_upper_limit`` per-event channel, so the model can distinguish
+                a one-sided bound ("fainter than this limiting magnitude") from a
+                real measurement. This grows the window-mode per-event layout from
+                ``[value, rel_t, valid, one_hot_band]`` (width ``3 + n_bands``) to
+                ``[value, rel_t, valid, is_upper_limit, one_hot_band]`` (width
+                ``4 + n_bands``), so a model built for this layout is required.
+                Mutually exclusive with ``drop_upper_limits`` (the ULs must survive
+                the stream build to be flagged) and only supported in window mode
+                with ``n_rollout_steps == 1``. When False the layout is unchanged.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -517,7 +530,32 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         self.value_col = value_col
         self.error_col = error_col
         self.drop_upper_limits = drop_upper_limits
+        self.ul_as_flagged_context = ul_as_flagged_context
         self.n_channels = len(self.band_keys)
+
+        # Upper-limits-as-flagged-context is only coherent when the ULs actually
+        # survive the stream build (so they cannot also be dropped), when the
+        # per-event layout carries the extra is_upper_limit channel (window mode),
+        # and in the single-step regime (the rollout getitems do not yet emit the
+        # extra channel). Fail loudly rather than silently mis-layout the input.
+        if ul_as_flagged_context:
+            if drop_upper_limits:
+                raise ValueError(
+                    "ul_as_flagged_context=True requires drop_upper_limits=False "
+                    "so the upper-limit rows survive to be flagged as context."
+                )
+            if context_window_days is None:
+                raise ValueError(
+                    "ul_as_flagged_context=True requires time-window mode "
+                    "(set context_window_days); the is_upper_limit channel is "
+                    "part of the padded window layout."
+                )
+            if n_rollout_steps != 1:
+                raise ValueError(
+                    "ul_as_flagged_context=True is only supported with "
+                    "n_rollout_steps == 1 (the rollout getitems do not emit the "
+                    "is_upper_limit channel)."
+                )
 
         if n_rollout_steps < 1:
             raise ValueError(
@@ -616,6 +654,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             times = []
             values = []
             bands = []
+            is_ul = []
 
             for band_idx, key in enumerate(self.band_keys):
                 # A band may be missing entirely in a given file.
@@ -626,18 +665,24 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 if arr.size == 0:
                     continue
 
-                # Drop upper-limit (non-detection) rows, which are flagged by a
-                # non-finite uncertainty (e.g. inf) in error_col. This keeps only
-                # real detections in the merged event stream.
+                # Upper-limit (non-detection) rows are flagged by a non-finite
+                # uncertainty (e.g. inf) in error_col.
+                detected = np.isfinite(arr[:, self.error_col])
+
                 if self.drop_upper_limits:
-                    detected = np.isfinite(arr[:, self.error_col])
+                    # Keep only real detections in the merged event stream.
                     arr = arr[detected]
+                    detected = detected[detected]  # all True after the mask
                     if arr.shape[0] == 0:
                         continue
 
                 times.append(arr[:, 0].astype(np.float32))
                 values.append(arr[:, value_col].astype(np.float32))
                 bands.append(np.full(arr.shape[0], band_idx, dtype=np.int64))
+                # 1.0 for upper limits (non-detections), 0.0 for real detections.
+                # When ul_as_flagged_context is off this stays all-zero and the
+                # extra channel is never emitted, so the layout is unchanged.
+                is_ul.append((~detected).astype(np.float32))
 
             data.close()
 
@@ -647,21 +692,25 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             times = np.concatenate(times)
             values = np.concatenate(values)
             bands = np.concatenate(bands)
+            is_ul = np.concatenate(is_ul)
 
             # Sort the merged stream by observation time.
             order = np.argsort(times, kind="stable")
             times = times[order]
             values = values[order]
             bands = bands[order]
+            is_ul = is_ul[order]
 
             # Relative times within the file.
             times = times - times.min()
 
-            # Per-band normalization of the values.
+            # Per-band normalization of the values. Upper-limit rows are z-scored
+            # with the same detection-derived per-band stats; they enter only as
+            # flagged context hints, never as supervised targets.
             values = (values - self.means[bands]) / (self.stds[bands] + EPS)
 
             self.events_per_file.append(
-                (times, values.astype(np.float32), bands)
+                (times, values.astype(np.float32), bands, is_ul)
             )
             self.stems_per_file.append(_stem(fn))
 
@@ -672,7 +721,13 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 # One sample per event after the first: the target is event
                 # target_idx and the context is the trailing window ending at
                 # target_idx - 1 (always non-empty, so short curves contribute).
+                # When upper limits are kept as flagged context they must never be
+                # supervised targets (a limiting magnitude is a one-sided bound,
+                # not a measurement), so skip UL events as target_idx. They still
+                # appear in the trailing context window of later targets.
                 for target_idx in range(1, n_events):
+                    if self.ul_as_flagged_context and is_ul[target_idx] > 0.5:
+                        continue
                     self.samples.append((file_idx, target_idx))
             else:
                 # Legacy fixed-count windows: startIDX indexes the window start,
@@ -727,7 +782,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             Dt (torch.Tensor): Lead time to the target event.
         """
         file_idx, startIDX = self.samples[index]
-        times, values, bands = self.events_per_file[file_idx]
+        times, values, bands, _is_ul = self.events_per_file[file_idx]
 
         target_idx = startIDX + self.context_len
 
@@ -777,7 +832,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         return x, target, mask, Dt
 
     def _draw_target_idx(
-        self, times: np.ndarray, anchor_idx: int, n_events: int
+        self,
+        times: np.ndarray,
+        anchor_idx: int,
+        n_events: int,
+        is_ul: np.ndarray = None,
     ) -> int:
         """Draw a horizon-covering target event index ahead of ``anchor_idx``.
 
@@ -793,12 +852,21 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             times (np.ndarray): Merged, sorted, file-relative event times.
             anchor_idx (int): Index of the most recent context event.
             n_events (int): Number of events in the curve.
+            is_ul (np.ndarray): Per-event upper-limit flag (1.0 for a
+                non-detection). When given (``ul_as_flagged_context``), upper
+                limits are excluded from the candidate targets so a one-sided
+                bound is never supervised. If every future event is an upper
+                limit the filter is skipped (falls back to all future events).
 
         Returns:
             int: The drawn target event index, in ``(anchor_idx, n_events)``.
         """
         lead_time = np.random.uniform(0.0, self.target_horizon_days)
         cand = np.arange(anchor_idx + 1, n_events)
+        if is_ul is not None:
+            non_ul = cand[is_ul[cand] < 0.5]
+            if non_ul.shape[0] > 0:
+                cand = non_ul
         gaps = times[cand] - times[anchor_idx]
         return int(cand[np.argmin(np.abs(gaps - lead_time))])
 
@@ -831,7 +899,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 the target event.
         """
         file_idx, target_idx = self.samples[index]
-        times, values, bands = self.events_per_file[file_idx]
+        times, values, bands, is_ul = self.events_per_file[file_idx]
 
         # Anchor the trailing window on the event immediately before the enumerated
         # target (the most recent observation). With horizon-covering target
@@ -841,7 +909,10 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         anchor_idx = target_idx - 1
         if self.target_horizon_days is not None:
             target_idx = self._draw_target_idx(
-                times, anchor_idx, times.shape[0]
+                times,
+                anchor_idx,
+                times.shape[0],
+                is_ul=is_ul if self.ul_as_flagged_context else None,
             )
 
         anchor_t = times[anchor_idx]
@@ -861,20 +932,35 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         ctx_t = times[sel_idx]
         ctx_v = values[sel_idx]
         ctx_b = bands[sel_idx]
+        ctx_ul = is_ul[sel_idx]
         n_real = sel_idx.shape[0]
 
         # rel_t relative to the first real event in the window (same convention
         # as the fixed-count path, which uses the window's first event).
         rel_t = (ctx_t - ctx_t[0]).astype(np.float32)
 
-        # Padded per-event array: [value, rel_t, valid, one_hot_band].
-        per_event = np.zeros(
-            (self.max_context_len, 3 + self.n_channels), dtype=np.float32
-        )
-        per_event[:n_real, 0] = ctx_v
-        per_event[:n_real, 1] = rel_t
-        per_event[:n_real, 2] = 1.0  # validity flag for real events
-        per_event[np.arange(n_real), 3 + ctx_b] = 1.0
+        # Padded per-event array. Default layout is
+        # [value, rel_t, valid, one_hot_band] (width 3 + n_bands). When upper
+        # limits are kept as flagged context, an is_upper_limit channel is
+        # inserted after valid, giving [value, rel_t, valid, is_upper_limit,
+        # one_hot_band] (width 4 + n_bands) and shifting the band one-hot by one.
+        if self.ul_as_flagged_context:
+            per_event = np.zeros(
+                (self.max_context_len, 4 + self.n_channels), dtype=np.float32
+            )
+            per_event[:n_real, 0] = ctx_v
+            per_event[:n_real, 1] = rel_t
+            per_event[:n_real, 2] = 1.0  # validity flag for real events
+            per_event[:n_real, 3] = ctx_ul  # 1.0 for upper limits (bounds)
+            per_event[np.arange(n_real), 4 + ctx_b] = 1.0
+        else:
+            per_event = np.zeros(
+                (self.max_context_len, 3 + self.n_channels), dtype=np.float32
+            )
+            per_event[:n_real, 0] = ctx_v
+            per_event[:n_real, 1] = rel_t
+            per_event[:n_real, 2] = 1.0  # validity flag for real events
+            per_event[np.arange(n_real), 3 + ctx_b] = 1.0
 
         x_flat = per_event.reshape(-1)
         if self.append_phase:
@@ -943,7 +1029,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 padded steps, shape [n_rollout_steps].
         """
         file_idx, startIDX = self.samples[index]
-        times, values, bands = self.events_per_file[file_idx]
+        times, values, bands, _is_ul = self.events_per_file[file_idx]
 
         target_start = startIDX + self.context_len
 
@@ -1033,7 +1119,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 padded steps, shape [n_rollout_steps].
         """
         file_idx, target_idx = self.samples[index]
-        times, values, bands = self.events_per_file[file_idx]
+        times, values, bands, _is_ul = self.events_per_file[file_idx]
 
         # Seed context: trailing W-day window ending at the anchor event
         # (target_idx - 1), capped to the most recent max_context_len. Identical

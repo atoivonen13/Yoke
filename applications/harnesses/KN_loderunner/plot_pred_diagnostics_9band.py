@@ -255,6 +255,12 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     render_splat = ckpt.get("render_splat", 5)
     gather_rows_k = ckpt.get("gather_rows_k", 5)
 
+    # Study 113: whether upper limits were kept as flagged context (adds an
+    # is_upper_limit per-event channel, width 4 + n_bands). Default False so
+    # pre-113 checkpoints reconstruct byte-identically. The context builders and
+    # readers key off model.upper_limit_channel so eval matches training.
+    upper_limit_channel = ckpt.get("upper_limit_channel", False)
+
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
     print("backbone_class:", ckpt.get("backbone_class", "LodeRunner"))
@@ -303,6 +309,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         render_horizon_days=render_horizon_days,
         render_splat=render_splat,
         gather_rows_k=gather_rows_k,
+        upper_limit_channel=upper_limit_channel,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
@@ -397,6 +404,8 @@ def build_context_input(
     window_mode=False,
     phase_fourier_bands=0,
     phase0=None,
+    win_ul=None,
+    upper_limit_channel=False,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -412,6 +421,13 @@ def build_context_input(
     ``rel_t`` relative to the first real event; padded rows are all-zero with
     ``valid = 0``. This matches ``_getitem_window`` in the dataset.
 
+    Upper-limit channel (``upper_limit_channel=True``, window mode only): an
+    ``is_upper_limit`` flag is inserted after ``valid``, giving
+    ``[value, rel_t, valid, is_upper_limit, one_hot_band]`` (width ``4 + n_bands``)
+    and shifting the band one-hot by one. ``win_ul`` (per-event 0/1) supplies the
+    flag; if None it is treated as all-zero. Matches ``_getitem_window`` under
+    ``ul_as_flagged_context``.
+
     Absolute phase (``phase_fourier_bands > 0``): append one trailing scalar,
     the anchor phase in days since the curve's first detection, computed as
     ``win_t[-1] - phase0``. ``phase0`` is REQUIRED when the feature is enabled
@@ -424,7 +440,22 @@ def build_context_input(
     win_t = np.asarray(win_t, dtype=np.float32)
     win_b = np.asarray(win_b, dtype=np.int64)
 
-    if window_mode:
+    if window_mode and upper_limit_channel:
+        n_real = win_v.shape[0]
+        rel_t = (win_t - win_t[0]).astype(np.float32)
+        win_ul = (
+            np.zeros(n_real, dtype=np.float32)
+            if win_ul is None
+            else np.asarray(win_ul, dtype=np.float32)
+        )
+
+        per_event = np.zeros((context_len, 4 + n_bands), dtype=np.float32)
+        per_event[:n_real, 0] = win_v
+        per_event[:n_real, 1] = rel_t
+        per_event[:n_real, 2] = 1.0  # validity flag for real events
+        per_event[:n_real, 3] = win_ul  # 1.0 for upper limits (bounds)
+        per_event[np.arange(n_real), 4 + win_b] = 1.0
+    elif window_mode:
         n_real = win_v.shape[0]
         rel_t = (win_t - win_t[0]).astype(np.float32)
 
@@ -501,13 +532,17 @@ def _batched_forward(model, x, lead_times, n_bands, device, max_batch=256):
     return out
 
 
-def _select_window(ctx_t, ctx_v, ctx_b, context_window_days, max_context_len):
+def _select_window(
+    ctx_t, ctx_v, ctx_b, context_window_days, max_context_len, ctx_ul=None
+):
     """Select the trailing time-window subset of a growing context.
 
     Mirrors ``_getitem_window`` in the dataset: keep every event within
     ``context_window_days`` of the most recent context event, then keep the most
     recent ``max_context_len`` if more qualify. Returns (win_v, win_t, win_b) as
-    lists in time order (oldest first).
+    lists in time order (oldest first), or (win_v, win_t, win_b, win_ul) when
+    ``ctx_ul`` is provided (upper-limit flag per event, threaded for models built
+    with ``upper_limit_channel``).
     """
     ct = np.asarray(ctx_t, dtype=np.float32)
     cv = np.asarray(ctx_v, dtype=np.float32)
@@ -519,6 +554,15 @@ def _select_window(ctx_t, ctx_v, ctx_b, context_window_days, max_context_len):
     # Anchor-pinned subsample (earliest + anchor always kept) when the window
     # over-fills M -- matches window_select_positions in the dataset/training.
     sel_idx = sel_idx[window_select_positions(sel_idx.shape[0], max_context_len)]
+
+    if ctx_ul is not None:
+        cu = np.asarray(ctx_ul, dtype=np.float32)
+        return (
+            list(cv[sel_idx]),
+            list(ct[sel_idx]),
+            list(cb[sel_idx]),
+            list(cu[sel_idx]),
+        )
 
     return (
         list(cv[sel_idx]),

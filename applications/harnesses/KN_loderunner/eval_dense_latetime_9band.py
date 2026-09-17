@@ -89,7 +89,7 @@ def _stem(path: str) -> str:
 
 def read_merged_stream(
     npz_path: str, drop_upper_limits: bool
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read one file's merged, time-sorted event stream in ABSOLUTE MJD.
 
     Unlike the training dataset, times are NOT relativized here, so streams from
@@ -99,38 +99,50 @@ def read_merged_stream(
         npz_path (str): Path to the light-curve npz.
         drop_upper_limits (bool): Drop non-detections (non-finite error) so the
             realistic context stream matches training. The dense set is all
-            detections, so this is a no-op there.
+            detections, so this is a no-op there. When False, upper limits are
+            KEPT and flagged in the returned ``is_ul`` array (for models trained
+            with ``upper_limit_channel``).
 
     Returns:
-        (times, values, bands): absolute MJD, raw magnitude, band index; each
-        [N] and sorted by time. Empty arrays if the file has no usable events.
+        (times, values, bands, is_ul): absolute MJD, raw magnitude, band index,
+        upper-limit flag (1.0 for a non-detection); each [N] and sorted by time.
+        Empty arrays if the file has no usable events.
     """
     data = np.load(npz_path, allow_pickle=True)
-    times, values, bands = [], [], []
+    times, values, bands, is_ul = [], [], [], []
     for band_idx, key in enumerate(BAND_KEYS):
         if key not in data.files:
             continue
         arr = data[key]
         if arr.size == 0:
             continue
+        detected = np.isfinite(arr[:, ERROR_COL])
         if drop_upper_limits:
-            arr = arr[np.isfinite(arr[:, ERROR_COL])]
+            arr = arr[detected]
+            detected = detected[detected]  # all True after the mask
             if arr.shape[0] == 0:
                 continue
         times.append(arr[:, 0].astype(np.float64))
         values.append(arr[:, VALUE_COL].astype(np.float32))
         bands.append(np.full(arr.shape[0], band_idx, dtype=np.int64))
+        is_ul.append((~detected).astype(np.float32))
     data.close()
 
     if not times:
         empty_f = np.empty(0, dtype=np.float64)
-        return empty_f, empty_f.astype(np.float32), np.empty(0, dtype=np.int64)
+        return (
+            empty_f,
+            empty_f.astype(np.float32),
+            np.empty(0, dtype=np.int64),
+            empty_f.astype(np.float32),
+        )
 
     times = np.concatenate(times)
     values = np.concatenate(values)
     bands = np.concatenate(bands)
+    is_ul = np.concatenate(is_ul)
     order = np.argsort(times, kind="stable")
-    return times[order], values[order], bands[order]
+    return times[order], values[order], bands[order], is_ul[order]
 
 
 def _stem_to_path(data_glob: str) -> dict:
@@ -209,6 +221,7 @@ def _rollout_scored(
     t0: float,
     context_window_days: float,
     max_context_len: int,
+    ctx_ul0: list = None,
 ) -> list:
     """Autoregressive late-time forecast: feed each prediction back as context.
 
@@ -235,25 +248,37 @@ def _rollout_scored(
         t0 (float): Phase-zero time (first realistic detection).
         context_window_days (float): Trailing lookback W.
         max_context_len (int): Padded context width M.
+        ctx_ul0 (list): Seed context upper-limit flags (1.0 for a non-detection),
+            or None when the model has no is_upper_limit channel. Fed-back
+            predictions are appended with flag 0.0 (a prediction is a detection,
+            not a bound).
 
     Returns:
         list: One scored dict per target (phase/lead_time/band/pred_mag/true_mag/
         residual_mag).
     """
+    ul_channel = getattr(model, "upper_limit_channel", False)
     ctx_t = list(ctx_t0)
     ctx_v = list(ctx_v0)
     ctx_b = list(ctx_b0)
+    ctx_ul = list(ctx_ul0) if ctx_ul0 is not None else None
 
     scored = []
     with torch.no_grad():
         for k in range(target_t.shape[0]):
-            win_v, win_t, win_b = _select_window(
+            win = _select_window(
                 ctx_t=ctx_t,
                 ctx_v=ctx_v,
                 ctx_b=ctx_b,
                 context_window_days=context_window_days,
                 max_context_len=max_context_len,
+                ctx_ul=ctx_ul if ul_channel else None,
             )
+            if ul_channel:
+                win_v, win_t, win_b, win_ul = win
+            else:
+                win_v, win_t, win_b = win
+                win_ul = None
             x = build_context_input(
                 win_v=win_v,
                 win_t=win_t,
@@ -264,6 +289,8 @@ def _rollout_scored(
                 window_mode=True,
                 phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
                 phase0=t0,  # win_t is absolute MJD; first detection at t0
+                win_ul=win_ul,
+                upper_limit_channel=ul_channel,
             )
             # Lead time from the last FED event (the running context tip).
             dt = float(target_t[k]) - float(ctx_t[-1])
@@ -291,10 +318,14 @@ def _rollout_scored(
                     "residual_mag": float(pred_mag) - true_mag,
                 }
             )
-            # Feed the NORMALIZED prediction back as the next context event.
+            # Feed the NORMALIZED prediction back as the next context event. A
+            # fed-back prediction is a (pseudo-)detection, never a bound, so its
+            # is_upper_limit flag is 0.
             ctx_t.append(float(target_t[k]))
             ctx_v.append(pred_norm)
             ctx_b.append(band)
+            if ctx_ul is not None:
+                ctx_ul.append(0.0)
 
     return scored
 
@@ -338,11 +369,16 @@ def eval_object(
       measured from the last FED event, not the fixed last realistic detection.
       This measures the true inference path (and exposes drift).
     """
-    r_t, r_v, r_b = real_stream
-    d_t, d_v, d_b = dense_stream
+    r_t, r_v, r_b, r_ul = real_stream
+    d_t, d_v, d_b, d_ul = dense_stream
 
     if r_t.shape[0] < 1 or d_t.shape[0] < 1:
         return None
+
+    # Whether the model consumes an is_upper_limit channel (set at train time).
+    # When True the realistic context stream retains its upper limits (flagged);
+    # when False they were already dropped at read time.
+    ul_channel = getattr(model, "upper_limit_channel", False)
 
     # Phase zero = the first REALISTIC detection (the observed trigger). Kept as
     # the realistic trigger even under the dense-context probe, so the scored
@@ -357,9 +393,9 @@ def eval_object(
     # cutoff below, so it is dense-WITHIN-window, not leakage toward the scored
     # points. drop_upper_limits was already applied when the streams were read.
     if probe_dense_context:
-        c_t, c_v, c_b = d_t, d_v, d_b
+        c_t, c_v, c_b, c_ul = d_t, d_v, d_b, d_ul
     else:
-        c_t, c_v, c_b = r_t, r_v, r_b
+        c_t, c_v, c_b, c_ul = r_t, r_v, r_b, r_ul
 
     # The cutoff splits context from forecast: the model may only see context
     # detections up to the cutoff phase, and must FORECAST everything after it
@@ -375,6 +411,7 @@ def eval_object(
     r_t_ctx = c_t[ctx_mask]
     r_v_ctx = c_v[ctx_mask]
     r_b_ctx = c_b[ctx_mask]
+    r_ul_ctx = c_ul[ctx_mask]
     last_real_t = float(r_t_ctx[-1])
 
     # Score the forecast only within the phase band cutoff < phase <= max_days.
@@ -388,13 +425,19 @@ def eval_object(
     # normalized as in training. build_context_input subtracts win_t[0], so
     # absolute times are fine here.
     r_v_norm = (r_v_ctx - means[r_b_ctx]) / (stds[r_b_ctx] + EPS)
-    win_v, win_t, win_b = _select_window(
+    win = _select_window(
         ctx_t=list(r_t_ctx.astype(np.float32)),
         ctx_v=list(r_v_norm.astype(np.float32)),
         ctx_b=list(r_b_ctx),
         context_window_days=context_window_days,
         max_context_len=max_context_len,
+        ctx_ul=list(r_ul_ctx.astype(np.float32)) if ul_channel else None,
     )
+    if ul_channel:
+        win_v, win_t, win_b, win_ul = win
+    else:
+        win_v, win_t, win_b = win
+        win_ul = None
     x = build_context_input(
         win_v=win_v,
         win_t=win_t,
@@ -405,6 +448,8 @@ def eval_object(
         window_mode=True,
         phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
         phase0=t0,  # win_t is absolute MJD; first realistic detection at t0
+        win_ul=win_ul,
+        upper_limit_channel=ul_channel,
     )
 
     # Score each late-time dense point at its true lead time from the last
@@ -434,6 +479,9 @@ def eval_object(
             ctx_t0=list(r_t_ctx.astype(np.float32)),
             ctx_v0=list(r_v_norm.astype(np.float32)),
             ctx_b0=list(r_b_ctx),
+            ctx_ul0=(
+                list(r_ul_ctx.astype(np.float32)) if ul_channel else None
+            ),
             target_t=d_t[late_idx].astype(np.float32),
             target_v=d_v[late_idx].astype(np.float32),
             target_b=d_b[late_idx].astype(np.int64),
@@ -495,7 +543,7 @@ def eval_object(
     # dense truth goes dark.
     uniform = None
     if uniform_stream is not None:
-        u_t, u_v, u_b = uniform_stream
+        u_t, u_v, u_b, _u_ul = uniform_stream
         if u_t.shape[0] > 0:
             uniform = (u_t - t0, u_v, u_b)
 
@@ -784,8 +832,14 @@ def main():
     all_scored = []
     plotted = 0
     n_eval = 0
+    # When the model was trained with the flagged-UL context channel, the
+    # realistic (context) stream must KEEP upper limits so they reach the
+    # flagged-context path; otherwise drop them as before. Auto-detected from
+    # the checkpoint metadata so eval matches training.
+    ul_channel = getattr(model, "upper_limit_channel", False)
+    real_drop_ul = DROP_UPPER_LIMITS and not ul_channel
     for stem in stems:
-        real_stream = read_merged_stream(real_map[stem], DROP_UPPER_LIMITS)
+        real_stream = read_merged_stream(real_map[stem], real_drop_ul)
         dense_stream = read_merged_stream(dense_map[stem], drop_upper_limits=False)
         uniform_stream = None
         if stem in uniform_map:

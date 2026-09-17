@@ -146,7 +146,7 @@ def _phasezero_from_uniform(uniform_stream) -> float | None:
     """
     if uniform_stream is None:
         return None
-    u_t, _, _ = uniform_stream
+    u_t = uniform_stream[0]
     if u_t is not None and u_t.shape[0] > 0:
         return float(u_t.min())
     return None
@@ -358,8 +358,12 @@ def main():
     n_no_phasezero = 0
     n_proxy = 0
 
+    # Keep ULs in the realistic (context) stream when the model was trained with
+    # the flagged-UL channel, so eval matches training (auto-detected).
+    ul_channel = getattr(model, "upper_limit_channel", False)
+    real_drop_ul = DROP_UPPER_LIMITS and not ul_channel
     for stem in stems:
-        real_stream = read_merged_stream(real_map[stem], DROP_UPPER_LIMITS)
+        real_stream = read_merged_stream(real_map[stem], real_drop_ul)
         dense_stream = read_merged_stream(dense_map[stem], drop_upper_limits=False)
 
         # Physical phase zero: the TRUE merger time from sim truth in the

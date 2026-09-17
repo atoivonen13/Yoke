@@ -220,6 +220,11 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     render_horizon_days = ckpt.get("render_horizon_days", 8.0)
     render_splat = ckpt.get("render_splat", 5)
     gather_rows_k = ckpt.get("gather_rows_k", 5)
+    # False for legacy checkpoints (no key) -> per-event width 3+n_bands. True
+    # (Study 113) admits upper limits as flagged context: per-event width grows
+    # to 4+n_bands (extra is_upper_limit column), widening the conditioner
+    # first-layer; MUST match to load strict.
+    upper_limit_channel = ckpt.get("upper_limit_channel", False)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -238,6 +243,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
     print("spatial_render:", spatial_render)
+    print("upper_limit_channel:", upper_limit_channel)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -265,6 +271,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         render_horizon_days=render_horizon_days,
         render_splat=render_splat,
         gather_rows_k=gather_rows_k,
+        upper_limit_channel=upper_limit_channel,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
@@ -301,15 +308,22 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     return model, context_len, n_bands, context_window_days, max_context_len
 
 
-def load_event_stream(fn, means, stds):
+def load_event_stream(fn, means, stds, keep_upper_limits=False):
     """Load one npz file into a merged, time-sorted, normalized event stream.
 
     Mirrors the dataset's stream construction so inference matches training.
+
+    When ``keep_upper_limits`` is True (Study 113, the model was trained with
+    the flagged-UL context channel), non-detection rows are retained and marked
+    in the returned ``is_ul`` array (1.0 for a bound, 0.0 for a detection);
+    otherwise they are dropped as in the legacy path.
 
     Returns:
         times (np.ndarray): Relative observation times [N].
         values_norm (np.ndarray): Normalized values [N].
         bands (np.ndarray): Band index per event [N].
+        is_ul (np.ndarray): Upper-limit flag per event [N] (all 0.0 when
+            ``keep_upper_limits`` is False).
         raw (dict): Per-band raw (mjd, mag) arrays for plotting the observations.
         t0 (float): The earliest MJD, used to align forecast times.
     """
@@ -318,6 +332,7 @@ def load_event_stream(fn, means, stds):
     times = []
     values = []
     bands = []
+    is_ul = []
     raw = {}
 
     for band_idx, key in enumerate(BAND_KEYS):
@@ -328,13 +343,17 @@ def load_event_stream(fn, means, stds):
         if arr.size == 0:
             continue
 
-        # Drop upper-limit (non-detection) rows, flagged by a non-finite
-        # uncertainty in ERROR_COL, matching how the model was trained.
-        if DROP_UPPER_LIMITS:
-            detected = np.isfinite(arr[:, ERROR_COL])
+        # Upper-limit (non-detection) rows are flagged by a non-finite
+        # uncertainty in ERROR_COL. Drop them unless the model was trained to
+        # consume them as flagged context.
+        detected = np.isfinite(arr[:, ERROR_COL])
+        if not keep_upper_limits:
             arr = arr[detected]
             if arr.shape[0] == 0:
                 continue
+            ul_flag = np.zeros(arr.shape[0], dtype=np.float32)
+        else:
+            ul_flag = (~detected).astype(np.float32)
 
         t = arr[:, 0].astype(np.float32)
         v = arr[:, VALUE_COL].astype(np.float32)
@@ -342,7 +361,13 @@ def load_event_stream(fn, means, stds):
         times.append(t)
         values.append(v)
         bands.append(np.full(arr.shape[0], band_idx, dtype=np.int64))
-        raw[band_idx] = (t, v)
+        is_ul.append(ul_flag)
+        # Only plot detections as observed points.
+        if keep_upper_limits:
+            det = detected
+            raw[band_idx] = (t[det], v[det])
+        else:
+            raw[band_idx] = (t, v)
 
     data.close()
 
@@ -352,18 +377,20 @@ def load_event_stream(fn, means, stds):
     times = np.concatenate(times)
     values = np.concatenate(values)
     bands = np.concatenate(bands)
+    is_ul = np.concatenate(is_ul)
 
     order = np.argsort(times, kind="stable")
     times = times[order]
     values = values[order]
     bands = bands[order]
+    is_ul = is_ul[order]
 
     t0 = float(times.min())
     times = times - t0
 
     values_norm = (values - means[bands]) / (stds[bands] + EPS)
 
-    return times, values_norm.astype(np.float32), bands, raw, t0
+    return times, values_norm.astype(np.float32), bands, is_ul, raw, t0
 
 
 def build_context_input(
@@ -376,6 +403,8 @@ def build_context_input(
     max_context_len=None,
     phase_fourier_bands=0,
     phase0=None,
+    ctx_ul=None,
+    upper_limit_channel=False,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -389,6 +418,12 @@ def build_context_input(
     the first real event; padded rows are all-zero with ``valid = 0``. Matches
     ``_getitem_window`` in the dataset.
 
+    Upper-limit channel (``upper_limit_channel=True``, Study 113): an extra
+    ``is_upper_limit`` column is inserted after the validity flag, giving
+    ``[value, rel_t, valid, is_upper_limit, one_hot_band(n_bands)]`` (width
+    ``4 + n_bands``). ``ctx_ul`` supplies the per-event bound flag (1.0 for a
+    non-detection, 0.0 for a detection). Window mode only.
+
     Absolute phase (``phase_fourier_bands > 0``): append one trailing scalar,
     the anchor phase in days since the curve's first detection, computed as
     ``ctx_t[-1] - phase0``. ``phase0`` is REQUIRED when the feature is enabled
@@ -401,7 +436,16 @@ def build_context_input(
 
     rel_t = (ctx_t - ctx_t[0]).astype(np.float32)
 
-    if window_mode:
+    if window_mode and upper_limit_channel:
+        n_real = ctx_t.shape[0]
+        per_event = np.zeros((max_context_len, 4 + n_bands), dtype=np.float32)
+        per_event[:n_real, 0] = ctx_v
+        per_event[:n_real, 1] = rel_t
+        per_event[:n_real, 2] = 1.0  # validity flag for real events
+        if ctx_ul is not None:
+            per_event[:n_real, 3] = np.asarray(ctx_ul, dtype=np.float32)
+        per_event[np.arange(n_real), 4 + ctx_b] = 1.0
+    elif window_mode:
         n_real = ctx_t.shape[0]
         per_event = np.zeros((max_context_len, 3 + n_bands), dtype=np.float32)
         per_event[:n_real, 0] = ctx_v
@@ -456,7 +500,9 @@ def forecast_curve(
     Returns a [n_lead_times, n_bands] array of denormalized (magnitude)
     predictions and the absolute forecast times (in the last-observation frame).
     """
-    times, values_norm, bands, _, _ = stream
+    times, values_norm, bands, is_ul, _, _ = stream
+
+    ul_channel = getattr(model, "upper_limit_channel", False)
 
     if window_mode:
         # Time-window context: all events within context_window_days of the last
@@ -470,11 +516,13 @@ def forecast_curve(
         ctx_t = times[sel_idx]
         ctx_v = values_norm[sel_idx]
         ctx_b = bands[sel_idx]
+        ctx_ul = is_ul[sel_idx]
     else:
         # Most recent context_len events.
         ctx_t = times[-context_len:]
         ctx_v = values_norm[-context_len:]
         ctx_b = bands[-context_len:]
+        ctx_ul = is_ul[-context_len:]
 
     x = build_context_input(
         ctx_t,
@@ -486,6 +534,8 @@ def forecast_curve(
         max_context_len=max_context_len,
         phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
         phase0=0.0,  # stream relativized (times -= t0) -> first detection at 0
+        ctx_ul=ctx_ul if ul_channel else None,
+        upper_limit_channel=ul_channel,
     )
 
     last_t = float(times[-1])
@@ -513,7 +563,7 @@ def forecast_curve(
 
 
 def plot_forecast(stream, preds_mag, forecast_times, last_t, title, outpath):
-    _, _, _, raw, t0 = stream
+    _, _, _, _, raw, t0 = stream
 
     plt.figure(figsize=(9, 6))
 
@@ -591,6 +641,9 @@ def main():
     ) = load_9band_model(args.ckpt, device, use_ema=getattr(args, "use_ema", False))
 
     window_mode = context_window_days is not None
+    # Keep ULs in the stream only when the model was trained to consume them as
+    # flagged context (Study 113); normalization stays detections-only below.
+    keep_uls = getattr(model, "upper_limit_channel", False)
 
     means, stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
@@ -629,7 +682,7 @@ def main():
     lead_times = np.linspace(0.0, args.horizon, args.n_lead_times)
 
     for i, fn in enumerate(files):
-        stream = load_event_stream(fn, means, stds)
+        stream = load_event_stream(fn, means, stds, keep_upper_limits=keep_uls)
 
         if stream is None:
             print(f"Skipping {fn}: no observations.")
