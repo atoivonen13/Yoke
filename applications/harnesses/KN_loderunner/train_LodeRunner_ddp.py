@@ -308,13 +308,8 @@ def main(args, rank, world_size, local_rank, device):
     # combine spends 2/3 of the gradient positioning the q10/q90 band we don't
     # score. Study 111: up-weight the median 3x vs each outer quantile
     # (weights (1,3,1) -> normalized (0.2,0.6,0.2)) so more capacity goes to the
-    # point forecast. 1.3800 @1000 -- promising (best-ever u 2.15, systematic
-    # under-fade shift = real mechanism), but ~0.02 vs the honest ~1.40 center is
-    # near the seed floor. Study 112 PUSHES to (1,8,1) -> normalized (0.1,0.8,0.1):
-    # if the mechanism is real, more median weight should extend the u/g gain (and
-    # a monotonic 111->112 improvement is strong evidence it is NOT seed). Risk:
-    # too much weight starves the outer quantiles -> they decalibrate and the blue
-    # bias creeps back (098: a bare point head did exactly that). Read @1000.
+    # point forecast. Sole change vs the 106 champion. Read @1000; a Δ ≲0.03 is
+    # inside the ±0.02 seed floor and needs a re-run to confirm.
     QUANTILE_WEIGHTS = (1.0, 3.0, 1.0)
 
     # Point-forecast loss. "huber" (delta=0.1) matches study 44 but implicitly
@@ -735,67 +730,7 @@ def main(args, rank, world_size, local_rank, device):
     # Upper-limit (non-detection) observations are flagged by a non-finite
     # uncertainty in ERROR_COL. Drop them so the model trains only on real
     # detections; normalization statistics are computed the same way.
-    #
-    # Study 113: instead of dropping ULs, KEEP them as flagged CONTEXT (never as
-    # targets) via UL_AS_FLAGGED_CONTEXT below. A UL value is a one-sided bound
-    # ("fainter than this limiting magnitude"), so it is fed with an extra
-    # is_upper_limit per-event channel and excluded from target enumeration. The
-    # ZTF bands hit their detection floor earliest and carry the most ULs, so
-    # this injects late-time faint-tail information exactly where ztfg plateaus.
-    # When UL_AS_FLAGGED_CONTEXT is True the dataset requires DROP_UPPER_LIMITS
-    # False (the ULs must survive the stream build to be flagged); norm stats are
-    # still computed detections-only (a bound is not a measurement) via the
-    # explicit drop_upper_limits=True on the normalization call below.
-    # REVERTED after study 113 REGRESSED: 1.5199 @1000 vs 111's 1.3800 (+0.14,
-    # ~7x the seed floor), and ztfg (the mechanism target) got WORSE (RMSE
-    # 1.86->2.12, bias -0.26->-1.28 = harder under-fade). The bare is_upper_limit
-    # flag wasn't enough for the model to treat the limiting mag as a one-sided
-    # bound; it partly read the (brighter-than-truth) limit value as a soft
-    # measurement and pulled forecasts bright. Option 3 (censored one-sided loss)
-    # was gated on Option 1 clearing noise AND helping ztfg -- it did neither, so
-    # we do not escalate. Back to the 111 detections-only champion.
-    UL_AS_FLAGGED_CONTEXT = False
-
-    # Study 114: censored one-sided (hinge) loss on upper limits. Distinct from
-    # (and mutually exclusive with) UL_AS_FLAGGED_CONTEXT above: the ULs stay OUT
-    # of the context (detection samples are byte-identical to the 111 champion, so
-    # the architecture is unchanged and this could warm-start -- here we train
-    # fresh), and instead come back as EXTRA supervised TARGETS carrying a
-    # one-sided loss. A UL value is a bound ("the true source is fainter than this
-    # limiting magnitude"); the hinge relu(limit_z - median_pred_z) penalizes only
-    # forecasts that predict too BRIGHT (violate the bound) and has exactly zero
-    # gradient once the forecast plateaus fainter than the limit. The
-    # UL-censoring audit (audit_upperlimit_censoring.py) confirmed real gradient:
-    # 21.4% of late-time ULs are violated by the champion (ztfg 43.9%, i/z/y ~40-52%),
-    # median depth ~0.44 mag on ztfg -- exactly the under-fade the campaign targets.
-    # Only late-time ULs are useful (near-peak non-detections carry no fade
-    # constraint), so UL_TARGET_HORIZON_DAYS gates on lead time; the per-sample UL
-    # lead is otherwise scored at its true value (ULs past TARGET_HORIZON_DAYS are
-    # dropped, not capped). Applied to the median quantile so outer quantiles stay
-    # calibrated on detections. Validation stays detections-only (champion-parity
-    # yardstick); only the TRAIN dataset admits UL targets.
-    UL_AS_CENSORED_TARGET = True
-    # Relative weight of the UL hinge vs the per-sample detection pinball. Study
-    # 114 starts gentle (0.5): nudge violations fainter without letting the bound
-    # dominate the detection objective. 0.0 disables (detections-only).
-    UL_WEIGHT = 0.5
-    # Only ULs whose lead time from their anchoring detection exceeds this many
-    # days become censored targets (late-time bounds; the audit cutoff was 2 d).
-    UL_TARGET_HORIZON_DAYS = 2.0
-    # Study 115: cap censored-UL samples to this fraction of DETECTION samples.
-    # Study 114 (uncapped) helped ztfg (RMSE 1.86->1.72) but regressed overall
-    # (+0.039) because under fixed-batch training each UL sample displaces a
-    # detection from the epoch, and ULs cluster in ZTF/red bands -> starved the
-    # blue-band (u/g) detections (u 2.15->2.23, g 1.69->1.77 = the bands the audit
-    # said censoring CAN'T help). Bounding the UL share preserves the detection
-    # mix. Sole change vs 114 (UL_WEIGHT stays 0.5). None = uncapped (114). 0.10
-    # keeps the strong-signal ztfg/red ULs a minority of the pool.
-    UL_MAX_FRAC = 0.10
-
-    # ULs must survive the stream read whenever either UL mechanism is on; the
-    # norm-stats call below stays detections-only regardless (a bound is not a
-    # measurement) via its own explicit drop_upper_limits=True.
-    DROP_UPPER_LIMITS = not (UL_AS_FLAGGED_CONTEXT or UL_AS_CENSORED_TARGET)
+    DROP_UPPER_LIMITS = True
 
     # Per-band loss weighting. Targets are per-band z-scored, so an equal-weight
     # loss lets the large-dynamic-range blue bands (u, g fade to mag ~28-30) be
@@ -936,7 +871,6 @@ def main(args, rank, world_size, local_rank, device):
             render_horizon_days=TARGET_HORIZON_DAYS,
             render_splat=RENDER_SPLAT,
             gather_rows_k=GATHER_ROWS_K,
-            upper_limit_channel=UL_AS_FLAGGED_CONTEXT,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1106,10 +1040,7 @@ def main(args, rank, world_size, local_rank, device):
             band_keys=BAND_KEYS,
             value_col=VALUE_COL,
             error_col=ERROR_COL,
-            # Always detections-only: an upper-limit value is a one-sided bound,
-            # not a measurement, so it must not skew the per-band mean/std even
-            # when UL_AS_FLAGGED_CONTEXT keeps ULs in the event stream.
-            drop_upper_limits=True,
+            drop_upper_limits=DROP_UPPER_LIMITS,
             file_prefix_list=train_norm_files,
         )
 
@@ -1139,25 +1070,16 @@ def main(args, rank, world_size, local_rank, device):
     random.seed(DATA_SEED)
 
     def _make_9band(
-        data_glob: str, object_ids: set, is_val: bool = False
+        data_glob: str, object_ids: set
     ) -> Kilonova_lc_scalar_context_DataSet_9band:
-        """Build a 9-band dataset over one directory restricted to object_ids.
-
-        ``is_val`` forces the Study-114 validation set to stay detections-only
-        (drop ULs, no censored targets) so the recorded val metric remains a
-        champion-parity yardstick; the UL hinge is a TRAIN-only objective.
-        """
-        ul_censored = UL_AS_CENSORED_TARGET and not is_val
-        # For a Study-114 val build the ULs must be dropped (detections-only);
-        # otherwise honor the global DROP_UPPER_LIMITS.
-        drop_ul = True if (UL_AS_CENSORED_TARGET and is_val) else DROP_UPPER_LIMITS
+        """Build a 9-band dataset over one directory restricted to object_ids."""
         return Kilonova_lc_scalar_context_DataSet_9band(
             N_imgs=0,
             context_len=CONTEXT_LEN,
             band_keys=BAND_KEYS,
             value_col=VALUE_COL,
             error_col=ERROR_COL,
-            drop_upper_limits=drop_ul,
+            drop_upper_limits=DROP_UPPER_LIMITS,
             means=band_means,
             stds=band_stds,
             n_rollout_steps=n_rollout_steps,
@@ -1167,10 +1089,6 @@ def main(args, rank, world_size, local_rank, device):
             data_glob=data_glob,
             object_ids=object_ids,
             append_phase=PHASE_FOURIER_BANDS > 0,
-            ul_as_flagged_context=UL_AS_FLAGGED_CONTEXT,
-            ul_as_censored_target=ul_censored,
-            ul_target_horizon_days=UL_TARGET_HORIZON_DAYS,
-            ul_max_frac=UL_MAX_FRAC,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1186,7 +1104,7 @@ def main(args, rank, world_size, local_rank, device):
                 f"{args.kn_dense_glob!r}. The probe requires the dense set."
             )
         train_dataset = _make_9band(args.kn_dense_glob, train_stems)
-        val_dataset = _make_9band(args.kn_dense_glob, val_stems, is_val=True)
+        val_dataset = _make_9band(args.kn_dense_glob, val_stems)
         if rank == 0:
             print(
                 f"PROBE_DENSE_CONTEXT: train+val context from DENSE set "
@@ -1230,7 +1148,7 @@ def main(args, rank, world_size, local_rank, device):
             ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         )
 
-        val_dataset = _make_9band(args.kn_realistic_glob, val_stems, is_val=True)
+        val_dataset = _make_9band(args.kn_realistic_glob, val_stems)
 
 
     # NOTE: For DDP the batch_size is the per-GPU batch_size!!!
@@ -1345,8 +1263,6 @@ def main(args, rank, world_size, local_rank, device):
                 band_weights=BAND_WEIGHTS,
                 ema=ema,
                 grad_clip_norm=GRAD_CLIP_NORM,
-                ul_weight=(UL_WEIGHT if UL_AS_CENSORED_TARGET else 0.0),
-                median_idx=(N_QUANTILES // 2),
             )
 
         print(f"[rank {rank}] finished epoch", flush=True)
@@ -1410,11 +1326,6 @@ def main(args, rank, world_size, local_rank, device):
                     "render_horizon_days": TARGET_HORIZON_DAYS,
                     "render_splat": RENDER_SPLAT,
                     "gather_rows_k": GATHER_ROWS_K,
-                    "upper_limit_channel": UL_AS_FLAGGED_CONTEXT,
-                    "ul_as_censored_target": UL_AS_CENSORED_TARGET,
-                    "ul_weight": UL_WEIGHT,
-                    "ul_target_horizon_days": UL_TARGET_HORIZON_DAYS,
-                    "ul_max_frac": UL_MAX_FRAC,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
