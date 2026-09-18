@@ -417,6 +417,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         ul_as_flagged_context: bool = False,
         ul_as_censored_target: bool = False,
         ul_target_horizon_days: float = None,
+        ul_max_frac: float = None,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -522,6 +523,18 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 censored target stays inside the model's trained horizon. ``None``
                 (default) keeps every future UL. Ignored unless
                 ``ul_as_censored_target`` is True.
+            ul_max_frac (float | None): Cap the number of censored UL target
+                samples to ``ul_max_frac * (number of detection samples)``. Under
+                fixed-batch training (a fixed ``train_batches`` per epoch with
+                ``drop_last``), every UL sample added to the pool DISPLACES a
+                detection sample from the epoch; ULs cluster in the ZTF/red bands,
+                so an uncapped pool starves the blue-band (u, g) detections
+                (observed as a Study-114 regression there). This bounds the UL
+                share so the detection mix -- hence the blue-band gradient -- is
+                preserved. The subsample is DETERMINISTIC (even-spaced over the UL
+                samples, no RNG) so every DDP rank builds an identical sample list.
+                ``None`` (default) keeps every UL target. Ignored unless
+                ``ul_as_censored_target`` is True.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -561,6 +574,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         self.ul_as_flagged_context = ul_as_flagged_context
         self.ul_as_censored_target = ul_as_censored_target
         self.ul_target_horizon_days = ul_target_horizon_days
+        self.ul_max_frac = ul_max_frac
         self.n_channels = len(self.band_keys)
 
         # Upper-limits-as-flagged-context is only coherent when the ULs actually
@@ -861,6 +875,35 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 for startIDX in range(max_start + 1):
                     self.samples.append((file_idx, startIDX))
                     self.sample_is_ul.append(False)
+
+        # Study 115: cap the censored-UL share of the pool so ULs (clustered in
+        # the ZTF/red bands) do not displace blue-band detections under fixed-
+        # batch training. Deterministic even-spaced subsample -> identical across
+        # DDP ranks. Detection samples are always kept in full.
+        if (
+            self.ul_as_censored_target
+            and self.ul_max_frac is not None
+            and len(self.samples) > 0
+        ):
+            flags = np.asarray(self.sample_is_ul)
+            det_pos = np.nonzero(~flags)[0]
+            ul_pos = np.nonzero(flags)[0]
+            n_det = det_pos.shape[0]
+            n_ul = ul_pos.shape[0]
+            keep_ul = int(np.floor(self.ul_max_frac * n_det))
+            if n_ul > keep_ul:
+                # Even-spaced pick of keep_ul indices across the UL samples (in
+                # their original stable build order), then merge with ALL
+                # detections and restore ascending sample order.
+                if keep_ul > 0:
+                    pick = np.linspace(0, n_ul - 1, keep_ul).round().astype(int)
+                    pick = np.unique(pick)
+                    kept_ul_pos = ul_pos[pick]
+                else:
+                    kept_ul_pos = np.empty(0, dtype=np.int64)
+                keep_pos = np.sort(np.concatenate([det_pos, kept_ul_pos]))
+                self.samples = [self.samples[i] for i in keep_pos]
+                self.sample_is_ul = [self.sample_is_ul[i] for i in keep_pos]
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""

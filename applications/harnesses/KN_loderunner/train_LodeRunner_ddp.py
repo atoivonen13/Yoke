@@ -782,6 +782,15 @@ def main(args, rank, world_size, local_rank, device):
     # Only ULs whose lead time from their anchoring detection exceeds this many
     # days become censored targets (late-time bounds; the audit cutoff was 2 d).
     UL_TARGET_HORIZON_DAYS = 2.0
+    # Study 115: cap censored-UL samples to this fraction of DETECTION samples.
+    # Study 114 (uncapped) helped ztfg (RMSE 1.86->1.72) but regressed overall
+    # (+0.039) because under fixed-batch training each UL sample displaces a
+    # detection from the epoch, and ULs cluster in ZTF/red bands -> starved the
+    # blue-band (u/g) detections (u 2.15->2.23, g 1.69->1.77 = the bands the audit
+    # said censoring CAN'T help). Bounding the UL share preserves the detection
+    # mix. Sole change vs 114 (UL_WEIGHT stays 0.5). None = uncapped (114). 0.10
+    # keeps the strong-signal ztfg/red ULs a minority of the pool.
+    UL_MAX_FRAC = 0.10
 
     # ULs must survive the stream read whenever either UL mechanism is on; the
     # norm-stats call below stays detections-only regardless (a bound is not a
@@ -1161,6 +1170,7 @@ def main(args, rank, world_size, local_rank, device):
             ul_as_flagged_context=UL_AS_FLAGGED_CONTEXT,
             ul_as_censored_target=ul_censored,
             ul_target_horizon_days=UL_TARGET_HORIZON_DAYS,
+            ul_max_frac=UL_MAX_FRAC,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1404,6 +1414,7 @@ def main(args, rank, world_size, local_rank, device):
                     "ul_as_censored_target": UL_AS_CENSORED_TARGET,
                     "ul_weight": UL_WEIGHT,
                     "ul_target_horizon_days": UL_TARGET_HORIZON_DAYS,
+                    "ul_max_frac": UL_MAX_FRAC,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
