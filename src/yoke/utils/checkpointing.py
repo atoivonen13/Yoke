@@ -880,6 +880,12 @@ def load_direct_loderunner_checkpoint_9band(
         render_horizon_days=checkpoint_data.get("render_horizon_days", 8.0),
         render_splat=checkpoint_data.get("render_splat", 5),
         gather_rows_k=checkpoint_data.get("gather_rows_k", 5),
+        # False for legacy checkpoints (no key) -> flat per-band output_head,
+        # matching the saved weights so strict load succeeds. True (Study 116)
+        # reconstructs the shared-pivot + low-rank color head (ref_head/sed_head/
+        # W_band/b_band), so it MUST match the training config for strict load.
+        color_anchored_head=checkpoint_data.get("color_anchored_head", False),
+        color_sed_rank=checkpoint_data.get("color_sed_rank", 2),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

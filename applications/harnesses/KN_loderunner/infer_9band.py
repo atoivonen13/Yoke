@@ -220,11 +220,12 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     render_horizon_days = ckpt.get("render_horizon_days", 8.0)
     render_splat = ckpt.get("render_splat", 5)
     gather_rows_k = ckpt.get("gather_rows_k", 5)
-    # False for legacy checkpoints (no key) -> per-event width 3+n_bands. True
-    # (Study 113) admits upper limits as flagged context: per-event width grows
-    # to 4+n_bands (extra is_upper_limit column), widening the conditioner
-    # first-layer; MUST match to load strict.
-    upper_limit_channel = ckpt.get("upper_limit_channel", False)
+    # False for legacy checkpoints (no key) -> flat per-band output_head. True
+    # (Study 116) reconstructs the color-anchored SED head (shared pivot +
+    # low-rank color code: ref_head/sed_head/W_band/b_band); MUST match to load
+    # strict.
+    color_anchored_head = ckpt.get("color_anchored_head", False)
+    color_sed_rank = ckpt.get("color_sed_rank", 2)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -243,7 +244,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
     print("spatial_render:", spatial_render)
-    print("upper_limit_channel:", upper_limit_channel)
+    print("color_anchored_head:", color_anchored_head)
+    print("color_sed_rank:", color_sed_rank)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -271,7 +273,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         render_horizon_days=render_horizon_days,
         render_splat=render_splat,
         gather_rows_k=gather_rows_k,
-        upper_limit_channel=upper_limit_channel,
+        color_anchored_head=color_anchored_head,
+        color_sed_rank=color_sed_rank,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

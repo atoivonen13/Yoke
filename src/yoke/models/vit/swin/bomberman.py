@@ -502,6 +502,8 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         render_horizon_days: float = 8.0,
         render_splat: int = 5,
         gather_rows_k: int = 5,
+        color_anchored_head: bool = False,
+        color_sed_rank: int = 2,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -706,6 +708,18 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     "[value, rel_t, valid, one_hot_band] window layout."
                 )
 
+        if color_anchored_head:
+            if spatial_render:
+                raise ValueError(
+                    "color_anchored_head=True is incompatible with "
+                    "spatial_render=True; the render path uses read_head, not "
+                    "output_head, so there is no flat band head to replace."
+                )
+            if color_sed_rank < 1:
+                raise ValueError(
+                    f"color_sed_rank must be >= 1, got {color_sed_rank}."
+                )
+
         self.backbone = backbone
         self.context_len = context_len
         self.n_bands = n_bands
@@ -741,6 +755,14 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # what the rollout feeds back as context.
         self.n_quantiles = n_quantiles
         self.median_idx = n_quantiles // 2
+
+        # Color-anchored SED-bottleneck head (Study 116). When on, the flat
+        # per-band output_head is replaced by a shared pivot + low-rank color
+        # code, forcing all bands into a (rank+1)-dim SED subspace so an
+        # unconstrained band (faint ztfg) is pinned by its measured neighbors
+        # instead of plateauing. See the non-render else block below and forward().
+        self.color_anchored_head = color_anchored_head
+        self.color_sed_rank = color_sed_rank
 
         # Diagnostic baseline: skip the frozen backbone in forward() and feed the
         # tiled conditioner output straight to pooling+head. Adds no params and
@@ -868,16 +890,49 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 nn.Linear(hidden, self.waist),
             )
 
-            # Maps the backbone-channel summary (plus the Fourier Dt encoding, when
-            # enabled) back to one prediction per band. When n_quantiles == 1 the
-            # last layer emits n_bands (byte-identical to the legacy point head);
-            # when > 1 it emits n_bands * n_quantiles, reshaped in forward() to
-            # [B, n_quantiles, n_bands].
-            self.output_head = nn.Sequential(
-                nn.Linear(pool_channels + dt_extra, hidden),
-                nn.GELU(),
-                nn.Linear(hidden, n_bands * n_quantiles),
-            )
+            if self.color_anchored_head:
+                # Color-anchored SED head (Study 116). Every band is a shared
+                # abstract pivot m_ref plus a per-band color offset, and the
+                # colors are forced through a low-rank (k = color_sed_rank) code
+                # of the same head input. Per-object band predictions therefore
+                # live in a (k+1)-dim subspace (1 pivot + k SED dims) instead of
+                # full rank n_bands: an unconstrained band (faint ztfg with no
+                # detections) is pinned by the code inferred from the bands that
+                # DO have data, so it can no longer decouple and plateau. The
+                # rank is architectural, not a tunable loss weight -- it cannot be
+                # tuned away (unlike the reverted UL hinge).
+                head_in = pool_channels + dt_extra
+                # Abstract pivot: n_quantiles values (monotone in forward()).
+                self.ref_head = nn.Sequential(
+                    nn.Linear(head_in, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, n_quantiles),
+                )
+                # SED code: k latent color coordinates, phase/Dt-dependent.
+                self.sed_head = nn.Sequential(
+                    nn.Linear(head_in, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, color_sed_rank),
+                )
+                # Band response: colors = b_band + z_sed @ W_band.T, then
+                # mean-centered across bands so the pivot absorbs the mean level
+                # (identifiability). W_band init small so training starts near a
+                # flat achromatic SED (all bands ~ pivot) and learns colors.
+                self.W_band = nn.Parameter(
+                    0.01 * torch.randn(n_bands, color_sed_rank)
+                )
+                self.b_band = nn.Parameter(torch.zeros(n_bands))
+            else:
+                # Maps the backbone-channel summary (plus the Fourier Dt encoding,
+                # when enabled) back to one prediction per band. When
+                # n_quantiles == 1 the last layer emits n_bands (byte-identical to
+                # the legacy point head); when > 1 it emits n_bands * n_quantiles,
+                # reshaped in forward() to [B, n_quantiles, n_bands].
+                self.output_head = nn.Sequential(
+                    nn.Linear(pool_channels + dt_extra, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, n_bands * n_quantiles),
+                )
 
     def _encode_dt(self, Dt: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Fourier-encode the lead time for the trainable path.
@@ -1336,8 +1391,43 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
         # Convert backbone channels to per-band predictions, conditioning the
         # head on lead time via the same Fourier encoding ([B, 0] when disabled).
+        head_in = torch.cat([pred_channel_vals, dt_feat], dim=1)
+
+        if self.color_anchored_head:
+            # -------- Color-anchored SED head (Study 116) --------
+            # Shared abstract pivot (bolometric-like level) + low-rank color
+            # offsets. Bands share the pivot and differ only by a color that
+            # lives in a k-dim subspace, so a band with no supervision inherits
+            # the pivot + the code inferred from the bands that do have data.
+            m_ref = self.ref_head(head_in)  # [B, n_quantiles]
+            z_sed = self.sed_head(head_in)  # [B, k]
+            # colors [B, n_bands] = b_band + z_sed @ W_band.T, mean-centered so
+            # the pivot carries the overall level and colors sum to ~0 per sample.
+            colors = self.b_band + z_sed @ self.W_band.t()  # [B, n_bands]
+            colors = colors - colors.mean(dim=1, keepdim=True)
+
+            if self.n_quantiles == 1:
+                # Point head: pivot [B, 1] + colors [B, n_bands] -> [B, n_bands].
+                pred = m_ref + colors  # [B, n_bands]
+                if self.predict_delta:
+                    pred = pred + self._band_anchor(x_events, Dt)
+                return pred  # [B, n_bands]
+
+            # Quantile head: make the pivot monotone across quantiles (base +
+            # cumulative softplus gaps), then broadcast the color across quantiles.
+            # Color is constant per quantile (scatter lives in the pivot), so
+            # per-band monotonicity is preserved automatically.
+            base = m_ref[:, :1]  # [B, 1] -- lowest quantile of the pivot
+            gaps = nn.functional.softplus(m_ref[:, 1:])  # [B, n_quantiles-1]
+            m_ref = torch.cat([base, base + torch.cumsum(gaps, dim=1)], dim=1)
+            # [B, n_quantiles, 1] + [B, 1, n_bands] -> [B, n_quantiles, n_bands]
+            pred = m_ref.unsqueeze(2) + colors.unsqueeze(1)
+            if self.predict_delta:
+                pred = pred + self._band_anchor(x_events, Dt).unsqueeze(1)
+            return pred  # [B, n_quantiles, n_bands]
+
         head_out = self.output_head(
-            torch.cat([pred_channel_vals, dt_feat], dim=1)
+            head_in
         )  # [B, n_bands] (point) or [B, n_bands * n_quantiles] (quantile)
 
         if self.n_quantiles == 1:
