@@ -400,6 +400,19 @@ def main(args, rank, world_size, local_rank, device):
     RENDER_SPLAT = 5
     GATHER_ROWS_K = 5
 
+    # Color-anchored SED-bottleneck output head (Study 116). When True the flat
+    # per-band head (independent Linear read per band) is replaced by a shared
+    # abstract pivot + a low-rank (COLOR_SED_RANK) color code, so every band's
+    # prediction lives in a (rank+1)-dim SED subspace. A band with no faint
+    # detections (ztfg past ZTF's ~21 floor) is then pinned by the code inferred
+    # from the deep bands that DO stay measurable, instead of plateauing. The
+    # rank is architectural (not a tunable loss weight) -- it cannot be tuned
+    # away like the reverted UL hinge. Fresh study: new head params, cannot load
+    # champion-111 head weights (backbone still loads as always). See memory
+    # kn-color-coupling-greenlit (color-correlation test: ztfg 1.9 -> 0.80 ceiling).
+    COLOR_ANCHORED_HEAD = True
+    COLOR_SED_RANK = 2
+
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
     # channel count, which is sized for the (now-skipped) frozen backbone
@@ -871,6 +884,8 @@ def main(args, rank, world_size, local_rank, device):
             render_horizon_days=TARGET_HORIZON_DAYS,
             render_splat=RENDER_SPLAT,
             gather_rows_k=GATHER_ROWS_K,
+            color_anchored_head=COLOR_ANCHORED_HEAD,
+            color_sed_rank=COLOR_SED_RANK,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1326,6 +1341,8 @@ def main(args, rank, world_size, local_rank, device):
                     "render_horizon_days": TARGET_HORIZON_DAYS,
                     "render_splat": RENDER_SPLAT,
                     "gather_rows_k": GATHER_ROWS_K,
+                    "color_anchored_head": COLOR_ANCHORED_HEAD,
+                    "color_sed_rank": COLOR_SED_RANK,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None

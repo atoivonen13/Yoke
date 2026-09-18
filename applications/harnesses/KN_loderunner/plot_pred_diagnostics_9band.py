@@ -255,11 +255,11 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     render_splat = ckpt.get("render_splat", 5)
     gather_rows_k = ckpt.get("gather_rows_k", 5)
 
-    # Study 113: whether upper limits were kept as flagged context (adds an
-    # is_upper_limit per-event channel, width 4 + n_bands). Default False so
-    # pre-113 checkpoints reconstruct byte-identically. The context builders and
-    # readers key off model.upper_limit_channel so eval matches training.
-    upper_limit_channel = ckpt.get("upper_limit_channel", False)
+    # Study 116: whether the color-anchored SED-bottleneck head was used (shared
+    # pivot + low-rank color code instead of the flat per-band Linear). Default
+    # False so pre-116 checkpoints reconstruct the legacy head byte-identically.
+    color_anchored_head = ckpt.get("color_anchored_head", False)
+    color_sed_rank = ckpt.get("color_sed_rank", 2)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -282,6 +282,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
     print("spatial_render:", spatial_render)
+    print("color_anchored_head:", color_anchored_head)
+    print("color_sed_rank:", color_sed_rank)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -309,7 +311,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         render_horizon_days=render_horizon_days,
         render_splat=render_splat,
         gather_rows_k=gather_rows_k,
-        upper_limit_channel=upper_limit_channel,
+        color_anchored_head=color_anchored_head,
+        color_sed_rank=color_sed_rank,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])
