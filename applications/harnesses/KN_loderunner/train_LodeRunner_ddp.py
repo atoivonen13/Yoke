@@ -746,7 +746,15 @@ def main(args, rank, world_size, local_rank, device):
     # False (the ULs must survive the stream build to be flagged); norm stats are
     # still computed detections-only (a bound is not a measurement) via the
     # explicit drop_upper_limits=True on the normalization call below.
-    UL_AS_FLAGGED_CONTEXT = True
+    # REVERTED after study 113 REGRESSED: 1.5199 @1000 vs 111's 1.3800 (+0.14,
+    # ~7x the seed floor), and ztfg (the mechanism target) got WORSE (RMSE
+    # 1.86->2.12, bias -0.26->-1.28 = harder under-fade). The bare is_upper_limit
+    # flag wasn't enough for the model to treat the limiting mag as a one-sided
+    # bound; it partly read the (brighter-than-truth) limit value as a soft
+    # measurement and pulled forecasts bright. Option 3 (censored one-sided loss)
+    # was gated on Option 1 clearing noise AND helping ztfg -- it did neither, so
+    # we do not escalate. Back to the 111 detections-only champion.
+    UL_AS_FLAGGED_CONTEXT = False
     DROP_UPPER_LIMITS = not UL_AS_FLAGGED_CONTEXT
 
     # Per-band loss weighting. Targets are per-band z-scored, so an equal-weight
