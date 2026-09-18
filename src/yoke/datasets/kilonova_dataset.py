@@ -415,6 +415,8 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         object_ids: set = None,
         append_phase: bool = False,
         ul_as_flagged_context: bool = False,
+        ul_as_censored_target: bool = False,
+        ul_target_horizon_days: float = None,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -494,6 +496,32 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 Mutually exclusive with ``drop_upper_limits`` (the ULs must survive
                 the stream build to be flagged) and only supported in window mode
                 with ``n_rollout_steps == 1``. When False the layout is unchanged.
+            ul_as_censored_target (bool): If True (default False), admit late-time
+                upper limits as EXTRA supervised targets carrying a one-sided
+                (censored / hinge) loss, while the CONTEXT stays detections-only.
+                This is the Study 114 mechanism and is deliberately distinct from
+                ``ul_as_flagged_context`` (Study 113, reverted): here the detection
+                samples are byte-identical to the drop-ULs champion (same context
+                layout ``3 + n_bands``, same t0/normalization derived from
+                detections only), and ULs never enter the context window. Instead a
+                UL row becomes its own sample whose context is the trailing
+                detections before it; ``__getitem__`` returns a 5-tuple
+                ``(x, target, mask, Dt, is_ul)`` with ``is_ul = 1`` for these
+                samples (0 for detection samples) so the epoch loop can apply
+                ``relu(limit_z - median_pred_z)`` on the observed band -- zero
+                gradient when the forecast already respects the bound. Requires
+                ``drop_upper_limits=False`` (the ULs must survive the read), window
+                mode, and ``n_rollout_steps == 1``. Mutually exclusive with
+                ``ul_as_flagged_context``. When False the layout and tuple arity are
+                unchanged.
+            ul_target_horizon_days (float | None): Only late-time ULs are useful
+                targets (near-peak ULs are shallow non-detections that carry no
+                fade constraint). When set, only ULs whose lead time from their
+                anchoring detection exceeds this many days become targets; also the
+                per-sample UL lead time is capped to ``target_horizon_days`` so the
+                censored target stays inside the model's trained horizon. ``None``
+                (default) keeps every future UL. Ignored unless
+                ``ul_as_censored_target`` is True.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -531,6 +559,8 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         self.error_col = error_col
         self.drop_upper_limits = drop_upper_limits
         self.ul_as_flagged_context = ul_as_flagged_context
+        self.ul_as_censored_target = ul_as_censored_target
+        self.ul_target_horizon_days = ul_target_horizon_days
         self.n_channels = len(self.band_keys)
 
         # Upper-limits-as-flagged-context is only coherent when the ULs actually
@@ -555,6 +585,36 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                     "ul_as_flagged_context=True is only supported with "
                     "n_rollout_steps == 1 (the rollout getitems do not emit the "
                     "is_upper_limit channel)."
+                )
+
+        # Upper-limits-as-censored-target (Study 114): ULs are extra supervised
+        # targets with a one-sided hinge loss, but the context stays detections-
+        # only (so detection samples are byte-identical to the champion). The ULs
+        # must survive the read (drop_upper_limits False), the target/context uses
+        # the window layout, the single-step regime is the only one wired, and it
+        # is mutually exclusive with the flagged-context mechanism (which pollutes
+        # the context with ULs -- the opposite design).
+        if ul_as_censored_target:
+            if ul_as_flagged_context:
+                raise ValueError(
+                    "ul_as_censored_target and ul_as_flagged_context are mutually "
+                    "exclusive: the former keeps ULs OUT of the context (as loss "
+                    "targets only), the latter puts them INTO the context."
+                )
+            if drop_upper_limits:
+                raise ValueError(
+                    "ul_as_censored_target=True requires drop_upper_limits=False "
+                    "so the upper-limit rows survive to be used as targets."
+                )
+            if context_window_days is None:
+                raise ValueError(
+                    "ul_as_censored_target=True requires time-window mode "
+                    "(set context_window_days)."
+                )
+            if n_rollout_steps != 1:
+                raise ValueError(
+                    "ul_as_censored_target=True is only supported with "
+                    "n_rollout_steps == 1."
                 )
 
         if n_rollout_steps < 1:
@@ -647,6 +707,16 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # through the stem, not a positional index.
         self.stems_per_file = []
         self.samples = []
+        # Parallel to self.samples: True for a censored upper-limit target sample
+        # (Study 114), False for an ordinary detection target. Only populated when
+        # ul_as_censored_target is on; otherwise stays all-False so the getitems
+        # take the unchanged detection path.
+        self.sample_is_ul = []
+        # Per-file upper-limit rows (censored-target mode only): each entry is a
+        # (times, values, bands) tuple of the NON-detections, time-shifted by the
+        # SAME detection-derived t0 as events_per_file and z-scored with the same
+        # detection stats. Empty/parallel-None for other modes.
+        self.uls_per_file = []
 
         for file_idx, fn in enumerate(self.file_prefix_list):
             data = np.load(fn, allow_pickle=True)
@@ -701,6 +771,59 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             bands = bands[order]
             is_ul = is_ul[order]
 
+            if self.ul_as_censored_target:
+                # Study 114: keep the CONTEXT/target detection stream byte-
+                # identical to the drop-ULs champion (t0 and normalization derived
+                # from detections only) and hold the ULs in a PARALLEL stream that
+                # never enters the context -- they are supervised solely by the
+                # one-sided hinge loss. Split before the relative-time shift so the
+                # detection stream's t0 matches the champion exactly.
+                det = is_ul < 0.5
+                if not np.any(det):
+                    # No detections -> no context can ever be formed; skip.
+                    continue
+                det_t0 = float(times[det].min())
+
+                det_times = (times[det] - det_t0).astype(np.float32)
+                det_values = (
+                    (values[det] - self.means[bands[det]])
+                    / (self.stds[bands[det]] + EPS)
+                ).astype(np.float32)
+                det_bands = bands[det]
+                det_is_ul = np.zeros(det_times.shape[0], dtype=np.float32)
+
+                ul_sel = ~det
+                ul_times = (times[ul_sel] - det_t0).astype(np.float32)
+                ul_values = (
+                    (values[ul_sel] - self.means[bands[ul_sel]])
+                    / (self.stds[bands[ul_sel]] + EPS)
+                ).astype(np.float32)
+                ul_bands = bands[ul_sel]
+
+                self.events_per_file.append(
+                    (det_times, det_values, det_bands, det_is_ul)
+                )
+                self.uls_per_file.append((ul_times, ul_values, ul_bands))
+                self.stems_per_file.append(_stem(fn))
+
+                n_det = det_times.shape[0]
+                file_idx = len(self.events_per_file) - 1
+
+                # Detection target samples: identical enumeration to the champion.
+                for target_idx in range(1, n_det):
+                    self.samples.append((file_idx, target_idx))
+                    self.sample_is_ul.append(False)
+
+                # Upper-limit target samples: each late-time UL anchored on the
+                # most recent detection before it, within the trained horizon.
+                for ul_idx in range(ul_times.shape[0]):
+                    lead = self._ul_lead_days(det_times, ul_times[ul_idx])
+                    if lead is None:
+                        continue
+                    self.samples.append((file_idx, ul_idx))
+                    self.sample_is_ul.append(True)
+                continue
+
             # Relative times within the file.
             times = times - times.min()
 
@@ -712,6 +835,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             self.events_per_file.append(
                 (times, values.astype(np.float32), bands, is_ul)
             )
+            self.uls_per_file.append(None)
             self.stems_per_file.append(_stem(fn))
 
             n_events = times.shape[0]
@@ -729,12 +853,14 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                     if self.ul_as_flagged_context and is_ul[target_idx] > 0.5:
                         continue
                     self.samples.append((file_idx, target_idx))
+                    self.sample_is_ul.append(False)
             else:
                 # Legacy fixed-count windows: startIDX indexes the window start,
                 # target is startIDX + context_len.
                 max_start = n_events - context_len - 1
                 for startIDX in range(max_start + 1):
                     self.samples.append((file_idx, startIDX))
+                    self.sample_is_ul.append(False)
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -831,6 +957,45 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
 
         return x, target, mask, Dt
 
+    def _ul_lead_days(
+        self, det_times: np.ndarray, ul_time: float
+    ) -> float:
+        """Return the lead time (days) from the anchoring detection to a UL.
+
+        The anchor is the most recent detection strictly before ``ul_time`` (the
+        same trailing-context convention the detection targets use). Returns
+        ``None`` when the UL is not a usable censored target:
+
+          - no detection precedes it (no context could be formed), or
+          - ``ul_target_horizon_days`` is set and the raw lead time does not
+            exceed it (near-peak ULs are shallow non-detections with no fade
+            constraint -- only late-time ULs bound the tail).
+
+        ULs whose lead exceeds ``target_horizon_days`` (when set) are DROPPED
+        rather than capped: the model is only trained to forecast within that
+        horizon, and capping the lead while keeping the limit value would compare
+        a nearer (brighter) forecast against a later-time limit -- a subtly wrong
+        constraint. Supervised ULs are scored at their TRUE lead time.
+        """
+        prior = np.nonzero(det_times < ul_time)[0]
+        if prior.shape[0] == 0:
+            return None
+        anchor_t = det_times[prior[-1]]
+        lead = float(ul_time - anchor_t)
+        if lead <= 0.0:
+            return None
+        if (
+            self.ul_target_horizon_days is not None
+            and lead <= self.ul_target_horizon_days
+        ):
+            return None
+        if (
+            self.target_horizon_days is not None
+            and lead > self.target_horizon_days
+        ):
+            return None
+        return lead
+
     def _draw_target_idx(
         self,
         times: np.ndarray,
@@ -901,21 +1066,35 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         file_idx, target_idx = self.samples[index]
         times, values, bands, is_ul = self.events_per_file[file_idx]
 
-        # Anchor the trailing window on the event immediately before the enumerated
-        # target (the most recent observation). With horizon-covering target
-        # sampling the supervised target is redrawn to a farther event so the
-        # lead time Dt is ~uniform in days; the anchor (hence the context) is
-        # unchanged, preserving train/inference parity.
-        anchor_idx = target_idx - 1
-        if self.target_horizon_days is not None:
-            target_idx = self._draw_target_idx(
-                times,
-                anchor_idx,
-                times.shape[0],
-                is_ul=is_ul if self.ul_as_flagged_context else None,
-            )
-
-        anchor_t = times[anchor_idx]
+        # Study 114 censored-target sample: the "target" is a late-time upper
+        # limit held in the parallel UL stream, anchored on the most recent
+        # DETECTION before it. The context is built exactly like a detection
+        # sample (detections-only), so this reuses the same window machinery; only
+        # the target value/lead and the returned is_ul flag differ.
+        ul_sample = self.ul_as_censored_target and self.sample_is_ul[index]
+        if ul_sample:
+            ul_times, ul_values, ul_bands = self.uls_per_file[file_idx]
+            ul_idx = target_idx  # reinterpreted as an index into the UL stream
+            ul_t = float(ul_times[ul_idx])
+            # Anchor = most recent detection strictly before the UL.
+            anchor_idx = int(np.nonzero(times < ul_t)[0][-1])
+            lead = self._ul_lead_days(times, ul_t)
+            anchor_t = times[anchor_idx]
+        else:
+            # Anchor the trailing window on the event immediately before the
+            # enumerated target (the most recent observation). With horizon-
+            # covering target sampling the supervised target is redrawn to a
+            # farther event so the lead time Dt is ~uniform in days; the anchor
+            # (hence the context) is unchanged, preserving train/inference parity.
+            anchor_idx = target_idx - 1
+            if self.target_horizon_days is not None:
+                target_idx = self._draw_target_idx(
+                    times,
+                    anchor_idx,
+                    times.shape[0],
+                    is_ul=is_ul if self.ul_as_flagged_context else None,
+                )
+            anchor_t = times[anchor_idx]
         lo = anchor_t - self.context_window_days
 
         # Context is events up to and including the anchor (never the target,
@@ -971,22 +1150,35 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             )
         x = torch.tensor(x_flat, dtype=torch.float32)
 
-        # Target is the event at target_idx, in a per-band vector + mask.
-        target_band = int(bands[target_idx])
+        # Target is the event at target_idx (a detection value, or a UL limiting
+        # magnitude for censored-target samples), in a per-band vector + mask.
         target = np.zeros(self.n_channels, dtype=np.float32)
         mask = np.zeros(self.n_channels, dtype=np.float32)
-        target[target_band] = values[target_idx]
-        mask[target_band] = 1.0
+        if ul_sample:
+            target_band = int(ul_bands[ul_idx])
+            target[target_band] = ul_values[ul_idx]  # z-scored limiting mag
+            mask[target_band] = 1.0
+            dt_days = lead if lead is not None else float(ul_t - anchor_t)
+        else:
+            target_band = int(bands[target_idx])
+            target[target_band] = values[target_idx]
+            mask[target_band] = 1.0
+            # Lead time from the anchor (most recent context event) to the
+            # target, which may be several events ahead under horizon-covering
+            # sampling.
+            dt_days = float(times[target_idx] - times[anchor_idx])
 
         target = torch.tensor(target, dtype=torch.float32)
         mask = torch.tensor(mask, dtype=torch.float32)
+        Dt = torch.tensor(dt_days, dtype=torch.float32)
 
-        # Lead time from the anchor (most recent context event) to the target,
-        # which may be several events ahead under horizon-covering sampling.
-        Dt = torch.tensor(
-            times[target_idx] - times[anchor_idx],
-            dtype=torch.float32,
-        )
+        if self.ul_as_censored_target:
+            # Uniform 5-tuple across detection AND UL samples so the default
+            # collate stacks them; is_ul selects the loss branch downstream.
+            is_ul_flag = torch.tensor(
+                1.0 if ul_sample else 0.0, dtype=torch.float32
+            )
+            return x, target, mask, Dt, is_ul_flag
 
         return x, target, mask, Dt
 

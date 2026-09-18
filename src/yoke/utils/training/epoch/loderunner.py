@@ -129,6 +129,54 @@ def _check_pred_target_shapes(
         )
 
 
+def _apply_ul_hinge(
+    per_sample_loss: torch.Tensor,
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    is_ul: torch.Tensor,
+    ul_weight: float,
+    median_idx: int,
+) -> torch.Tensor:
+    """Swap in a censored one-sided hinge for upper-limit target samples.
+
+    Study 114. For samples flagged ``is_ul == 1`` the ``target`` holds a
+    normalized limiting magnitude (a one-sided bound: the true source is FAINTER,
+    i.e. LARGER in z-space) on the single observed band. The hinge
+    ``relu(limit_z - median_pred_z)`` penalizes only forecasts that violate the
+    bound (predict too bright) and is exactly zero -- no gradient -- once the
+    forecast plateaus fainter than the limit. The median quantile is used so the
+    outer quantiles stay calibrated on detections.
+
+    Detection samples (``is_ul == 0``) keep their incoming ``per_sample_loss``
+    (the masked pinball). Returns a per-sample loss vector with the UL entries
+    replaced by ``ul_weight * hinge``.
+
+    Args:
+        per_sample_loss (torch.Tensor): ``[B]`` detection pinball per sample.
+        pred (torch.Tensor): ``[B, Q, n_bands]`` (quantile) or ``[B, n_bands]``.
+        target (torch.Tensor): ``[B, n_bands]`` (only the observed band is set).
+        mask (torch.Tensor): ``[B, n_bands]`` one-hot observed band.
+        is_ul (torch.Tensor): ``[B]`` 1.0 for UL targets, 0.0 for detections.
+        ul_weight (float): Scale on the hinge term.
+        median_idx (int): Median quantile row of ``pred`` (ignored for a point
+            head).
+
+    Returns:
+        torch.Tensor: ``[B]`` combined per-sample loss.
+    """
+    # Median prediction per band, [B, n_bands] for either head shape.
+    if pred.dim() == 3:
+        median_pred = pred[:, median_idx, :]
+    else:
+        median_pred = pred
+    # limit_z - median_pred_z on the observed band only (mask is one-hot), summed
+    # over bands to collapse to [B]. mask zeros every non-observed band.
+    hinge_band = torch.relu(target - median_pred) * mask  # [B, n_bands]
+    hinge = hinge_band.sum(dim=1) / (mask.sum(dim=1) + 1e-8)  # [B]
+    return torch.where(is_ul > 0.5, ul_weight * hinge, per_sample_loss)
+
+
 def train_simple_loderunner_epoch(
     channel_map: list,
     training_data: torch.utils.data.DataLoader,
@@ -614,6 +662,8 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
     band_weights: torch.Tensor = None,
     ema: object = None,
     grad_clip_norm: float = None,
+    ul_weight: float = 0.0,
+    median_idx: int = 0,
 ) -> None:
     """DDP epoch function for the masked 9-band scalar temporal LodeRunner.
 
@@ -646,6 +696,18 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
     MSE, whose gradient scales with the residual (unlike Huber, which bounds it),
     so a single outlier-heavy batch can spike the update. ``None`` (default)
     disables clipping.
+
+    ``ul_weight`` (float, default 0.0) enables the Study 114 censored upper-limit
+    loss. When > 0 the dataloader yields a 5-tuple ``(x, target, mask, Dt, is_ul)``
+    where ``is_ul == 1`` marks an upper-limit target (a one-sided bound: the true
+    source is FAINTER than the limiting magnitude, i.e. LARGER in z-space). Those
+    samples are supervised by a one-sided hinge ``relu(limit_z - median_pred_z)``
+    on the observed band -- zero when the forecast already respects the bound,
+    positive only on violations -- scaled by ``ul_weight``. Detection samples
+    (``is_ul == 0``) keep the ordinary masked pinball. ``median_idx`` selects the
+    median quantile row of the model's ``[B, Q, n_bands]`` output for the hinge
+    (the quantile the point-forecast RMSE cares about). ``ul_weight == 0`` (or a
+    4-tuple batch) reproduces the detections-only behavior exactly.
     """
     train_rcrd_filename = train_rcrd_filename.replace(
         "<epochIDX>",
@@ -665,12 +727,17 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
             if trainbatch_ID >= num_train_batches:
                 break
 
-            x, target, mask, Dt = data
+            # Study 114 yields a 5-tuple (x, target, mask, Dt, is_ul); the
+            # detections-only champion yields a 4-tuple. Unpack either.
+            x, target, mask, Dt = data[0], data[1], data[2], data[3]
+            is_ul = data[4] if len(data) > 4 else None
 
             x = x.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             Dt = Dt.to(torch.float32).to(device, non_blocking=True)
+            if is_ul is not None:
+                is_ul = is_ul.to(torch.float32).to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -688,6 +755,19 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
             # sample over observed entries.
             loss = loss_fn(pred, target) * mask
             per_sample_loss = loss.sum(dim=1) / (mask.sum(dim=1) + 1e-8)
+
+            # Study 114: replace the pinball term with a one-sided censored hinge
+            # for upper-limit target samples. A UL target's value is a bound (true
+            # source FAINTER = LARGER z); relu(limit_z - median_pred_z) is > 0 only
+            # when the median forecast violates it (predicts too bright), and
+            # exactly 0 (no gradient) once the forecast plateaus fainter than the
+            # limit. Applied to the median quantile so outer quantiles stay
+            # calibrated on detections.
+            if is_ul is not None and ul_weight > 0.0:
+                per_sample_loss = _apply_ul_hinge(
+                    per_sample_loss, pred, target, mask, is_ul,
+                    ul_weight, median_idx,
+                )
 
             if band_weights is None:
                 # Recorded metric == training objective: plain equal weight.
@@ -746,7 +826,10 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
                     if valbatch_ID >= num_val_batches:
                         break
 
-                    x, target, mask, Dt = data
+                    # Validation is detections-only (a comparable yardstick), but
+                    # tolerate a 5-tuple defensively. The hinge is NOT applied here
+                    # so the recorded val metric stays comparable across studies.
+                    x, target, mask, Dt = data[0], data[1], data[2], data[3]
 
                     x = x.to(device, non_blocking=True)
                     target = target.to(device, non_blocking=True)
