@@ -177,16 +177,27 @@ def build_finetune_optimizer(
 
     # The trainable "head" set depends on the wrapper's forward path. The spatial-
     # render model (Study 086) drops the conditioner/output_head for a single
-    # read_head; the legacy model trains conditioner + output_head. Selecting the
+    # read_head; the color-anchored model (Study 116) replaces output_head with a
+    # shared pivot + low-rank color code (ref_head/sed_head + W_band/b_band
+    # Parameters); the legacy model trains conditioner + output_head. Selecting the
     # modules that actually run keeps DDP's find_unused_parameters=False valid.
     if getattr(model, "spatial_render", False):
         trainable_mods = [model.read_head]
+    elif getattr(model, "color_anchored_head", False):
+        trainable_mods = [model.conditioner, model.ref_head, model.sed_head]
     else:
         trainable_mods = [model.conditioner, model.output_head]
 
     head_params = []
     for mod in trainable_mods:
         for p in mod.parameters():
+            p.requires_grad = True
+            head_params.append(p)
+
+    # The color-anchored head's band-response is raw Parameters (W_band, b_band),
+    # not a submodule, so add them explicitly to the trainable head group.
+    if getattr(model, "color_anchored_head", False):
+        for p in (model.W_band, model.b_band):
             p.requires_grad = True
             head_params.append(p)
 
