@@ -132,6 +132,32 @@ def eval_DDP_scalar_temporal_loderunner_datastep_gri(
     return target, pred, per_sample_loss.detach()
 
 
+def _apply_ul_hinge_datastep(
+    per_sample_loss: torch.Tensor,
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    is_ul: torch.Tensor,
+    ul_weight: float,
+    median_idx: int,
+) -> torch.Tensor:
+    """Censored one-sided hinge for upper-limit targets (Study 114).
+
+    Mirrors ``yoke.utils.training.epoch.loderunner._apply_ul_hinge`` for the
+    datastep code path. UL target samples (``is_ul == 1``) are supervised by
+    ``ul_weight * relu(limit_z - median_pred_z)`` on the observed band -- zero
+    gradient once the median forecast respects the bound; detection samples keep
+    their incoming pinball loss.
+    """
+    if pred.dim() == 3:
+        median_pred = pred[:, median_idx, :]
+    else:
+        median_pred = pred
+    hinge_band = torch.relu(target - median_pred) * mask
+    hinge = hinge_band.sum(dim=1) / (mask.sum(dim=1) + 1e-8)
+    return torch.where(is_ul > 0.5, ul_weight * hinge, per_sample_loss)
+
+
 def train_DDP_scalar_temporal_loderunner_datastep_9band(
     data: tuple,
     model: torch.nn.Module,
@@ -140,6 +166,8 @@ def train_DDP_scalar_temporal_loderunner_datastep_9band(
     device: torch.device,
     rank: int,
     world_size: int,
+    ul_weight: float = 0.0,
+    median_idx: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """DDP training datastep for the masked 9-band scalar temporal wrapper.
 
@@ -155,15 +183,23 @@ def train_DDP_scalar_temporal_loderunner_datastep_9band(
 
     Expected model output:
         pred:   [B, n_bands]
+
+    ``ul_weight > 0`` (Study 114) enables the censored upper-limit hinge on a
+    5-tuple batch ``(x, target, mask, Dt, is_ul)``; see
+    :func:`yoke.utils.training.epoch.loderunner._apply_ul_hinge`. ``0.0`` (or a
+    4-tuple) is the detections-only behavior.
     """
     model.train()
 
-    x, target, mask, Dt = data
+    x, target, mask, Dt = data[0], data[1], data[2], data[3]
+    is_ul = data[4] if len(data) > 4 else None
 
     x = x.to(device, non_blocking=True)
     target = target.to(device, non_blocking=True)
     mask = mask.to(device, non_blocking=True)
     Dt = Dt.to(torch.float32).to(device, non_blocking=True)
+    if is_ul is not None:
+        is_ul = is_ul.to(torch.float32).to(device, non_blocking=True)
 
     # Kept for LodeRunner-style API compatibility.
     in_vars = torch.arange(8, device=device)
@@ -190,6 +226,11 @@ def train_DDP_scalar_temporal_loderunner_datastep_9band(
     # and average per sample over the observed entries.
     loss = loss_fn(pred, target) * mask
     per_sample_loss = loss.sum(dim=1) / (mask.sum(dim=1) + 1e-8)
+
+    if is_ul is not None and ul_weight > 0.0:
+        per_sample_loss = _apply_ul_hinge_datastep(
+            per_sample_loss, pred, target, mask, is_ul, ul_weight, median_idx,
+        )
 
     optimizer.zero_grad(set_to_none=True)
     per_sample_loss.mean().backward()
@@ -219,7 +260,9 @@ def eval_DDP_scalar_temporal_loderunner_datastep_9band(
     """
     model.eval()
 
-    x, target, mask, Dt = data
+    # Tolerate a 5-tuple (Study 114); eval is detections-only and never applies
+    # the hinge so the recorded metric stays comparable across studies.
+    x, target, mask, Dt = data[0], data[1], data[2], data[3]
 
     x = x.to(device, non_blocking=True)
     target = target.to(device, non_blocking=True)
