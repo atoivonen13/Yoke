@@ -880,12 +880,6 @@ def load_direct_loderunner_checkpoint_9band(
         render_horizon_days=checkpoint_data.get("render_horizon_days", 8.0),
         render_splat=checkpoint_data.get("render_splat", 5),
         gather_rows_k=checkpoint_data.get("gather_rows_k", 5),
-        # False for legacy checkpoints (no key) -> per-event width 3+n_bands.
-        # True (Study 113) admits upper limits as flagged context, inserting an
-        # is_upper_limit column so the per-event width becomes 4+n_bands and the
-        # conditioner first-layer widens; it MUST match the saved weights for the
-        # strict load to succeed.
-        upper_limit_channel=checkpoint_data.get("upper_limit_channel", False),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

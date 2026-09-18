@@ -502,7 +502,6 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         render_horizon_days: float = 8.0,
         render_splat: int = 5,
         gather_rows_k: int = 5,
-        upper_limit_channel: bool = False,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -718,12 +717,6 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         self.trend_decay_anchor = trend_decay_anchor
         self.trend_slope_k = trend_slope_k
         self.trend_max_offset = trend_max_offset
-        # When set, the window-mode per-event layout carries an is_upper_limit
-        # channel after the validity flag (width 4 + n_bands instead of
-        # 3 + n_bands), so upper limits can be fed as flagged context. Must match
-        # the dataset's ul_as_flagged_context. See per_event_width below and the
-        # column-slicing paths (_band_anchor) which shift the band one-hot.
-        self.upper_limit_channel = upper_limit_channel
 
         # Spatial-render path config (Study 086). When enabled, forward() renders
         # x into a structured 2D field, runs the backbone, and gathers the
@@ -782,12 +775,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         #   [value, rel_t, one_hot_band(n_bands)] * context_len   -> 2 + n_bands
         # Time-window mode adds a validity flag so padding is carried in x:
         #   [value, rel_t, valid, one_hot_band(n_bands)] * context_len -> 3 + n_bands
-        # With upper_limit_channel, an is_upper_limit flag is inserted after valid:
-        #   [value, rel_t, valid, is_upper_limit, one_hot_band] -> 4 + n_bands
-        if context_window_days is not None:
-            per_event_width = (4 if upper_limit_channel else 3) + n_bands
-        else:
-            per_event_width = 2 + n_bands
+        per_event_width = 3 + n_bands if context_window_days is not None else 2 + n_bands
         input_dim = context_len * per_event_width
         # Stored so forward() can slice the per-event block off x when the phase
         # scalar is appended as a trailing element (phase_fourier_bands > 0).
@@ -979,19 +967,12 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         """
         B = x.shape[0]
         nb = self.n_bands
-        # Per-event width and band-one-hot offset shift by one when the
-        # is_upper_limit channel is present ([value, rel_t, valid, is_ul, band]).
-        band_off = 4 if self.upper_limit_channel else 3
-        ev = x.view(B, self.context_len, band_off + nb)  # [B, L, band_off+nb]
+        ev = x.view(B, self.context_len, 3 + nb)  # [B, L, 3+nb]
 
         value = ev[..., 0]  # [B, L]
         rel_t = ev[..., 1]  # [B, L]
         valid = ev[..., 2] > 0.5  # [B, L] bool
-        if self.upper_limit_channel:
-            # A bound is not a measurement, so exclude upper limits from the
-            # anchor: treat them as not-valid for anchor selection only.
-            valid = valid & (ev[..., 3] < 0.5)
-        band_oh = ev[..., band_off:]  # [B, L, nb]
+        band_oh = ev[..., 3:]  # [B, L, nb]
         band_idx = band_oh.argmax(dim=-1)  # [B, L]
 
         neg_inf = torch.finfo(rel_t.dtype).min
@@ -1115,14 +1096,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         H, W = self.image_size
         device = x_events.device
 
-        # Band one-hot offset shifts by one when the is_upper_limit channel is
-        # present ([value, rel_t, valid, is_ul, band]).
-        band_off = 4 if self.upper_limit_channel else 3
-        ev = x_events.view(B, L, band_off + nb)
+        ev = x_events.view(B, L, 3 + nb)
         value = ev[..., 0]  # [B, L]
         rel_t = ev[..., 1]  # [B, L]
         valid = ev[..., 2] > 0.5  # [B, L] bool
-        band_idx = ev[..., band_off:].argmax(dim=-1)  # [B, L]
+        band_idx = ev[..., 3:].argmax(dim=-1)  # [B, L]
 
         # Anchor rel_t = largest rel_t over valid events (most-recent obs). No
         # valid event -> 0 (an all-zero field, the normalized mean). tau re-refs
