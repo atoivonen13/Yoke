@@ -263,6 +263,13 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     color_sed_rank = ckpt.get("color_sed_rank", 2)
     color_sed_dt_independent = ckpt.get("color_sed_dt_independent", False)
 
+    # Study 123: redshift conditioning scalar. 0 for pre-123 checkpoints (no
+    # key) -> no redshift input. > 0 widens the conditioner first-layer, so it
+    # MUST match the training config or the strict load fails.
+    redshift_fourier_bands = ckpt.get("redshift_fourier_bands", 0)
+    redshift_mean = ckpt.get("redshift_mean", 0.0142)
+    redshift_std = ckpt.get("redshift_std", 0.00365)
+
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
     print("backbone_class:", ckpt.get("backbone_class", "LodeRunner"))
@@ -284,6 +291,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_backbone:", bypass_backbone)
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
+    print("redshift_fourier_bands:", redshift_fourier_bands)
     print("spatial_render:", spatial_render)
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
@@ -311,6 +319,9 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         bypass_backbone=bypass_backbone,
         bypass_channels=bypass_channels,
         phase_fourier_bands=phase_fourier_bands,
+        redshift_fourier_bands=redshift_fourier_bands,
+        redshift_mean=redshift_mean,
+        redshift_std=redshift_std,
         spatial_render=spatial_render,
         render_context_days=render_context_days,
         render_horizon_days=render_horizon_days,
@@ -364,6 +375,7 @@ def make_eval_dataset(
     context_len,
     context_window_days=None,
     max_context_len=None,
+    append_redshift=False,
 ):
     band_means, band_stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
@@ -398,6 +410,7 @@ def make_eval_dataset(
         max_context_len=max_context_len,
         data_glob=getattr(args, "data_glob", None),
         object_ids=object_ids,
+        append_redshift=append_redshift,
     )
 
     return dataset, np.asarray(band_means), np.asarray(band_stds)
@@ -415,6 +428,8 @@ def build_context_input(
     phase0=None,
     win_ul=None,
     upper_limit_channel=False,
+    redshift_fourier_bands=0,
+    redshift=None,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -494,6 +509,22 @@ def build_context_input(
             )
         phase = np.float32(win_t[-1] - phase0)
         x_flat = np.concatenate([x_flat, np.array([phase], dtype=np.float32)])
+
+    # Study 123: append raw physical redshift as the SECOND trailing scalar
+    # (fixed order [events, phase, redshift]), matching _getitem_window. The
+    # model standardizes it internally, so pass it un-normalized here.
+    if redshift_fourier_bands > 0:
+        if redshift is None:
+            raise ValueError(
+                "redshift is required when redshift_fourier_bands > 0; pass "
+                "the object's physical redshift (dataset emits it raw)."
+            )
+        # Mirror the dataset: substitute 0.0 for a missing/non-finite redshift
+        # so a file without injection_parameters can't inject NaN into the model.
+        z = np.float32(redshift)
+        if not np.isfinite(z):
+            z = np.float32(0.0)
+        x_flat = np.concatenate([x_flat, np.array([z], dtype=np.float32)])
 
     return torch.tensor(
         x_flat,
@@ -597,6 +628,7 @@ def get_rollout_from_stream(
     context_window_days=None,
     max_context_len=None,
     fixed_forecast_max_days=None,
+    obj_redshift=np.nan,
 ):
     """Autoregressively forecast the next events of one merged event stream.
 
@@ -625,6 +657,7 @@ def get_rollout_from_stream(
     # already has first-detection at 0.0 -> phase0 = 0.0.
     phase_fourier_bands = getattr(model, "phase_fourier_bands", 0)
     phase0 = 0.0
+    redshift_fourier_bands = getattr(model, "redshift_fourier_bands", 0)
 
     # Number of true events used to warm-start the running context. In window
     # mode we seed up to max_context_len so the trailing-W-days selection has
@@ -684,6 +717,8 @@ def get_rollout_from_stream(
                 window_mode=window_mode,
                 phase_fourier_bands=phase_fourier_bands,
                 phase0=phase0,
+                redshift_fourier_bands=redshift_fourier_bands,
+                redshift=obj_redshift,
             )
 
             # Lead time from the last context event to the next true event.
@@ -787,6 +822,8 @@ def get_rollout_from_stream(
             window_mode=window_mode,
             phase_fourier_bands=phase_fourier_bands,
             phase0=phase0,
+            redshift_fourier_bands=redshift_fourier_bands,
+            redshift=obj_redshift,
         )
 
         last_ctx_t_rel = float(win_t0[-1]) - t_ref
@@ -835,7 +872,7 @@ def select_series(
 ):
     """Pick files with enough events for a rollout, longest first.
 
-    Returns a list of (times, values, bands, start_idx) tuples.
+    Returns a list of (times, values, bands, redshift, start_idx) tuples.
     """
     # In window mode the context is seeded with up to max_context_len events
     # (passed as seed_len); otherwise the fixed count. Either way we need at
@@ -843,19 +880,25 @@ def select_series(
     warm = seed_len if seed_len is not None else context_len
     min_events = warm + 1  # need at least one future step
 
+    # redshift_per_file is parallel to events_per_file (Study 123); fall back to
+    # nan when the dataset was built without append_redshift so a non-redshift
+    # model's diagnostics are unchanged.
+    redshifts = getattr(dataset, "redshift_per_file", None)
+
     eligible = []
-    for times, values, bands in dataset.events_per_file:
+    for idx, (times, values, bands) in enumerate(dataset.events_per_file):
         if len(times) >= min_events:
-            eligible.append((times, values, bands))
+            z = float(redshifts[idx]) if redshifts is not None else np.nan
+            eligible.append((times, values, bands, z))
 
     # Prefer the longest streams so rollouts have the most future steps.
-    eligible.sort(key=lambda tvb: len(tvb[0]), reverse=True)
+    eligible.sort(key=lambda tvbz: len(tvbz[0]), reverse=True)
 
     selected = []
-    for times, values, bands in eligible[:n_series]:
+    for times, values, bands, z in eligible[:n_series]:
         # Start at the beginning; the rollout naturally stops at the end of the
         # stream if fewer than n_future_steps events remain.
-        selected.append((times, values, bands, 0))
+        selected.append((times, values, bands, z, 0))
 
     return selected
 
@@ -1141,6 +1184,7 @@ def main():
         context_len=context_len,
         context_window_days=context_window_days,
         max_context_len=max_context_len if window_mode else None,
+        append_redshift=getattr(model, "redshift_fourier_bands", 0) > 0,
     )
 
     print("Dataset files with events:", len(eval_dataset.events_per_file))
@@ -1166,7 +1210,7 @@ def main():
 
     rollouts = []
     tf_rollouts = [] if teacher_forced else None
-    for i, (times, values, bands, start_idx) in enumerate(series):
+    for i, (times, values, bands, obj_z, start_idx) in enumerate(series):
         rollout = get_rollout_from_stream(
             times=times,
             values=values,
@@ -1184,6 +1228,7 @@ def main():
             context_window_days=context_window_days,
             max_context_len=max_context_len,
             fixed_forecast_max_days=args.fixed_forecast_max_days,
+            obj_redshift=obj_z,
         )
         rollouts.append(rollout)
 
@@ -1204,6 +1249,7 @@ def main():
                 window_mode=window_mode,
                 context_window_days=context_window_days,
                 max_context_len=max_context_len,
+                obj_redshift=obj_z,
             )
             tf_rollouts.append(tf_rollout)
 

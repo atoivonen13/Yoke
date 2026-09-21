@@ -86,7 +86,7 @@ def audit_object(
     the pre-cutoff realistic DETECTIONS (champion-parity); the scored ULs are the
     late-time (phase > cutoff, <= max_days) non-detections.
     """
-    r_t, r_v, r_b, r_ul = real_stream
+    r_t, r_v, r_b, r_ul = real_stream[:4]
     if r_t.shape[0] < 1:
         return None
 

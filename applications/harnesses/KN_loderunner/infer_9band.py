@@ -228,6 +228,12 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     color_anchored_head = ckpt.get("color_anchored_head", False)
     color_sed_rank = ckpt.get("color_sed_rank", 2)
     color_sed_dt_independent = ckpt.get("color_sed_dt_independent", False)
+    # Study 123: redshift conditioning scalar. 0 for pre-123 checkpoints (no
+    # key) -> no redshift input. > 0 widens the conditioner first-layer; MUST
+    # match to load strict.
+    redshift_fourier_bands = ckpt.get("redshift_fourier_bands", 0)
+    redshift_mean = ckpt.get("redshift_mean", 0.0142)
+    redshift_std = ckpt.get("redshift_std", 0.00365)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -246,6 +252,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_backbone:", bypass_backbone)
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
+    print("redshift_fourier_bands:", redshift_fourier_bands)
     print("spatial_render:", spatial_render)
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
@@ -273,6 +280,9 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         bypass_backbone=bypass_backbone,
         bypass_channels=bypass_channels,
         phase_fourier_bands=phase_fourier_bands,
+        redshift_fourier_bands=redshift_fourier_bands,
+        redshift_mean=redshift_mean,
+        redshift_std=redshift_std,
         spatial_render=spatial_render,
         render_context_days=render_context_days,
         render_horizon_days=render_horizon_days,
@@ -335,8 +345,18 @@ def load_event_stream(fn, means, stds, keep_upper_limits=False):
             ``keep_upper_limits`` is False).
         raw (dict): Per-band raw (mjd, mag) arrays for plotting the observations.
         t0 (float): The earliest MJD, used to align forecast times.
+        redshift (float): Object's physical redshift from injection_parameters
+            (a per-object constant; nan if absent).
     """
     data = np.load(fn, allow_pickle=True)
+
+    redshift = np.nan
+    if "injection_parameters" in data.files:
+        try:
+            inj = json.loads(str(data["injection_parameters"][0]))
+            redshift = float(inj.get("redshift", np.nan))
+        except (ValueError, KeyError, TypeError):
+            redshift = np.nan
 
     times = []
     values = []
@@ -399,7 +419,7 @@ def load_event_stream(fn, means, stds, keep_upper_limits=False):
 
     values_norm = (values - means[bands]) / (stds[bands] + EPS)
 
-    return times, values_norm.astype(np.float32), bands, is_ul, raw, t0
+    return times, values_norm.astype(np.float32), bands, is_ul, raw, t0, redshift
 
 
 def build_context_input(
@@ -414,6 +434,8 @@ def build_context_input(
     phase0=None,
     ctx_ul=None,
     upper_limit_channel=False,
+    redshift_fourier_bands=0,
+    redshift=None,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -482,6 +504,20 @@ def build_context_input(
         phase = np.float32(ctx_t[-1] - phase0)
         x_flat = np.concatenate([x_flat, np.array([phase], dtype=np.float32)])
 
+    # Study 123: append raw physical redshift as the SECOND trailing scalar
+    # (fixed order [events, phase, redshift]), matching _getitem_window. The
+    # model standardizes it internally, so pass it un-normalized here.
+    if redshift_fourier_bands > 0:
+        if redshift is None:
+            raise ValueError(
+                "redshift is required when redshift_fourier_bands > 0; pass "
+                "the object's physical redshift (dataset emits it raw)."
+            )
+        z = np.float32(redshift)
+        if not np.isfinite(z):
+            z = np.float32(0.0)
+        x_flat = np.concatenate([x_flat, np.array([z], dtype=np.float32)])
+
     x = torch.tensor(
         x_flat,
         dtype=torch.float32,
@@ -509,7 +545,7 @@ def forecast_curve(
     Returns a [n_lead_times, n_bands] array of denormalized (magnitude)
     predictions and the absolute forecast times (in the last-observation frame).
     """
-    times, values_norm, bands, is_ul, _, _ = stream
+    times, values_norm, bands, is_ul, _, _, redshift = stream
 
     ul_channel = getattr(model, "upper_limit_channel", False)
 
@@ -545,6 +581,8 @@ def forecast_curve(
         phase0=0.0,  # stream relativized (times -= t0) -> first detection at 0
         ctx_ul=ctx_ul if ul_channel else None,
         upper_limit_channel=ul_channel,
+        redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
+        redshift=redshift,
     )
 
     last_t = float(times[-1])
@@ -572,7 +610,7 @@ def forecast_curve(
 
 
 def plot_forecast(stream, preds_mag, forecast_times, last_t, title, outpath):
-    _, _, _, _, raw, t0 = stream
+    _, _, _, _, raw, t0, _ = stream
 
     plt.figure(figsize=(9, 6))
 
