@@ -614,6 +614,8 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
     band_weights: torch.Tensor = None,
     ema: object = None,
     grad_clip_norm: float = None,
+    dt_weight_gamma: float = None,
+    dt_weight_tau: float = 3.0,
 ) -> None:
     """DDP epoch function for the masked 9-band scalar temporal LodeRunner.
 
@@ -646,6 +648,15 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
     MSE, whose gradient scales with the residual (unlike Huber, which bounds it),
     so a single outlier-heavy batch can spike the update. ``None`` (default)
     disables clipping.
+
+    ``dt_weight_gamma`` (optional float) applies a per-sample lead-time weight
+    ``(1 + Dt / dt_weight_tau) ** dt_weight_gamma`` to the backward objective,
+    composing multiplicatively with ``band_weights``. ``gamma > 0`` up-weights
+    long-lead (late-time) samples; ``gamma < 0`` down-weights them (giving the
+    short-lead rise relatively more gradient -- ``gamma = -1`` matches the
+    rollout path's ``1 / (1 + Dt / tau)`` shape). ``None`` or ``0.0`` (default)
+    is a byte-identical no-op. The RECORDED per-sample loss stays unweighted so
+    the val CSV remains a comparable yardstick across runs.
     """
     train_rcrd_filename = train_rcrd_filename.replace(
         "<epochIDX>",
@@ -689,15 +700,28 @@ def train_DDP_scalar_temporal_loderunner_epoch_9band(
             loss = loss_fn(pred, target) * mask
             per_sample_loss = loss.sum(dim=1) / (mask.sum(dim=1) + 1e-8)
 
-            if band_weights is None:
+            use_dt_w = dt_weight_gamma is not None and dt_weight_gamma != 0.0
+            if band_weights is None and not use_dt_w:
                 # Recorded metric == training objective: plain equal weight.
                 batch_loss = per_sample_loss.mean()
             else:
                 # Weight the backward by the observed band's weight (mask is
-                # one-hot, so this picks each sample's band weight). The
-                # recorded per_sample_loss above stays unweighted so the CSV
+                # one-hot, so this picks each sample's band weight) and/or a
+                # per-sample lead-time weight. Both compose multiplicatively.
+                # The recorded per_sample_loss above stays unweighted so the CSV
                 # metric is comparable across runs and weightings.
-                sample_w = (mask * band_weights.reshape(1, -1)).sum(dim=1)
+                sample_w = torch.ones_like(per_sample_loss)
+                if band_weights is not None:
+                    sample_w = sample_w * (
+                        mask * band_weights.reshape(1, -1)
+                    ).sum(dim=1)
+                if use_dt_w:
+                    # (1 + Dt/tau)^gamma: gamma>0 up-weights long leads,
+                    # gamma<0 down-weights them (gamma=-1 == 1/(1+Dt/tau)).
+                    dt_w = (
+                        1.0 + Dt.clamp_min(0.0) / float(dt_weight_tau)
+                    ) ** float(dt_weight_gamma)
+                    sample_w = sample_w * dt_w
                 batch_loss = (per_sample_loss * sample_w).sum() / (
                     sample_w.sum() + 1e-8
                 )

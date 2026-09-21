@@ -419,7 +419,7 @@ def main(args, rank, world_size, local_rank, device):
     # reproduced the plateau (bias signature: 8 bands over-fade, ztfg alone under).
     # Forcing one per-object color makes the fade flow through the shared pivot,
     # which the deep bands' targets pin. Sole change vs 117.
-    COLOR_SED_DT_INDEPENDENT = True
+    COLOR_SED_DT_INDEPENDENT = False
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -789,6 +789,19 @@ def main(args, rank, world_size, local_rank, device):
     # per-sample loss stays unweighted so the val CSV remains comparable. Set to
     # None to recover the equal-per-step objective. tau ~ a few days.
     DT_WEIGHT_TAU = 3.0
+
+    # Single-step (n_rollout_steps=1) lead-time loss weighting. The champion 111
+    # path is single-step and equal-weights all supervised leads (target Dt is
+    # ~uniform over (0, TARGET_HORIZON_DAYS]). This knob applies a per-sample
+    # weight (1 + Dt/DT_WEIGHT_TAU) ** DT_WEIGHT_GAMMA, composing with
+    # BAND_WEIGHTS. gamma > 0 up-weights long-lead (late) samples; gamma < 0
+    # down-weights them (gamma = -1 reproduces the rollout path's 1/(1+Dt/tau)
+    # shape, which the rollout studies found REDUCES the plateau). None or 0.0 =
+    # byte-identical champion equal-weight objective.
+    # Study 119: A/B the SIGN -- 119a gamma=+1 (up-weight late, the "error grows
+    # with lead" hypothesis), 119b gamma=-1 (down-weight late, matching the
+    # rollout plateau-collapse evidence). Read @1000 vs champion 111 (1.3800).
+    DT_WEIGHT_GAMMA = -1.0
 
     optimizer_kwargs = {
         "lr": 1e-4,# 1e-4, #1e-5
@@ -1287,6 +1300,8 @@ def main(args, rank, world_size, local_rank, device):
                 band_weights=BAND_WEIGHTS,
                 ema=ema,
                 grad_clip_norm=GRAD_CLIP_NORM,
+                dt_weight_gamma=DT_WEIGHT_GAMMA,
+                dt_weight_tau=DT_WEIGHT_TAU,
             )
 
         print(f"[rank {rank}] finished epoch", flush=True)
@@ -1358,6 +1373,7 @@ def main(args, rank, world_size, local_rank, device):
                         ema.state_dict() if ema is not None else None
                     ),
                     "dt_weight_tau": DT_WEIGHT_TAU,
+                    "dt_weight_gamma": DT_WEIGHT_GAMMA,
                     "band_weights": (
                         BAND_WEIGHTS.tolist()
                         if BAND_WEIGHTS is not None
