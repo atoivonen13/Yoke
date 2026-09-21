@@ -25,6 +25,7 @@
 # dataloaders at multi-GPU scale.
 #SBATCH --cpus-per-task=24
 #SBATCH --mem-per-gpu=50G
+#SBATCH --exclude=se024
 #SBATCH --output=study<studyIDX>_epoch0001.out
 #SBATCH --error=study<studyIDX>_epoch0001.err
 
