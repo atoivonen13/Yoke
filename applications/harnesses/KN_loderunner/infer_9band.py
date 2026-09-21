@@ -226,6 +226,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     # strict.
     color_anchored_head = ckpt.get("color_anchored_head", False)
     color_sed_rank = ckpt.get("color_sed_rank", 2)
+    color_sed_dt_independent = ckpt.get("color_sed_dt_independent", False)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -246,6 +247,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("spatial_render:", spatial_render)
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
+    print("color_sed_dt_independent:", color_sed_dt_independent)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -275,6 +277,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         gather_rows_k=gather_rows_k,
         color_anchored_head=color_anchored_head,
         color_sed_rank=color_sed_rank,
+        color_sed_dt_independent=color_sed_dt_independent,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

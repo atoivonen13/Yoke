@@ -897,6 +897,12 @@ def load_direct_loderunner_checkpoint_9band(
         # W_band/b_band), so it MUST match the training config for strict load.
         color_anchored_head=checkpoint_data.get("color_anchored_head", False),
         color_sed_rank=checkpoint_data.get("color_sed_rank", 2),
+        # False for pre-118 checkpoints (no key) -> sed_head width includes
+        # dt_extra (Study 117). True (Study 118) narrows sed_head's first layer to
+        # pool_channels, so it MUST match the training config for strict load.
+        color_sed_dt_independent=checkpoint_data.get(
+            "color_sed_dt_independent", False
+        ),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

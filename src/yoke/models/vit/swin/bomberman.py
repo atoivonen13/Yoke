@@ -504,6 +504,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         gather_rows_k: int = 5,
         color_anchored_head: bool = False,
         color_sed_rank: int = 2,
+        color_sed_dt_independent: bool = False,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -763,6 +764,14 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # instead of plateauing. See the non-render else block below and forward().
         self.color_anchored_head = color_anchored_head
         self.color_sed_rank = color_sed_rank
+        # Study 118: when True the SED-code branch (sed_head) sees ONLY the pooled
+        # backbone summary, NOT the Fourier lead-time encoding, so the per-object
+        # color CANNOT evolve with Dt. Study 117 regressed because a Dt-dependent
+        # rank-2 code (constrained across bands but free across lead time) let
+        # ztfg's color un-fade as the pivot faded, reproducing the plateau. Making
+        # the code Dt-independent forces one per-object color; all lead-time fade
+        # must flow through the shared pivot, which the deep bands' targets pin.
+        self.color_sed_dt_independent = color_sed_dt_independent
 
         # Diagnostic baseline: skip the frozen backbone in forward() and feed the
         # tiled conditioner output straight to pooling+head. Adds no params and
@@ -902,15 +911,22 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 # rank is architectural, not a tunable loss weight -- it cannot be
                 # tuned away (unlike the reverted UL hinge).
                 head_in = pool_channels + dt_extra
-                # Abstract pivot: n_quantiles values (monotone in forward()).
+                # Abstract pivot: n_quantiles values (monotone in forward()). The
+                # pivot ALWAYS sees the Fourier Dt encoding -- it carries all the
+                # lead-time fade.
                 self.ref_head = nn.Sequential(
                     nn.Linear(head_in, hidden),
                     nn.GELU(),
                     nn.Linear(hidden, n_quantiles),
                 )
-                # SED code: k latent color coordinates, phase/Dt-dependent.
+                # SED code: k latent color coordinates. When color_sed_dt_independent
+                # (Study 118) the code sees ONLY the pooled backbone summary
+                # (pool_channels), NOT dt_extra, so the per-object color is fixed
+                # across lead time and cannot time-escape the bottleneck; otherwise
+                # (Study 117) it sees the full head_in and is Dt-dependent.
+                sed_in = pool_channels if color_sed_dt_independent else head_in
                 self.sed_head = nn.Sequential(
-                    nn.Linear(head_in, hidden),
+                    nn.Linear(sed_in, hidden),
                     nn.GELU(),
                     nn.Linear(hidden, color_sed_rank),
                 )
@@ -1400,7 +1416,13 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # lives in a k-dim subspace, so a band with no supervision inherits
             # the pivot + the code inferred from the bands that do have data.
             m_ref = self.ref_head(head_in)  # [B, n_quantiles]
-            z_sed = self.sed_head(head_in)  # [B, k]
+            # The SED code is Dt-independent (Study 118) when the flag is set: it
+            # reads only the pooled backbone summary, so the per-object color is
+            # constant across lead time and the fade lives entirely in the pivot.
+            sed_in = (
+                pred_channel_vals if self.color_sed_dt_independent else head_in
+            )
+            z_sed = self.sed_head(sed_in)  # [B, k]
             # colors [B, n_bands] = b_band + z_sed @ W_band.T, mean-centered so
             # the pivot carries the overall level and colors sum to ~0 per sample.
             colors = self.b_band + z_sed @ self.W_band.t()  # [B, n_bands]
