@@ -412,6 +412,14 @@ def main(args, rank, world_size, local_rank, device):
     # kn-color-coupling-greenlit (color-correlation test: ztfg 1.9 -> 0.80 ceiling).
     COLOR_ANCHORED_HEAD = True
     COLOR_SED_RANK = 2
+    # Study 118: when True the SED-code branch sees ONLY the pooled backbone
+    # summary (not the Fourier Dt encoding), so the per-object color is fixed
+    # across lead time. Study 117 (Dt-dependent code) regressed +0.054: the
+    # rank-2 code, free across Dt, let ztfg's color un-fade as the pivot faded and
+    # reproduced the plateau (bias signature: 8 bands over-fade, ztfg alone under).
+    # Forcing one per-object color makes the fade flow through the shared pivot,
+    # which the deep bands' targets pin. Sole change vs 117.
+    COLOR_SED_DT_INDEPENDENT = True
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -886,6 +894,7 @@ def main(args, rank, world_size, local_rank, device):
             gather_rows_k=GATHER_ROWS_K,
             color_anchored_head=COLOR_ANCHORED_HEAD,
             color_sed_rank=COLOR_SED_RANK,
+            color_sed_dt_independent=COLOR_SED_DT_INDEPENDENT,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1343,6 +1352,7 @@ def main(args, rank, world_size, local_rank, device):
                     "gather_rows_k": GATHER_ROWS_K,
                     "color_anchored_head": COLOR_ANCHORED_HEAD,
                     "color_sed_rank": COLOR_SED_RANK,
+                    "color_sed_dt_independent": COLOR_SED_DT_INDEPENDENT,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
