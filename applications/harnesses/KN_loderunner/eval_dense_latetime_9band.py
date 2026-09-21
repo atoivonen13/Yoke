@@ -34,6 +34,7 @@ never trains.
 
 import argparse
 import csv
+import json
 import os
 import sys
 
@@ -89,7 +90,7 @@ def _stem(path: str) -> str:
 
 def read_merged_stream(
     npz_path: str, drop_upper_limits: bool
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
     """Read one file's merged, time-sorted event stream in ABSOLUTE MJD.
 
     Unlike the training dataset, times are NOT relativized here, so streams from
@@ -104,11 +105,20 @@ def read_merged_stream(
             with ``upper_limit_channel``).
 
     Returns:
-        (times, values, bands, is_ul): absolute MJD, raw magnitude, band index,
-        upper-limit flag (1.0 for a non-detection); each [N] and sorted by time.
-        Empty arrays if the file has no usable events.
+        (times, values, bands, is_ul, redshift): absolute MJD, raw magnitude,
+        band index, upper-limit flag (1.0 for a non-detection); each [N] and
+        sorted by time. ``redshift`` is the object's physical redshift parsed
+        from ``injection_parameters`` (a per-object constant; ``nan`` if absent).
+        Empty arrays (and ``nan`` redshift) if the file has no usable events.
     """
     data = np.load(npz_path, allow_pickle=True)
+    redshift = np.nan
+    if "injection_parameters" in data.files:
+        try:
+            inj = json.loads(str(data["injection_parameters"][0]))
+            redshift = float(inj.get("redshift", np.nan))
+        except (ValueError, KeyError, TypeError):
+            redshift = np.nan
     times, values, bands, is_ul = [], [], [], []
     for band_idx, key in enumerate(BAND_KEYS):
         if key not in data.files:
@@ -135,6 +145,7 @@ def read_merged_stream(
             empty_f.astype(np.float32),
             np.empty(0, dtype=np.int64),
             empty_f.astype(np.float32),
+            redshift,
         )
 
     times = np.concatenate(times)
@@ -142,7 +153,7 @@ def read_merged_stream(
     bands = np.concatenate(bands)
     is_ul = np.concatenate(is_ul)
     order = np.argsort(times, kind="stable")
-    return times[order], values[order], bands[order], is_ul[order]
+    return times[order], values[order], bands[order], is_ul[order], redshift
 
 
 def _stem_to_path(data_glob: str) -> dict:
@@ -222,6 +233,7 @@ def _rollout_scored(
     context_window_days: float,
     max_context_len: int,
     ctx_ul0: list = None,
+    obj_redshift: float = np.nan,
 ) -> list:
     """Autoregressive late-time forecast: feed each prediction back as context.
 
@@ -291,6 +303,8 @@ def _rollout_scored(
                 phase0=t0,  # win_t is absolute MJD; first detection at t0
                 win_ul=win_ul,
                 upper_limit_channel=ul_channel,
+                redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
+                redshift=obj_redshift,
             )
             # Lead time from the last FED event (the running context tip).
             dt = float(target_t[k]) - float(ctx_t[-1])
@@ -369,8 +383,8 @@ def eval_object(
       measured from the last FED event, not the fixed last realistic detection.
       This measures the true inference path (and exposes drift).
     """
-    r_t, r_v, r_b, r_ul = real_stream
-    d_t, d_v, d_b, d_ul = dense_stream
+    r_t, r_v, r_b, r_ul, r_z = real_stream
+    d_t, d_v, d_b, d_ul, _d_z = dense_stream
 
     if r_t.shape[0] < 1 or d_t.shape[0] < 1:
         return None
@@ -450,6 +464,8 @@ def eval_object(
         phase0=t0,  # win_t is absolute MJD; first realistic detection at t0
         win_ul=win_ul,
         upper_limit_channel=ul_channel,
+        redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
+        redshift=r_z,
     )
 
     # Score each late-time dense point at its true lead time from the last
@@ -488,6 +504,7 @@ def eval_object(
             t0=t0,
             context_window_days=context_window_days,
             max_context_len=max_context_len,
+            obj_redshift=r_z,
         )
     else:
         # Keep the full quantile axis so the 0.1/0.9 bands can be scored/plotted.
@@ -543,7 +560,7 @@ def eval_object(
     # dense truth goes dark.
     uniform = None
     if uniform_stream is not None:
-        u_t, u_v, u_b, _u_ul = uniform_stream
+        u_t, u_v, u_b, _u_ul, _u_z = uniform_stream
         if u_t.shape[0] > 0:
             uniform = (u_t - t0, u_v, u_b)
 

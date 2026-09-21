@@ -10,6 +10,7 @@ normalization statistics.
 # Packages
 ####################################
 import glob
+import json
 import os
 import random
 
@@ -414,6 +415,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         data_glob: str = None,
         object_ids: set = None,
         append_phase: bool = False,
+        append_redshift: bool = False,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -481,6 +483,15 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 on the flattened ``x`` in window mode, for models built with
                 ``phase_fourier_bands > 0`` (which slice it back off in ``forward``).
                 Window mode only. When False the layout is unchanged.
+            append_redshift (bool): If True (default False), append the object's
+                source redshift (read from the ``injection_parameters`` JSON in each
+                ``.npz``) as a trailing scalar on the flattened ``x`` in window
+                mode, for models built with ``redshift_fourier_bands > 0`` (which
+                slice it off and standardize it in ``forward``). Appended AFTER the
+                phase scalar so the fixed trailing order is ``[..., phase?,
+                redshift?]``. The raw physical redshift is emitted (standardization
+                lives in the model, so it round-trips via the checkpoint). Window
+                mode only. When False the layout is unchanged.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -534,6 +545,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # Append the anchor phase (days since first detection) as a trailing
         # scalar on window-mode x, consumed by models with phase_fourier_bands > 0.
         self.append_phase = append_phase
+
+        # Append the object's source redshift as a trailing scalar on window-mode
+        # x (after the phase scalar), consumed by models with
+        # redshift_fourier_bands > 0. Read from injection_parameters per file.
+        self.append_redshift = append_redshift
 
         if self.window_mode:
             self.max_context_len = (
@@ -608,10 +624,24 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # pairing the same object across the realistic and dense datasets must go
         # through the stem, not a positional index.
         self.stems_per_file = []
+        # Per-object redshift, parallel to events_per_file (only populated when
+        # append_redshift; read from injection_parameters before data.close()).
+        self.redshift_per_file = []
         self.samples = []
 
         for file_idx, fn in enumerate(self.file_prefix_list):
             data = np.load(fn, allow_pickle=True)
+
+            # Read the source redshift from the injection_parameters JSON blob
+            # (a length-1 object array holding a JSON string) BEFORE data.close().
+            # Same proven read pattern as color_correlation_test / aux_loss_precheck.
+            redshift = np.nan
+            if self.append_redshift and "injection_parameters" in data.files:
+                try:
+                    inj = json.loads(str(data["injection_parameters"][0]))
+                    redshift = float(inj.get("redshift", np.nan))
+                except (ValueError, KeyError, TypeError):
+                    redshift = np.nan
 
             times = []
             values = []
@@ -664,6 +694,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 (times, values.astype(np.float32), bands)
             )
             self.stems_per_file.append(_stem(fn))
+            self.redshift_per_file.append(redshift)
 
             n_events = times.shape[0]
             file_idx = len(self.events_per_file) - 1
@@ -882,6 +913,17 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             # file-relative (times -= times.min()), so anchor_t IS that phase.
             x_flat = np.concatenate(
                 [x_flat, np.array([anchor_t], dtype=np.float32)]
+            )
+        if self.append_redshift:
+            # Per-object source redshift, appended AFTER phase (fixed trailing
+            # order [..., phase?, redshift?]). Raw physical value; the model
+            # standardizes it. NaN (missing) -> 0.0 so the tensor stays finite;
+            # for the always-on ceiling probe every object carries a real z.
+            z = self.redshift_per_file[file_idx]
+            if not np.isfinite(z):
+                z = 0.0
+            x_flat = np.concatenate(
+                [x_flat, np.array([z], dtype=np.float32)]
             )
         x = torch.tensor(x_flat, dtype=torch.float32)
 

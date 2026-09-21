@@ -136,6 +136,21 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # the SED coupling and pull ztfg further without giving up overall parity. Schedule
 # stays cyclic (LR bounded [0.5,1.0]x anchor, full cosine cycle ~every 1.2 ep), NOT
 # the study-109 single-anneal terminal_steps trap, so adding epochs is safe.
-122,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#122,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 123: REDSHIFT as a conditioning scalar (the PRIMARY remaining lever;
+# memory kn-redshift-feature-idea). Built ON the 116 color-anchored SED head
+# (COLOR_ANCHORED_HEAD=True, COLOR_SED_RANK=2, COLOR_SED_DT_INDEPENDENT=False),
+# adding REDSHIFT_FOURIER_BANDS=8 (REDSHIFT_MEAN=0.01424, STD=0.00365) so the
+# distance-modulus LEVEL knob reaches the pivot through the conditioner. Redshift
+# is ALWAYS-ON here (train + forecast); optional-at-forecast via train-time dropout
+# is a deferred follow-up. Same launch regime as the champion family (batch 5,
+# TERMINAL_STEPS=50/WARMUP=20 cyclic schedule). Rung-1 CEILING PROBE: read @1000
+# (seed noise ±0.02) vs the 116 baseline (1.3891 overall, ztfg RMSE 1.68). Fresh
+# train (new conditioner first-layer width can't load 116 head weights; backbone
+# still loads). Read criteria: (1) overall late RMSE beats 116/111; (2) ztfg falls
+# below 1.68 (the level residual is what redshift should fix); (3) good bands not
+# regressed. Redshift IS passed at forecast (eval reads it per-object from
+# injection_parameters), so the @1000 eval directly measures the always-on ceiling.
+123,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 

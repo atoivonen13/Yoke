@@ -506,6 +506,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         color_anchored_head: bool = False,
         color_sed_rank: int = 2,
         color_sed_dt_independent: bool = False,
+        redshift_fourier_bands: int = 0,
+        redshift_mean: float = 0.0142,
+        redshift_std: float = 0.00365,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -878,8 +881,45 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         else:
             phase_extra = 0
 
+        # Per-object REDSHIFT conditioning (Study 123). When enabled, ONE scalar
+        # per object -- the source redshift -- is standardized and Fourier-encoded
+        # like phase/Dt and concatenated onto the conditioner input, giving the
+        # trainable path the distance-modulus / apparent-mag LEVEL knob it needs to
+        # deconvolve intrinsic luminosity from distance (the blue-band level/bias
+        # error the color head could not fix). CRITICAL difference from phase/Dt:
+        # redshift lives in ~[0.001, 0.019] (mean ~0.0142, std ~0.00365) -- far too
+        # small to Fourier-encode directly against a day-scaled period bank -- so it
+        # is STANDARDIZED to ~unit scale first (redshift_mean/std, from the training
+        # set) and the period bank spans the standardized range. The raw physical
+        # redshift is what the dataset appends to x (mirroring phase's raw anchor_t);
+        # standardization happens here so the normalization round-trips in the
+        # checkpoint. When redshift_fourier_bands == 0 the feature is DISABLED and
+        # byte-identical to the model without it (no scalar sliced, no concat).
+        self.redshift_fourier_bands = redshift_fourier_bands
+        self.redshift_mean = redshift_mean
+        self.redshift_std = redshift_std
+        if redshift_fourier_bands > 0:
+            # Periods span the STANDARDIZED redshift range (~[-4, +4] sigma). A
+            # 0.25..8.0 log-spaced bank resolves both broad (few-sigma) and fine
+            # (fraction-of-sigma) structure over the standardized scalar. Buffer,
+            # so old checkpoints restore their own frequencies on strict load.
+            redshift_periods = torch.logspace(
+                math.log10(0.25), math.log10(8.0), redshift_fourier_bands
+            )
+            self.register_buffer(
+                "redshift_freqs", 2.0 * math.pi / redshift_periods
+            )
+            # 2 * bands (sin + cos) + 1 standardized linear channel (a direct
+            # monotone level ramp, the primary distance-modulus signal).
+            redshift_extra = 2 * redshift_fourier_bands + 1
+        else:
+            redshift_extra = 0
+
         # Stored for the Fourier Dt read-head width (spatial path uses it too).
         self._dt_extra = dt_extra
+        # Stored so forward() knows how many trailing scalars to slice off x.
+        self._phase_extra = phase_extra
+        self._redshift_extra = redshift_extra
 
         if self.spatial_render:
             # Spatial-render path (Study 086): the conditioner and output_head are
@@ -904,7 +944,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # widens it) -- the pseudo-image the backbone consumes, or the pooled
             # summary fed straight to the head under bypass.
             self.conditioner = nn.Sequential(
-                nn.Linear(input_dim + dt_extra + phase_extra, hidden),
+                nn.Linear(
+                    input_dim + dt_extra + phase_extra + redshift_extra, hidden
+                ),
                 nn.GELU(),
                 nn.Linear(hidden, hidden),
                 nn.GELU(),
@@ -1014,6 +1056,42 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         angles = phase * self.phase_freqs.reshape(1, -1)  # [B, bands]
         mono = torch.log1p(phase.clamp_min(0.0))  # [B, 1], monotone in phase
         return torch.cat([torch.sin(angles), torch.cos(angles), mono], dim=1)
+
+    def _encode_redshift(
+        self, redshift: torch.Tensor, batch_size: int
+    ) -> torch.Tensor:
+        """Standardize then Fourier-encode the per-object redshift.
+
+        Like :meth:`_encode_phase`, but the raw scalar is first STANDARDIZED
+        ``(z - redshift_mean) / redshift_std`` because redshift lives in a tiny
+        range (~[0.001, 0.019]) that a day-scaled period bank cannot resolve.
+        The standardized value feeds both the sinusoidal bank and a trailing
+        LINEAR channel (not log1p): redshift is already signed/centered and the
+        distance-modulus level is monotone in it, so a plain linear ramp is the
+        natural non-periodic feature.
+
+        Args:
+            redshift (torch.Tensor): Raw redshift of shape [B] or [B, 1] (or
+                broadcastable). Ignored when the feature is disabled.
+            batch_size (int): Batch size B, used to size the disabled-path output.
+
+        Returns:
+            torch.Tensor: [B, 2 * redshift_fourier_bands + 1] when enabled, else
+            an empty [B, 0] tensor (so the concat is a no-op and the disabled
+            path is byte-identical to the model without the redshift feature).
+        """
+        if self.redshift_fourier_bands == 0:
+            return (
+                redshift.new_zeros((batch_size, 0))
+                if redshift is not None
+                else None
+            )
+
+        redshift = redshift.reshape(batch_size, 1)
+        # Standardize to ~unit scale so the period bank resolves the range.
+        z_std = (redshift - self.redshift_mean) / self.redshift_std
+        angles = z_std * self.redshift_freqs.reshape(1, -1)  # [B, bands]
+        return torch.cat([torch.sin(angles), torch.cos(angles), z_std], dim=1)
 
     def _band_anchor(self, x: torch.Tensor, Dt: torch.Tensor) -> torch.Tensor:
         """Per-band anchor from the windowed context, for delta mode.
@@ -1317,12 +1395,23 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # (which reshapes to [B, context_len, 3 + n_bands] and would break on the
         # appended scalar). When disabled, x has width input_dim and is used as-is
         # so the path is byte-identical to the model without the phase feature.
+        # Trailing scalars are appended by the builders in a FIXED order after the
+        # per-event block: phase first (if enabled), then redshift (if enabled).
+        # Slice them off by that order so any on/off combination lines up. When
+        # both are disabled x has width input_dim and is used as-is (byte-identical
+        # to the model without either feature).
+        x_events = x[:, : self.input_dim]
+        offset = self.input_dim
         if self.phase_fourier_bands > 0:
-            x_events = x[:, : self.input_dim]
-            phase_raw = x[:, self.input_dim : self.input_dim + 1]
+            phase_raw = x[:, offset : offset + 1]
+            offset += 1
         else:
-            x_events = x
             phase_raw = None
+        if self.redshift_fourier_bands > 0:
+            redshift_raw = x[:, offset : offset + 1]
+            offset += 1
+        else:
+            redshift_raw = None
 
         # Fourier Dt encoding for the trainable path ([B, 0] when disabled, so
         # both concats below are no-ops and match the legacy architecture).
@@ -1372,8 +1461,13 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         if phase_feat is None:
             phase_feat = x.new_zeros((B, 0))
 
+        # Redshift encoding ([B, 0] when disabled -> no-op concat).
+        redshift_feat = self._encode_redshift(redshift_raw, B)
+        if redshift_feat is None:
+            redshift_feat = x.new_zeros((B, 0))
+
         channel_vals = self.conditioner(
-            torch.cat([x_events, dt_feat, phase_feat], dim=1)
+            torch.cat([x_events, dt_feat, phase_feat, redshift_feat], dim=1)
         )  # [B, self.waist]
 
         if self.bypass_backbone:

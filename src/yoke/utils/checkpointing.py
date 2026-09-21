@@ -883,6 +883,12 @@ def load_direct_loderunner_checkpoint_9band(
         # conditioner first-layer (input_dim + dt_extra + phase_extra), so it
         # MUST match the training config for the strict load to succeed.
         phase_fourier_bands=checkpoint_data.get("phase_fourier_bands", 0),
+        # 0 for pre-123 checkpoints (no key) -> no redshift input. > 0 widens the
+        # conditioner first-layer (input_dim + dt_extra + phase_extra +
+        # redshift_extra), so it MUST match the training config for strict load.
+        redshift_fourier_bands=checkpoint_data.get("redshift_fourier_bands", 0),
+        redshift_mean=checkpoint_data.get("redshift_mean", 0.0142),
+        redshift_std=checkpoint_data.get("redshift_std", 0.00365),
         # False for legacy checkpoints (no key) -> the tile+global-pool path with
         # a conditioner/output_head. True (Study 086) drops those for a render +
         # gather + read_head, changing the trainable-module set, so it MUST match

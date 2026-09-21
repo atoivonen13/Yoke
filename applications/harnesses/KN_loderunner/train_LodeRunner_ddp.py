@@ -562,6 +562,32 @@ def main(args, rank, world_size, local_rank, device):
     # first-layer -> fresh study; round-trips via the checkpoint key.
     PHASE_FOURIER_BANDS = 10
 
+    # Per-object REDSHIFT conditioning (Study 123 -- the PRIMARY remaining lever).
+    # When > 0, the conditioner additionally receives a 2*REDSHIFT_FOURIER_BANDS + 1
+    # encoding of the object's source redshift (standardized inside the model, then
+    # sin/cos over log-spaced periods + a linear channel). Redshift is the distance-
+    # modulus / apparent-mag LEVEL knob: apparent mag = absolute mag + distance
+    # modulus, so feeding redshift lets the model deconvolve intrinsic luminosity
+    # from distance and constrain the late-time fade -- orthogonal info to the
+    # capacity/backbone/color levers, which all hit the floor. Targets the blue-
+    # band level/bias residual (u RMSE ~2.4 / bias ~-0.9, g ~-0.5) the color head
+    # could not fix. Redshift is read from injection_parameters in each .npz and
+    # delivered as a trailing scalar appended to x AFTER the phase scalar (fixed
+    # order [..., phase?, redshift?]); dataset gate append_redshift is set from
+    # this knob. Widens the conditioner first-layer -> fresh study; round-trips via
+    # the "redshift_fourier_bands" checkpoint key (default 0 -> old checkpoints
+    # strict-load unchanged). This run: ALWAYS-ON (every object carries exact z) =
+    # rung-1 ceiling probe ("is there ANY signal?") vs the 116 base. Optional-at-
+    # forecast (train-time dropout to a sentinel) is a deliberate follow-up once
+    # signal is confirmed. Requires window mode. 0 -> legacy (byte-identical).
+    REDSHIFT_FOURIER_BANDS = 8
+    # Standardization constants for redshift, from the rubin_ztf_10000 training set
+    # (n=10000: mean 0.01424, std 0.00365, range ~[0.0009, 0.0189]). Baked into the
+    # model buffers so the standardization round-trips in the checkpoint. Raw z is
+    # tiny, so a day-scaled Fourier bank cannot resolve it unstandardized.
+    REDSHIFT_MEAN = 0.01424
+    REDSHIFT_STD = 0.00365
+
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
     # in any band) instead of an absolute magnitude, so the forecast starts AT the
@@ -931,6 +957,9 @@ def main(args, rank, world_size, local_rank, device):
             color_anchored_head=COLOR_ANCHORED_HEAD,
             color_sed_rank=COLOR_SED_RANK,
             color_sed_dt_independent=COLOR_SED_DT_INDEPENDENT,
+            redshift_fourier_bands=REDSHIFT_FOURIER_BANDS,
+            redshift_mean=REDSHIFT_MEAN,
+            redshift_std=REDSHIFT_STD,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1149,6 +1178,7 @@ def main(args, rank, world_size, local_rank, device):
             data_glob=data_glob,
             object_ids=object_ids,
             append_phase=PHASE_FOURIER_BANDS > 0,
+            append_redshift=REDSHIFT_FOURIER_BANDS > 0,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1392,6 +1422,9 @@ def main(args, rank, world_size, local_rank, device):
                     "color_anchored_head": COLOR_ANCHORED_HEAD,
                     "color_sed_rank": COLOR_SED_RANK,
                     "color_sed_dt_independent": COLOR_SED_DT_INDEPENDENT,
+                    "redshift_fourier_bands": REDSHIFT_FOURIER_BANDS,
+                    "redshift_mean": REDSHIFT_MEAN,
+                    "redshift_std": REDSHIFT_STD,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None
