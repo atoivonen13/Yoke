@@ -125,6 +125,17 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 #119,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #120,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #121,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 122: LONGER RUN of study 116 (color-anchored SED-bottleneck head). Same
+# launch regime as the whole champion family (batch 5, TERMINAL_STEPS=50/WARMUP=20
+# cyclic schedule) with the SOLE change total_epochs 40->100 in
+# training_START.input. Config set in train_LodeRunner_ddp.py: COLOR_ANCHORED_HEAD
+# =True, COLOR_SED_RANK=2, COLOR_SED_DT_INDEPENDENT=False (the 116/117 Dt-dependent
+# code, NOT the 118 Dt-independent variant). This 116 run evaluated 1.3891 overall
+# (tied 111's 1.3800 inside seed ±0.02) WITH ztfg improved to RMSE 1.68 / bias
+# -0.48 -> the mechanism fired; longer training tests whether extra epochs firm up
+# the SED coupling and pull ztfg further without giving up overall parity. Schedule
+# stays cyclic (LR bounded [0.5,1.0]x anchor, full cosine cycle ~every 1.2 ep), NOT
+# the study-109 single-anneal terminal_steps trap, so adding epochs is safe.
 122,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 
