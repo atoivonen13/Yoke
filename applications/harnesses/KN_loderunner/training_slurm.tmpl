@@ -29,6 +29,7 @@
 # dataloader procs per rank.
 #SBATCH --cpus-per-task=16
 #SBATCH --mem-per-gpu=50G
+#SBATCH --exclude=se024
 #SBATCH --output=study<studyIDX>_epoch<epochIDX>.out
 #SBATCH --error=study<studyIDX>_epoch<epochIDX>.err
 
@@ -69,15 +70,15 @@ conda activate <YOKE_TORCH_ENV>
 # the dataloader workers (NUM_WORKERS per rank) alongside the OMP compute threads.
 export OMP_NUM_THREADS=8
 
-# Get start time
-export date00=`date`
-
 # Start the Code
 # Default Slurm per-task GPU binding is correct here: each task sees exactly one
 # GPU (as cuda:0), and setup_distributed() selects that device. Do NOT add
 # --gpu-bind=none -- it exposes partial GPU subsets per task and causes ranks to
 # collide on the same device ("Duplicate GPU detected" in NCCL).
 srun -vv --cpu-bind=verbose python -u <train_script> @<INPUTFILE>
+
+# Get start time
+export date00=`date`
 
 # Get end time and print to stdout
 export date01=`date`
