@@ -410,7 +410,7 @@ def main(args, rank, world_size, local_rank, device):
     # away like the reverted UL hinge. Fresh study: new head params, cannot load
     # champion-111 head weights (backbone still loads as always). See memory
     # kn-color-coupling-greenlit (color-correlation test: ztfg 1.9 -> 0.80 ceiling).
-    COLOR_ANCHORED_HEAD = False
+    COLOR_ANCHORED_HEAD = True
     COLOR_SED_RANK = 2
     # Study 118: when True the SED-code branch sees ONLY the pooled backbone
     # summary (not the Fourier Dt encoding), so the per-object color is fixed
