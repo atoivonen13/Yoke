@@ -865,6 +865,7 @@ def load_direct_loderunner_checkpoint_9band(
         trend_decay_anchor=checkpoint_data.get("trend_decay_anchor", False),
         trend_slope_k=checkpoint_data.get("trend_slope_k", 3),
         trend_max_offset=checkpoint_data.get("trend_max_offset", None),
+        trend_fade_only=checkpoint_data.get("trend_fade_only", False),
         # "mean" for legacy checkpoints (no key) -> global average pool, matching
         # the saved output_head first-layer shape so strict load succeeds.
         pool_mode=checkpoint_data.get("pool_mode", "mean"),

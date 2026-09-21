@@ -197,6 +197,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     trend_decay_anchor = ckpt.get("trend_decay_anchor", False)
     trend_slope_k = ckpt.get("trend_slope_k", 3)
     trend_max_offset = ckpt.get("trend_max_offset", None)
+    trend_fade_only = ckpt.get("trend_fade_only", False)
     # "mean" for legacy checkpoints (no key) -> global average pool, matching the
     # saved output_head first-layer shape. "meanstdmax" triples the pooled width,
     # so this MUST match the training config or the strict load fails.
@@ -239,6 +240,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("predict_delta:", predict_delta)
     print("trend_decay_anchor:", trend_decay_anchor)
     print("trend_max_offset:", trend_max_offset)
+    print("trend_fade_only:", trend_fade_only)
     print("pool_mode:", pool_mode)
     print("n_quantiles:", n_quantiles)
     print("bypass_backbone:", bypass_backbone)
@@ -265,6 +267,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         trend_decay_anchor=trend_decay_anchor,
         trend_slope_k=trend_slope_k,
         trend_max_offset=trend_max_offset,
+        trend_fade_only=trend_fade_only,
         pool_mode=pool_mode,
         n_quantiles=n_quantiles,
         bypass_backbone=bypass_backbone,

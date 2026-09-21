@@ -492,6 +492,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         trend_decay_anchor: bool = False,
         trend_slope_k: int = 3,
         trend_max_offset: float = None,
+        trend_fade_only: bool = False,
         pool_mode: str = "mean",
         n_quantiles: int = 1,
         bypass_backbone: bool = False,
@@ -572,6 +573,16 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 and the near-peak pre-peak "brightening" extrapolation of the raw slope.
                 When None (default) the offset is RAW (unclamped), matching the original
                 trend-anchor behavior. Adds NO parameters; round-trips via checkpoint.
+            trend_fade_only (bool): When True (and ``trend_decay_anchor`` is on), the
+                per-band local slope is clamped NON-NEGATIVE before extrapolation, so
+                only FADING bands (mag increasing = positive slope in z-score units)
+                lean into their trend; RISING (pre-peak, negative-slope) bands hold flat
+                at ``v_last`` instead. The 2-10 d forecast region is post-peak decline,
+                so a rising in-window band is pre-peak and its rise WILL turn over --
+                extrapolating it forward overshoots (predicts too bright). This clamp
+                keeps the useful fade extrapolation while suppressing the doomed-rise
+                overshoot. Default False (sign-agnostic raw/clamped slope). Adds NO
+                parameters; round-trips via checkpoint.
             pool_mode (str): How the backbone output image [B, C, H, W] is collapsed
                 to the per-channel summary the output head consumes. ``"mean"``
                 (default) is a global spatial average -- byte-identical to the legacy
@@ -732,6 +743,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         self.trend_decay_anchor = trend_decay_anchor
         self.trend_slope_k = trend_slope_k
         self.trend_max_offset = trend_max_offset
+        self.trend_fade_only = trend_fade_only
 
         # Spatial-render path config (Study 086). When enabled, forward() renders
         # x into a structured 2D field, runs the backbone, and gathers the
@@ -1108,6 +1120,17 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         slope = torch.where(
             (n >= 2.0) & (var > 1e-8), cov / var.clamp_min(1e-8), torch.zeros_like(cov)
         )  # [B, nb]; bands with < 2 valid events -> 0 (flat hold)
+
+        # Fade-only anchor: in the 2-10 d forecast region the light curve is
+        # post-peak, so a FADING band (mag increasing with time -> positive slope
+        # in z-score units, since values are per-band z-scored so brighter=lower)
+        # extrapolates correctly, while a RISING band (pre-peak, negative slope)
+        # would extrapolate a doomed continued brightening that turns over at peak.
+        # When trend_fade_only is set, zero the rising (negative) slopes so those
+        # bands hold flat (their last value) instead of leaning into a rise the
+        # forecast region never contains. Fading slopes pass through unchanged.
+        if self.trend_fade_only:
+            slope = slope.clamp_min(0.0)
 
         # Extrapolated offset in z-score units. Symmetrically clamp its MAGNITUDE when
         # trend_max_offset is set: a steep raw slope times a large Dt would otherwise
