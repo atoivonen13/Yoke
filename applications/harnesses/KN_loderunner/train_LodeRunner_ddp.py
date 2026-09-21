@@ -410,7 +410,7 @@ def main(args, rank, world_size, local_rank, device):
     # away like the reverted UL hinge. Fresh study: new head params, cannot load
     # champion-111 head weights (backbone still loads as always). See memory
     # kn-color-coupling-greenlit (color-correlation test: ztfg 1.9 -> 0.80 ceiling).
-    COLOR_ANCHORED_HEAD = True
+    COLOR_ANCHORED_HEAD = False
     COLOR_SED_RANK = 2
     # Study 118: when True the SED-code branch sees ONLY the pooled backbone
     # summary (not the Fourier Dt encoding), so the per-object color is fixed
@@ -576,7 +576,13 @@ def main(args, rank, world_size, local_rank, device):
     # persistence prior at init (forecast starts AT the last obs); absolute must
     # reconstruct the zero-point, so expect a larger lead-0 offset unless the head
     # learns it. Safe with TREND_DECAY_ANCHOR=False (the anchor requires delta).
-    PREDICT_DELTA = False
+    # Study 121: TRUE -- fade-only trend anchor (see TREND_FADE_ONLY below). The
+    # delta head is required for the anchor. NOTE: study 100 showed delta-off was
+    # the single biggest win (−0.316 @1000) because the flat/symmetric anchor
+    # pinned forecasts to the bright near-peak last obs → under-fade. 121 re-enables
+    # delta ONLY in combination with the fade-only clamp, whose whole purpose is to
+    # remove that pin for rising/flat bands while keeping the useful fade lean-in.
+    PREDICT_DELTA = True
 
     # Trend/decay anchor (delta head only). When True, the per-band anchor the
     # head predicts a residual on top of is no longer the flat last-observed value
@@ -616,7 +622,9 @@ def main(args, rank, world_size, local_rank, device):
     # analytic trend extrapolation vs the learned head: if 097 >> 1.7896 the anchor
     # is doing the forecasting; if ~equal the head learned it. Only the anchor flag
     # changes from 096 (sparse, waist 32, batch 5, rollout 1, horizon 5 / 2->7).
-    TREND_DECAY_ANCHOR = False
+    # Study 121: TRUE -- extrapolate the per-band anchor along its local slope
+    # (paired with TREND_FADE_ONLY below so only fading bands lean in).
+    TREND_DECAY_ANCHOR = True
     TREND_SLOPE_K = 3
 
     # Cap on the extrapolated anchor offset slope*Dt, in per-band z-score units
@@ -629,6 +637,20 @@ def main(args, rank, world_size, local_rank, device):
     # over-fast fade and the near-peak brightening the raw slope extrapolates. Set
     # None to disable the cap (raw slope).
     TREND_MAX_OFFSET = 1.0
+
+    # Fade-only trend anchor (requires TREND_DECAY_ANCHOR). When True the per-band
+    # local slope is clamped NON-NEGATIVE before extrapolation, so only FADING
+    # bands (mag increasing = positive slope in z-score units, since values are
+    # (mag-mean)/std, a monotone-increasing transform) lean into their trend;
+    # RISING (pre-peak, negative-slope) bands hold FLAT at v_last instead of
+    # extrapolating a rise. The 2->10 d forecast region is post-peak decline, so a
+    # rising in-window band is pre-peak: its rise WILL turn over at peak, and
+    # extrapolating it forward overshoots (predicts too bright) -- the exact
+    # under-fade the symmetric anchor caused (study 100: symmetric delta anchor was
+    # the −0.316 self-inflicted floor). This clamp keeps the useful fade lean-in
+    # (the whole reason to anchor) while removing the doomed-rise overshoot.
+    # Study 121: TRUE. Set False for the symmetric-slope behavior (the 096/097 era).
+    TREND_FADE_ONLY = True
 
     # Per-step weight EMA (Polyak averaging) decay for the trainable params. Read
     # from --ema_decay so it flows through the @input file and survives resubmits.
@@ -801,7 +823,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 119: A/B the SIGN -- 119a gamma=+1 (up-weight late, the "error grows
     # with lead" hypothesis), 119b gamma=-1 (down-weight late, matching the
     # rollout plateau-collapse evidence). Read @1000 vs champion 111 (1.3800).
-    DT_WEIGHT_GAMMA = +1.0
+    DT_WEIGHT_GAMMA = None
 
     optimizer_kwargs = {
         "lr": 1e-4,# 1e-4, #1e-5
@@ -895,6 +917,7 @@ def main(args, rank, world_size, local_rank, device):
             trend_decay_anchor=TREND_DECAY_ANCHOR,
             trend_slope_k=TREND_SLOPE_K,
             trend_max_offset=TREND_MAX_OFFSET,
+            trend_fade_only=TREND_FADE_ONLY,
             pool_mode=POOL_MODE,
             n_quantiles=N_QUANTILES,
             bypass_backbone=BYPASS_BACKBONE,
@@ -1352,6 +1375,7 @@ def main(args, rank, world_size, local_rank, device):
                     "trend_decay_anchor": TREND_DECAY_ANCHOR,
                     "trend_slope_k": TREND_SLOPE_K,
                     "trend_max_offset": TREND_MAX_OFFSET,
+                    "trend_fade_only": TREND_FADE_ONLY,
                     "pool_mode": POOL_MODE,
                     "n_quantiles": N_QUANTILES,
                     "quantile_levels": list(QUANTILE_LEVELS),
