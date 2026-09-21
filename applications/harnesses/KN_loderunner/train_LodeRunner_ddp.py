@@ -801,7 +801,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 119: A/B the SIGN -- 119a gamma=+1 (up-weight late, the "error grows
     # with lead" hypothesis), 119b gamma=-1 (down-weight late, matching the
     # rollout plateau-collapse evidence). Read @1000 vs champion 111 (1.3800).
-    DT_WEIGHT_GAMMA = -1.0
+    DT_WEIGHT_GAMMA = +1.0
 
     optimizer_kwargs = {
         "lr": 1e-4,# 1e-4, #1e-5
