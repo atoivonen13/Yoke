@@ -576,13 +576,12 @@ def main(args, rank, world_size, local_rank, device):
     # persistence prior at init (forecast starts AT the last obs); absolute must
     # reconstruct the zero-point, so expect a larger lead-0 offset unless the head
     # learns it. Safe with TREND_DECAY_ANCHOR=False (the anchor requires delta).
-    # Study 121: TRUE -- fade-only trend anchor (see TREND_FADE_ONLY below). The
-    # delta head is required for the anchor. NOTE: study 100 showed delta-off was
-    # the single biggest win (−0.316 @1000) because the flat/symmetric anchor
-    # pinned forecasts to the bright near-peak last obs → under-fade. 121 re-enables
-    # delta ONLY in combination with the fade-only clamp, whose whole purpose is to
-    # remove that pin for rising/flat bands while keeping the useful fade lean-in.
-    PREDICT_DELTA = True
+    # Study 100: FALSE -- delta-off was the single biggest win of the campaign
+    # (−0.316 @1000); the delta anchor pins forecasts to the bright near-peak last
+    # obs → chronic under-fade. Study 121 re-tested with the fade-only clamp and
+    # REGRESSED +0.28 (delta-pin damage on the 6 good bands swamped a real ztfg
+    # win). Reverted to the champion absolute head. See STUDY_LOG 121.
+    PREDICT_DELTA = False
 
     # Trend/decay anchor (delta head only). When True, the per-band anchor the
     # head predicts a residual on top of is no longer the flat last-observed value
@@ -622,9 +621,9 @@ def main(args, rank, world_size, local_rank, device):
     # analytic trend extrapolation vs the learned head: if 097 >> 1.7896 the anchor
     # is doing the forecasting; if ~equal the head learned it. Only the anchor flag
     # changes from 096 (sparse, waist 32, batch 5, rollout 1, horizon 5 / 2->7).
-    # Study 121: TRUE -- extrapolate the per-band anchor along its local slope
-    # (paired with TREND_FADE_ONLY below so only fading bands lean in).
-    TREND_DECAY_ANCHOR = True
+    # Study 097/121: FALSE -- the trend anchor (symmetric OR fade-only) regressed;
+    # champion uses no anchor. Fade-only variant kept in code (TREND_FADE_ONLY).
+    TREND_DECAY_ANCHOR = False
     TREND_SLOPE_K = 3
 
     # Cap on the extrapolated anchor offset slope*Dt, in per-band z-score units
@@ -649,8 +648,9 @@ def main(args, rank, world_size, local_rank, device):
     # under-fade the symmetric anchor caused (study 100: symmetric delta anchor was
     # the −0.316 self-inflicted floor). This clamp keeps the useful fade lean-in
     # (the whole reason to anchor) while removing the doomed-rise overshoot.
-    # Study 121: TRUE. Set False for the symmetric-slope behavior (the 096/097 era).
-    TREND_FADE_ONLY = True
+    # Study 121: tested TRUE, REGRESSED +0.28 (see STUDY_LOG). Reverted; only
+    # active when TREND_DECAY_ANCHOR is also on (currently off).
+    TREND_FADE_ONLY = False
 
     # Per-step weight EMA (Polyak averaging) decay for the trainable params. Read
     # from --ema_decay so it flows through the @input file and survives resubmits.

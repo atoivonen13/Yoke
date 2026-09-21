@@ -94,14 +94,25 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # train_LodeRunner_ddp.py at launch:
 #   86 = SPATIAL_RENDER=True,  BYPASS_BACKBONE=False (render + frozen backbone)
 #   87 = SPATIAL_RENDER=False, BYPASS_BACKBONE=True  (bypass MLP = 080 path)
-86,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#86,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #87,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #88,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #89,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #90,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #91,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #92,yoke311,1,4,128,1,1,9,1,2,2,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-93,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#93,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 122: LONGER RUN of champion 111. Exact copy of row 93 (champion 111's
+# launch config: batch 5, TERMINAL_STEPS=50/WARMUP=20 cyclic schedule) with the
+# SOLE change being total_epochs 40->100 in training_START.input. The schedule
+# stays cyclic (terminal_steps=50, warmup=20, 50 batches/epoch => a full cosine
+# cycle every ~1.2 epochs, LR bounded in [0.5,1.0]x anchor). This is NOT the
+# study-109 terminal_steps trap: that trap only bites a single-anneal schedule
+# (num_cycles=0.5 with terminal_steps >= run length) where LR climbs back past
+# terminal_steps. Here LR already oscillates in a bounded band for the whole run,
+# so adding epochs just adds identical cycles. Clean single-variable "more
+# epochs" test: validation was still descending at ep40 under this exact schedule.
+122,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 
 
