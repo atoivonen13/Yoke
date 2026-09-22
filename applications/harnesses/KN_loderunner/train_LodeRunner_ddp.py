@@ -580,13 +580,36 @@ def main(args, rank, world_size, local_rank, device):
     # rung-1 ceiling probe ("is there ANY signal?") vs the 116 base. Optional-at-
     # forecast (train-time dropout to a sentinel) is a deliberate follow-up once
     # signal is confirmed. Requires window mode. 0 -> legacy (byte-identical).
-    REDSHIFT_FOURIER_BANDS = 8
+    #
+    # Study 124 (this Fourier conditioner path, ALWAYS-ON) FAILED: 1.2756 @1000 =
+    # +0.024 vs champion 123 (1.2521, a no-op at the seed floor) AND the shared
+    # under-fade bias got WORSE (ztfg -0.73->-1.00, u -0.64->-0.93). Routed through
+    # the pooled waist alongside every other scalar, z never acts as a level.
+    # -> Study 125 turns the Fourier path OFF and instead uses REDSHIFT_PIVOT_DIRECT.
+    REDSHIFT_FOURIER_BANDS = 0
     # Standardization constants for redshift, from the rubin_ztf_10000 training set
     # (n=10000: mean 0.01424, std 0.00365, range ~[0.0009, 0.0189]). Baked into the
     # model buffers so the standardization round-trips in the checkpoint. Raw z is
-    # tiny, so a day-scaled Fourier bank cannot resolve it unstandardized.
+    # tiny, so a day-scaled Fourier bank cannot resolve it unstandardized. Used by
+    # BOTH the Fourier path and the pivot-direct level term (which standardizes z
+    # before scaling it into the pivot).
     REDSHIFT_MEAN = 0.01424
     REDSHIFT_STD = 0.00365
+
+    # Pivot-direct redshift (Study 125 -- pre-registered escalation after the
+    # conditioner path died in 124). Instead of routing z through the pooled
+    # conditioner waist, feed STANDARDIZED z straight into the color head's pivot
+    # as an additive, band-uniform level term: m_ref <- m_ref + w_z * z_std, with
+    # w_z a single learned scalar (init 0 -> byte-identical to the 123 champion at
+    # init). Distance modulus is a pure, band-shared level offset -- exactly what
+    # the pivot m_ref represents -- so this is the minimal, structurally-forced
+    # delivery path the conditioner could not provide. Requires COLOR_ANCHORED_HEAD
+    # and window mode; runs WITH the Fourier path off (the raw z scalar still
+    # reaches the model because append_redshift fires on either feature). This is
+    # the last redshift wiring before the thread closes: if the shared under-fade
+    # bias still does not move toward 0, the level residual is not redshift-
+    # addressable via this architecture. 0/False -> legacy (byte-identical).
+    REDSHIFT_PIVOT_DIRECT = True
 
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
@@ -960,6 +983,7 @@ def main(args, rank, world_size, local_rank, device):
             redshift_fourier_bands=REDSHIFT_FOURIER_BANDS,
             redshift_mean=REDSHIFT_MEAN,
             redshift_std=REDSHIFT_STD,
+            redshift_pivot_direct=REDSHIFT_PIVOT_DIRECT,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1178,7 +1202,7 @@ def main(args, rank, world_size, local_rank, device):
             data_glob=data_glob,
             object_ids=object_ids,
             append_phase=PHASE_FOURIER_BANDS > 0,
-            append_redshift=REDSHIFT_FOURIER_BANDS > 0,
+            append_redshift=REDSHIFT_FOURIER_BANDS > 0 or REDSHIFT_PIVOT_DIRECT,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1425,6 +1449,7 @@ def main(args, rank, world_size, local_rank, device):
                     "redshift_fourier_bands": REDSHIFT_FOURIER_BANDS,
                     "redshift_mean": REDSHIFT_MEAN,
                     "redshift_std": REDSHIFT_STD,
+                    "redshift_pivot_direct": REDSHIFT_PIVOT_DIRECT,
                     "ema_decay": EMA_DECAY,
                     "ema_state_dict": (
                         ema.state_dict() if ema is not None else None

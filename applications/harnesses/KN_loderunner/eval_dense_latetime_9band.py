@@ -305,6 +305,9 @@ def _rollout_scored(
                 upper_limit_channel=ul_channel,
                 redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
                 redshift=obj_redshift,
+                redshift_pivot_direct=getattr(
+                    model, "redshift_pivot_direct", False
+                ),
             )
             # Lead time from the last FED event (the running context tip).
             dt = float(target_t[k]) - float(ctx_t[-1])
@@ -466,6 +469,7 @@ def eval_object(
         upper_limit_channel=ul_channel,
         redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
         redshift=r_z,
+        redshift_pivot_direct=getattr(model, "redshift_pivot_direct", False),
     )
 
     # Score each late-time dense point at its true lead time from the last
