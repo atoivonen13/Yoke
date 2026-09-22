@@ -136,21 +136,40 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # the SED coupling and pull ztfg further without giving up overall parity. Schedule
 # stays cyclic (LR bounded [0.5,1.0]x anchor, full cosine cycle ~every 1.2 ep), NOT
 # the study-109 single-anneal terminal_steps trap, so adding epochs is safe.
-#122,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 123: REDSHIFT as a conditioning scalar (the PRIMARY remaining lever;
-# memory kn-redshift-feature-idea). Built ON the 116 color-anchored SED head
-# (COLOR_ANCHORED_HEAD=True, COLOR_SED_RANK=2, COLOR_SED_DT_INDEPENDENT=False),
-# adding REDSHIFT_FOURIER_BANDS=8 (REDSHIFT_MEAN=0.01424, STD=0.00365) so the
-# distance-modulus LEVEL knob reaches the pivot through the conditioner. Redshift
-# is ALWAYS-ON here (train + forecast); optional-at-forecast via train-time dropout
-# is a deferred follow-up. Same launch regime as the champion family (batch 5,
-# TERMINAL_STEPS=50/WARMUP=20 cyclic schedule). Rung-1 CEILING PROBE: read @1000
-# (seed noise ±0.02) vs the 116 baseline (1.3891 overall, ztfg RMSE 1.68). Fresh
-# train (new conditioner first-layer width can't load 116 head weights; backbone
-# still loads). Read criteria: (1) overall late RMSE beats 116/111; (2) ztfg falls
-# below 1.68 (the level residual is what redshift should fix); (3) good bands not
-# regressed. Redshift IS passed at forecast (eval reads it per-object from
-# injection_parameters), so the @1000 eval directly measures the always-on ceiling.
-123,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 123 (ran as runs/study_123): the LONGER RUN of study 116 above (100 epochs,
+# color-anchored SED head, NO redshift). RESULT: NEW CHAMPION, 1.2521 @1000 (-0.13
+# vs 116 1.3891 and 111 1.3800) -> the extra epochs firmed the SED coupling AND
+# pulled the whole curve down. Now the baseline redshift (124) must beat.
+#123,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 124: REDSHIFT as a conditioning scalar (the PRIMARY remaining lever;
+# memory kn-redshift-feature-idea). Built ON the study-123 recipe: 116 color-
+# anchored SED head (COLOR_ANCHORED_HEAD=True, COLOR_SED_RANK=2,
+# COLOR_SED_DT_INDEPENDENT=False) at 100 epochs, adding REDSHIFT_FOURIER_BANDS=8
+# (REDSHIFT_MEAN=0.01424, STD=0.00365) so the distance-modulus LEVEL knob reaches
+# the pivot through the conditioner. Redshift is ALWAYS-ON here (train + forecast);
+# optional-at-forecast via train-time dropout is a deferred follow-up. Same launch
+# regime as the champion family (batch 5, TERMINAL_STEPS=50/WARMUP=20 cyclic) with
+# total_epochs=100 in training_START.input (match study 123). Read @1000 (seed
+# ±0.02) vs the study-123 CHAMPION (1.2521 overall, ztfg RMSE 1.81 / bias -0.73).
+# Fresh train (new conditioner first-layer width can't load 123 head weights;
+# backbone still loads). Read criteria: (1) overall late RMSE beats 1.2521; (2) ztfg
+# bias -0.73 toward 0 (the level residual redshift should fix); (3) the now-uniform
+# negative under-fade bias across bands (u -0.64, i -0.33, z -0.34, ztfi -0.30)
+# lifts toward 0 -- the distance-modulus level is exactly this shared offset.
+# Redshift IS passed at forecast (eval reads it per-object from injection_parameters),
+# so the @1000 eval directly measures the always-on ceiling.
+124,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 125: PIVOT-DIRECT redshift (pre-registered escalation after 124 died).
+# Fourier conditioner path OFF (REDSHIFT_FOURIER_BANDS=0); instead REDSHIFT_PIVOT_DIRECT
+# =True feeds standardized z straight into the color head's pivot as an additive,
+# band-uniform level term m_ref <- m_ref + w_z*z_std (w_z a single learned scalar,
+# init 0 -> == champion 123 at init). Distance modulus is a pure shared-level offset,
+# exactly what m_ref represents, so this is the structurally-forced delivery the
+# pooled conditioner (124) could not provide. Built on the 123 champion recipe, 100 ep.
+# READ @1000: (1) overall < 123's 1.2521? (2) does the UNIFORM negative bias
+# (ztfg -0.73, u -0.64, ...) move toward 0 -- the mechanism target? (3) good bands
+# not regressed. This is the LAST redshift wiring; if the shared bias still won't move,
+# the level residual is not redshift-addressable via this architecture -> close thread.
+125,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 

@@ -234,6 +234,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     redshift_fourier_bands = ckpt.get("redshift_fourier_bands", 0)
     redshift_mean = ckpt.get("redshift_mean", 0.0142)
     redshift_std = ckpt.get("redshift_std", 0.00365)
+    # Study 125: pivot-direct redshift level term. False for pre-125 checkpoints.
+    redshift_pivot_direct = ckpt.get("redshift_pivot_direct", False)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -253,6 +255,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
     print("redshift_fourier_bands:", redshift_fourier_bands)
+    print("redshift_pivot_direct:", redshift_pivot_direct)
     print("spatial_render:", spatial_render)
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
@@ -283,6 +286,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         redshift_fourier_bands=redshift_fourier_bands,
         redshift_mean=redshift_mean,
         redshift_std=redshift_std,
+        redshift_pivot_direct=redshift_pivot_direct,
         spatial_render=spatial_render,
         render_context_days=render_context_days,
         render_horizon_days=render_horizon_days,
@@ -436,6 +440,7 @@ def build_context_input(
     upper_limit_channel=False,
     redshift_fourier_bands=0,
     redshift=None,
+    redshift_pivot_direct=False,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -506,11 +511,13 @@ def build_context_input(
 
     # Study 123: append raw physical redshift as the SECOND trailing scalar
     # (fixed order [events, phase, redshift]), matching _getitem_window. The
-    # model standardizes it internally, so pass it un-normalized here.
-    if redshift_fourier_bands > 0:
+    # model standardizes it internally, so pass it un-normalized here. Study 125:
+    # the pivot-direct level term consumes the SAME trailing scalar with the
+    # Fourier bank off, so append whenever EITHER redshift feature is active.
+    if redshift_fourier_bands > 0 or redshift_pivot_direct:
         if redshift is None:
             raise ValueError(
-                "redshift is required when redshift_fourier_bands > 0; pass "
+                "redshift is required when a redshift feature is enabled; pass "
                 "the object's physical redshift (dataset emits it raw)."
             )
         z = np.float32(redshift)
@@ -583,6 +590,7 @@ def forecast_curve(
         upper_limit_channel=ul_channel,
         redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
         redshift=redshift,
+        redshift_pivot_direct=getattr(model, "redshift_pivot_direct", False),
     )
 
     last_t = float(times[-1])

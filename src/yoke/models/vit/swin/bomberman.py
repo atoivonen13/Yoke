@@ -509,6 +509,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         redshift_fourier_bands: int = 0,
         redshift_mean: float = 0.0142,
         redshift_std: float = 0.00365,
+        redshift_pivot_direct: bool = False,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -735,6 +736,15 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     f"color_sed_rank must be >= 1, got {color_sed_rank}."
                 )
 
+        if redshift_pivot_direct and not color_anchored_head:
+            # Pivot-direct redshift adds an additive level term to m_ref, the
+            # color-anchored head's shared pivot; there is no such pivot in the
+            # flat legacy head, so the flag is only meaningful with it on.
+            raise ValueError(
+                "redshift_pivot_direct=True requires color_anchored_head=True "
+                "(the additive level term acts on the color head's pivot m_ref)."
+            )
+
         self.backbone = backbone
         self.context_len = context_len
         self.n_bands = n_bands
@@ -898,6 +908,20 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         self.redshift_fourier_bands = redshift_fourier_bands
         self.redshift_mean = redshift_mean
         self.redshift_std = redshift_std
+        # Pivot-direct redshift (Study 125). The conditioner-path Fourier redshift
+        # (Study 124) failed: routed through the pooled waist alongside every other
+        # scalar, z did not act as a level and the shared under-fade bias got WORSE.
+        # This instead feeds STANDARDIZED z straight into the color head's pivot as
+        # an additive, band-uniform level term: m_ref <- m_ref + w_z * z_std, where
+        # w_z is a single learned scalar (init 0 -> byte-identical to the 123
+        # champion at init). Distance modulus is a pure level offset shared by all
+        # bands, which is exactly what the pivot represents, so this is the minimal,
+        # structurally-forced delivery path. Can run WITHOUT the Fourier conditioner
+        # path (redshift_fourier_bands == 0); the raw z scalar still reaches
+        # forward() because the slice/append gate below fires on either feature.
+        self.redshift_pivot_direct = redshift_pivot_direct
+        if redshift_pivot_direct:
+            self.redshift_pivot_weight = nn.Parameter(torch.zeros(1))
         if redshift_fourier_bands > 0:
             # Periods span the STANDARDIZED redshift range (~[-4, +4] sigma). A
             # 0.25..8.0 log-spaced bank resolves both broad (few-sigma) and fine
@@ -1407,7 +1431,10 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             offset += 1
         else:
             phase_raw = None
-        if self.redshift_fourier_bands > 0:
+        # Redshift scalar is appended (and therefore sliced) when EITHER the
+        # Fourier conditioner path (Study 124) or the pivot-direct level term
+        # (Study 125) is active; the two share the single trailing z scalar.
+        if self.redshift_fourier_bands > 0 or self.redshift_pivot_direct:
             redshift_raw = x[:, offset : offset + 1]
             offset += 1
         else:
@@ -1533,6 +1560,16 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # lives in a k-dim subspace, so a band with no supervision inherits
             # the pivot + the code inferred from the bands that do have data.
             m_ref = self.ref_head(head_in)  # [B, n_quantiles]
+            # Pivot-direct redshift level term (Study 125): a single learned
+            # scalar times the STANDARDIZED redshift, added uniformly to the
+            # pivot. Applied AFTER the monotone construction below so it shifts
+            # every quantile by the same amount (a pure level offset, the
+            # distance-modulus form) without distorting the quantile spread or
+            # the colors. Computed here as [B, 1]; init w_z = 0 -> no-op at start.
+            z_level = None
+            if self.redshift_pivot_direct and redshift_raw is not None:
+                z_std = (redshift_raw - self.redshift_mean) / self.redshift_std
+                z_level = self.redshift_pivot_weight * z_std  # [B, 1]
             # The SED code is Dt-independent (Study 118) when the flag is set: it
             # reads only the pooled backbone summary, so the per-object color is
             # constant across lead time and the fade lives entirely in the pivot.
@@ -1547,6 +1584,8 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
             if self.n_quantiles == 1:
                 # Point head: pivot [B, 1] + colors [B, n_bands] -> [B, n_bands].
+                if z_level is not None:
+                    m_ref = m_ref + z_level  # uniform level shift on the pivot
                 pred = m_ref + colors  # [B, n_bands]
                 if self.predict_delta:
                     pred = pred + self._band_anchor(x_events, Dt)
@@ -1559,6 +1598,10 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             base = m_ref[:, :1]  # [B, 1] -- lowest quantile of the pivot
             gaps = nn.functional.softplus(m_ref[:, 1:])  # [B, n_quantiles-1]
             m_ref = torch.cat([base, base + torch.cumsum(gaps, dim=1)], dim=1)
+            if z_level is not None:
+                # Shift every quantile by the same z level (pure distance-modulus
+                # offset); monotonicity is preserved since it is constant in q.
+                m_ref = m_ref + z_level  # [B, n_quantiles] + [B, 1] broadcast
             # [B, n_quantiles, 1] + [B, 1, n_bands] -> [B, n_quantiles, n_bands]
             pred = m_ref.unsqueeze(2) + colors.unsqueeze(1)
             if self.predict_delta:

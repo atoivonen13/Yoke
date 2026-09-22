@@ -269,6 +269,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     redshift_fourier_bands = ckpt.get("redshift_fourier_bands", 0)
     redshift_mean = ckpt.get("redshift_mean", 0.0142)
     redshift_std = ckpt.get("redshift_std", 0.00365)
+    # Study 125: pivot-direct redshift level term. False for pre-125 checkpoints.
+    redshift_pivot_direct = ckpt.get("redshift_pivot_direct", False)
 
     print("Loaded checkpoint:", ckpt_path)
     print("model_class:", ckpt.get("model_class", "unknown"))
@@ -292,6 +294,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("bypass_channels:", bypass_channels)
     print("phase_fourier_bands:", phase_fourier_bands)
     print("redshift_fourier_bands:", redshift_fourier_bands)
+    print("redshift_pivot_direct:", redshift_pivot_direct)
     print("spatial_render:", spatial_render)
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
@@ -322,6 +325,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         redshift_fourier_bands=redshift_fourier_bands,
         redshift_mean=redshift_mean,
         redshift_std=redshift_std,
+        redshift_pivot_direct=redshift_pivot_direct,
         spatial_render=spatial_render,
         render_context_days=render_context_days,
         render_horizon_days=render_horizon_days,
@@ -430,6 +434,7 @@ def build_context_input(
     upper_limit_channel=False,
     redshift_fourier_bands=0,
     redshift=None,
+    redshift_pivot_direct=False,
 ):
     """Build the flattened per-event context input for the model.
 
@@ -512,8 +517,10 @@ def build_context_input(
 
     # Study 123: append raw physical redshift as the SECOND trailing scalar
     # (fixed order [events, phase, redshift]), matching _getitem_window. The
-    # model standardizes it internally, so pass it un-normalized here.
-    if redshift_fourier_bands > 0:
+    # model standardizes it internally, so pass it un-normalized here. Study 125:
+    # the pivot-direct level term consumes the SAME trailing scalar with the
+    # Fourier bank off, so append whenever EITHER redshift feature is active.
+    if redshift_fourier_bands > 0 or redshift_pivot_direct:
         if redshift is None:
             raise ValueError(
                 "redshift is required when redshift_fourier_bands > 0; pass "
@@ -658,6 +665,7 @@ def get_rollout_from_stream(
     phase_fourier_bands = getattr(model, "phase_fourier_bands", 0)
     phase0 = 0.0
     redshift_fourier_bands = getattr(model, "redshift_fourier_bands", 0)
+    redshift_pivot_direct = getattr(model, "redshift_pivot_direct", False)
 
     # Number of true events used to warm-start the running context. In window
     # mode we seed up to max_context_len so the trailing-W-days selection has
@@ -719,6 +727,7 @@ def get_rollout_from_stream(
                 phase0=phase0,
                 redshift_fourier_bands=redshift_fourier_bands,
                 redshift=obj_redshift,
+                redshift_pivot_direct=redshift_pivot_direct,
             )
 
             # Lead time from the last context event to the next true event.
@@ -824,6 +833,7 @@ def get_rollout_from_stream(
             phase0=phase0,
             redshift_fourier_bands=redshift_fourier_bands,
             redshift=obj_redshift,
+            redshift_pivot_direct=redshift_pivot_direct,
         )
 
         last_ctx_t_rel = float(win_t0[-1]) - t_ref
@@ -1184,7 +1194,10 @@ def main():
         context_len=context_len,
         context_window_days=context_window_days,
         max_context_len=max_context_len if window_mode else None,
-        append_redshift=getattr(model, "redshift_fourier_bands", 0) > 0,
+        append_redshift=(
+            getattr(model, "redshift_fourier_bands", 0) > 0
+            or getattr(model, "redshift_pivot_direct", False)
+        ),
     )
 
     print("Dataset files with events:", len(eval_dataset.events_per_file))

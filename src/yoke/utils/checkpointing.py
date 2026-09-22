@@ -889,6 +889,10 @@ def load_direct_loderunner_checkpoint_9band(
         redshift_fourier_bands=checkpoint_data.get("redshift_fourier_bands", 0),
         redshift_mean=checkpoint_data.get("redshift_mean", 0.0142),
         redshift_std=checkpoint_data.get("redshift_std", 0.00365),
+        # False for pre-125 checkpoints (no key). True (Study 125) adds the learned
+        # redshift_pivot_weight scalar to the color head, so it MUST match training
+        # for the strict load to succeed.
+        redshift_pivot_direct=checkpoint_data.get("redshift_pivot_direct", False),
         # False for legacy checkpoints (no key) -> the tile+global-pool path with
         # a conditioner/output_head. True (Study 086) drops those for a render +
         # gather + read_head, changing the trainable-module set, so it MUST match
