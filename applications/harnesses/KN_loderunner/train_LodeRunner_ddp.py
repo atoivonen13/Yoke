@@ -420,6 +420,19 @@ def main(args, rank, world_size, local_rank, device):
     # Forcing one per-object color makes the fade flow through the shared pivot,
     # which the deep bands' targets pin. Sole change vs 117.
     COLOR_SED_DT_INDEPENDENT = False
+    # Study 126: hard-tie the ztf bands' SED-slope rows to their near-identical
+    # Rubin twins (ztfg<->ps1_g, ztfr<->ps1_r, ztfi<->ps1_i). The dense plots for
+    # 125 show ztfg/r/i plateau ~2-8 mag too bright at late times while their
+    # Rubin twins (nearly the same passband) track the fade correctly -- the ztf
+    # bands lose their faint detections to ZTF's ~21 floor, so training never
+    # supervises the faint ztf tail and its free W_band slope row decouples. The
+    # tie aliases W_band[ztf] := W_band[twin] so color[ztf] = color[twin] +
+    # (b_ztf - b_twin): the ztf band inherits the twin's fade shape plus a free
+    # per-band zero-point (b_band stays free). Architectural, ztf-specific (not a
+    # global lever). Sole change vs 125. See memory kn-anchor-wrong-granularity
+    # (faint-ztfg fix must be ztfg-ONLY per-band, not a global head/anchor/loss
+    # lever) -- this is exactly per-band.
+    COLOR_ZTF_TIE_TWINS = True
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
@@ -980,6 +993,7 @@ def main(args, rank, world_size, local_rank, device):
             color_anchored_head=COLOR_ANCHORED_HEAD,
             color_sed_rank=COLOR_SED_RANK,
             color_sed_dt_independent=COLOR_SED_DT_INDEPENDENT,
+            color_ztf_tie_twins=COLOR_ZTF_TIE_TWINS,
             redshift_fourier_bands=REDSHIFT_FOURIER_BANDS,
             redshift_mean=REDSHIFT_MEAN,
             redshift_std=REDSHIFT_STD,
@@ -1446,6 +1460,7 @@ def main(args, rank, world_size, local_rank, device):
                     "color_anchored_head": COLOR_ANCHORED_HEAD,
                     "color_sed_rank": COLOR_SED_RANK,
                     "color_sed_dt_independent": COLOR_SED_DT_INDEPENDENT,
+                    "color_ztf_tie_twins": COLOR_ZTF_TIE_TWINS,
                     "redshift_fourier_bands": REDSHIFT_FOURIER_BANDS,
                     "redshift_mean": REDSHIFT_MEAN,
                     "redshift_std": REDSHIFT_STD,

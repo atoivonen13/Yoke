@@ -48,6 +48,7 @@ from yoke.datasets.kilonova_dataset import (
     NINE_BAND_KEYS,
     load_or_compute_band_normalization,
 )
+from yoke.utils.checkpointing import _epoch_median_val_losses
 
 # Reuse the model loader and window/input helpers from the rollout diagnostics
 # script that lives alongside this one. These harness scripts are run directly
@@ -81,6 +82,51 @@ DROP_UPPER_LIMITS = True  # matches training for the realistic (context) stream
 def study_tag(study: int) -> str:
     """Zero-padded study id used in default paths."""
     return f"{int(study):03d}"
+
+
+def resolve_best_checkpoint(run_dir: str, tag: str, max_epoch: int) -> tuple:
+    """Pick the lowest-median-val-loss checkpoint at or below ``max_epoch``.
+
+    The training loop writes a per-epoch validation record CSV
+    (``validation_study{tag}_epoch{NNNN}.csv``, columns ``epoch, batch, loss``)
+    and a per-epoch checkpoint (``study{tag}_modelState_epoch{NNNN}.pth``) in the
+    run directory. Rather than blindly loading a fixed epoch, this ranks every
+    epoch that (a) has a readable val record, (b) is ``<= max_epoch``, and (c) has
+    a checkpoint on disk, by MEDIAN validation loss -- the same statistic
+    ``update_best_checkpoint`` uses -- and returns the best one.
+
+    Validation loss is the trained objective and a proxy (not identical) for the
+    late-time RMSE the studies are ranked on, so this picks the best-generalizing
+    epoch within the requested budget instead of the last/arbitrary one. The
+    ``<= max_epoch`` cap lets a caller reproduce an earlier read or bound the
+    search to a finished-training horizon.
+
+    Args:
+        run_dir (str): Directory holding the checkpoints and val record CSVs.
+        tag (str): Zero-padded study id (e.g. ``"125"``).
+        max_epoch (int): Only consider epochs at or below this value.
+
+    Returns:
+        tuple: ``(best_epoch, best_loss, best_ckpt_path)``, or
+        ``(None, None, None)`` when no val record + checkpoint pair qualifies (the
+        caller then falls back to the fixed-epoch path).
+    """
+    val_glob = os.path.join(run_dir, f"validation_study{tag}_epoch*.csv")
+    med = _epoch_median_val_losses(val_glob)
+    if not med:
+        return None, None, None
+
+    best_epoch, best_loss, best_path = None, None, None
+    for ep in sorted(med):
+        if ep > max_epoch:
+            continue
+        ckpt = os.path.join(run_dir, f"study{tag}_modelState_epoch{ep:04d}.pth")
+        if not os.path.exists(ckpt):
+            continue
+        if best_loss is None or med[ep] < best_loss:
+            best_epoch, best_loss, best_path = ep, med[ep], ckpt
+
+    return best_epoch, best_loss, best_path
 
 
 def _stem(path: str) -> str:
@@ -663,7 +709,22 @@ def get_args():
     """Parse command-line arguments."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--study", type=int, default=24)
-    p.add_argument("--epoch", type=int, default=500)
+    p.add_argument(
+        "--epoch",
+        type=int,
+        default=500,
+        help="Epoch BUDGET. When --ckpt is not given, the eval loads the "
+        "lowest-median-val-loss checkpoint at or below this epoch (see "
+        "resolve_best_checkpoint), NOT necessarily this exact epoch. Pass "
+        "--exact_epoch to force the literal epoch instead.",
+    )
+    p.add_argument(
+        "--exact_epoch",
+        action="store_true",
+        help="Load exactly --epoch's checkpoint (the legacy behavior) instead "
+        "of the best val-loss checkpoint at or below it. Ignored when --ckpt is "
+        "given explicitly.",
+    )
     p.add_argument("--ckpt", type=str, default=None)
     p.add_argument(
         "--use_ema",
@@ -785,9 +846,32 @@ def main():
     args = get_args()
     tag = study_tag(args.study)
     if args.ckpt is None:
-        args.ckpt = (
-            f"runs/study_{tag}/study{tag}_modelState_epoch{args.epoch:04d}.pth"
+        run_dir = f"runs/study_{tag}"
+        fixed_ckpt = os.path.join(
+            run_dir, f"study{tag}_modelState_epoch{args.epoch:04d}.pth"
         )
+        if args.exact_epoch:
+            args.ckpt = fixed_ckpt
+            print(f"Using exact epoch {args.epoch}: {args.ckpt}")
+        else:
+            best_epoch, best_loss, best_path = resolve_best_checkpoint(
+                run_dir, tag, args.epoch
+            )
+            if best_path is not None:
+                args.ckpt = best_path
+                print(
+                    f"Best val-loss checkpoint at or below epoch {args.epoch}: "
+                    f"epoch {best_epoch} (median val loss {best_loss:.6f}) -> "
+                    f"{args.ckpt}"
+                )
+            else:
+                # No usable val records (e.g. records not co-located, or an old
+                # run): fall back to the literal epoch so the eval still runs.
+                args.ckpt = fixed_ckpt
+                print(
+                    f"No val records found under {run_dir}; falling back to the "
+                    f"exact epoch {args.epoch}: {args.ckpt}"
+                )
     if args.outdir is None:
         args.outdir = f"runs/study_{tag}/dense_latetime_eval_9band"
     os.makedirs(args.outdir, exist_ok=True)
