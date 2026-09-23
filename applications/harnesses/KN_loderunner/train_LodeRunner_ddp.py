@@ -432,7 +432,18 @@ def main(args, rank, world_size, local_rank, device):
     # global lever). Sole change vs 125. See memory kn-anchor-wrong-granularity
     # (faint-ztfg fix must be ztfg-ONLY per-band, not a global head/anchor/loss
     # lever) -- this is exactly per-band.
-    COLOR_ZTF_TIE_TWINS = True
+    #
+    # STUDY 126 RESULT: FAILED, reverted to False. @1000 = 1.3445 (+0.082 vs 125's
+    # 1.2628, +0.092 vs 123 champion) -- a broad REGRESSION. ztfg (the target)
+    # barely moved (RMSE 1.78->1.75) while 8/9 bands got WORSE, INCLUDING the
+    # three twins g/r/i (g 1.60->1.70, i 1.10->1.21, r 1.39->1.42). Mechanism
+    # backfired: aliasing W_band[ztf]:=W_band[twin] made the twin's slope row take
+    # gradient from BOTH bands, which are supervised on different phase ranges (ztf
+    # mostly early, Rubin keeps late) -> the shared row averages the two and fits
+    # neither, corrupting the calibrated twin instead of lifting ztfg to it. Third
+    # confirmation that faint-ztfg resists structural sharing (117/118/126 all die
+    # on the same trade). Machinery kept (default False, harmless).
+    COLOR_ZTF_TIE_TWINS = False
 
     # Waist width under bypass (Lever 3, capacity). When the backbone is skipped
     # the trainable path funnels ALL information through the conditioner's emitted
