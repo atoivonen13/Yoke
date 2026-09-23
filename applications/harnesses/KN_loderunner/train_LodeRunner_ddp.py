@@ -818,6 +818,20 @@ def main(args, rank, world_size, local_rank, device):
     # dense set to be provided. Off = champion 125 behavior unchanged.
     ADD_CROSSSTREAM = True
 
+    # Study 128: dense-dense concat part on/off. The champion recipe adds a
+    # dense-CONTEXT / dense-TARGET part (both streams dense) alongside realistic.
+    # Study 127 showed that combining THAT part with the new cross-stream part
+    # (ADD_CROSSSTREAM) doubles the dense late-faint TARGET supervision and
+    # over-teaches the fade: it broke the ztfg plateau (RMSE 1.81->1.59, bias
+    # -0.73->+0.00) but flipped every band to a positive over-fade bias (g +0.80,
+    # RMSE 1.53->1.74), netting a champion tie (1.2549 vs 123's 1.2521). Setting
+    # this False drops the dense-dense part so the ONLY faint-late target supply is
+    # the cross-stream part (realistic context -> dense target = the deployment
+    # mapping). Pre-registered A/B: does removing the doubled dense supervision keep
+    # the ztfg win while pulling the Rubin biases back toward 0? True = champion /
+    # 127 behavior (dense-dense present).
+    DENSE_DENSE_CONCAT = False
+
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
     # and supervises the event nearest that lead time, instead of always the
@@ -1279,7 +1293,11 @@ def main(args, rank, world_size, local_rank, device):
         train_real = _make_9band(args.kn_realistic_glob, train_stems)
         train_parts = [train_real]
 
-        if args.kn_dense_glob and glob.glob(args.kn_dense_glob):
+        if (
+            DENSE_DENSE_CONCAT
+            and args.kn_dense_glob
+            and glob.glob(args.kn_dense_glob)
+        ):
             train_dense = _make_9band(args.kn_dense_glob, train_stems)
             if len(train_dense) > 0:
                 train_parts.append(train_dense)
@@ -1295,6 +1313,12 @@ def main(args, rank, world_size, local_rank, device):
                     "split; training on realistic set only.",
                     flush=True,
                 )
+        elif rank == 0 and not DENSE_DENSE_CONCAT:
+            print(
+                "DENSE_DENSE_CONCAT=False: dense-dense part omitted (Study 128 "
+                "A/B; cross-stream is the sole dense-target supply).",
+                flush=True,
+            )
         elif rank == 0 and args.kn_dense_glob:
             print(
                 "Dense glob set but matched no files; training on realistic set "
@@ -1541,6 +1565,7 @@ def main(args, rank, world_size, local_rank, device):
                     "target_horizon_days": TARGET_HORIZON_DAYS,
                     "probe_dense_context": PROBE_DENSE_CONTEXT,
                     "add_crossstream": ADD_CROSSSTREAM,
+                    "dense_dense_concat": DENSE_DENSE_CONCAT,
                     "train_filelist": args.train_filelist,
                     "validation_filelist": args.validation_filelist,
                     "kn_realistic_glob": args.kn_realistic_glob,
