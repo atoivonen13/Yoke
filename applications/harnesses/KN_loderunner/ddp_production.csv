@@ -198,5 +198,16 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # (u/g/r/i/z/y) NOT regressed? (4) ztfg plateau eases in dense plots under realistic
 # sparse context. Fresh train.
 127,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 128: DROP the dense-dense concat part (DENSE_DENSE_CONCAT=False), isolating
+# the cross-stream ztfg win from 127's global over-fade. Built on 127 (125 recipe +
+# ADD_CROSSSTREAM=True). Sole change: omit the dense-context/dense-target concat part
+# so the train set = realistic + cross-stream ONLY (cross-stream = realistic context ->
+# dense faint-late target = the SOLE dense-target supply, vs 127's dense-dense + cross
+# double supply). 127 broke the ztfg plateau (RMSE 1.81->1.591, bias -0.73->+0.00) but
+# doubled dense-target supervision over-taught the fade -> all bands flipped to positive
+# over-fade (g +0.80, RMSE 1.53->1.74), netting a champion tie (1.2549 vs 123's 1.2521).
+# Read @1000: (1) ztfg win retained (~1.59, bias~0)? (2) Rubin biases pull back toward 0?
+# (3) overall < 123's 1.2521 (net-champion test)? (4) mean|bias| < 127's 0.345? Fresh train.
+128,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 
