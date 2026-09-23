@@ -506,6 +506,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         color_anchored_head: bool = False,
         color_sed_rank: int = 2,
         color_sed_dt_independent: bool = False,
+        color_ztf_tie_twins: bool = False,
         redshift_fourier_bands: int = 0,
         redshift_mean: float = 0.0142,
         redshift_std: float = 0.00365,
@@ -736,6 +737,14 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     f"color_sed_rank must be >= 1, got {color_sed_rank}."
                 )
 
+        if color_ztf_tie_twins and not color_anchored_head:
+            # The twin-tie aliases rows of W_band (the SED-code band-response
+            # matrix), which only exists in the color-anchored head.
+            raise ValueError(
+                "color_ztf_tie_twins=True requires color_anchored_head=True "
+                "(it aliases rows of the color head's W_band matrix)."
+            )
+
         if redshift_pivot_direct and not color_anchored_head:
             # Pivot-direct redshift adds an additive level term to m_ref, the
             # color-anchored head's shared pivot; there is no such pivot in the
@@ -797,6 +806,19 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # the code Dt-independent forces one per-object color; all lead-time fade
         # must flow through the shared pivot, which the deep bands' targets pin.
         self.color_sed_dt_independent = color_sed_dt_independent
+        # Study 126: hard-tie the ZTF bands' SED-slope rows to their near-identical
+        # Rubin twins (ztfg<->g, ztfr<->r, ztfi<->i). The plots show ztfg/r/i
+        # plateau at late times because ZTF's ~21 detection floor drops their
+        # faint detections, so training never supervises the faint ztf tail and
+        # its free W_band row decouples. Aliasing the slope row to the twin makes
+        # color[ztfg] = color[g] + (b_ztfg - b_g): the ztf band fades EXACTLY like
+        # its well-measured Rubin twin, offset only by a free per-band zero point
+        # (b_band stays free). The band pairing is fixed by NINE_BAND_KEYS order:
+        # index 0=ztfg 1=ztfr 2=ztfi ; twins 4=ps1_g 5=ps1_r 6=ps1_i.
+        self.color_ztf_tie_twins = color_ztf_tie_twins
+        if color_ztf_tie_twins:
+            # (ztf_row -> rubin_twin_row) source-of-truth rows for the alias.
+            self._ztf_twin_pairs = ((0, 4), (1, 5), (2, 6))
 
         # Diagnostic baseline: skip the frozen backbone in forward() and feed the
         # tiled conditioner output straight to pooling+head. Adds no params and
@@ -1016,6 +1038,21 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     0.01 * torch.randn(n_bands, color_sed_rank)
                 )
                 self.b_band = nn.Parameter(torch.zeros(n_bands))
+                if color_ztf_tie_twins:
+                    # Row-gather index that aliases each ztf band's SED slope to
+                    # its Rubin twin (0->4, 1->5, 2->6) and leaves the other
+                    # bands as themselves. Applied in forward() as
+                    # W_eff = W_band[index], so the effective ztf slope IS the
+                    # twin's slope and gradients accumulate onto the twin rows.
+                    # ztf rows 0/1/2 of W_band become unused (no grad); harmless.
+                    slope_index = list(range(n_bands))
+                    for ztf_row, twin_row in self._ztf_twin_pairs:
+                        slope_index[ztf_row] = twin_row
+                    self.register_buffer(
+                        "_ztf_slope_index",
+                        torch.tensor(slope_index, dtype=torch.long),
+                        persistent=False,
+                    )
             else:
                 # Maps the backbone-channel summary (plus the Fourier Dt encoding,
                 # when enabled) back to one prediction per band. When
@@ -1579,7 +1616,13 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             z_sed = self.sed_head(sed_in)  # [B, k]
             # colors [B, n_bands] = b_band + z_sed @ W_band.T, mean-centered so
             # the pivot carries the overall level and colors sum to ~0 per sample.
-            colors = self.b_band + z_sed @ self.W_band.t()  # [B, n_bands]
+            # Study 126: when tying ztf twins, gather the SED-slope rows so each
+            # ztf band uses its Rubin twin's slope (color[ztf] = color[twin] +
+            # (b_ztf - b_twin) before centering). b_band stays fully free.
+            W_eff = self.W_band
+            if self.color_ztf_tie_twins:
+                W_eff = self.W_band[self._ztf_slope_index]  # [n_bands, k]
+            colors = self.b_band + z_sed @ W_eff.t()  # [B, n_bands]
             colors = colors - colors.mean(dim=1, keepdim=True)
 
             if self.n_quantiles == 1:

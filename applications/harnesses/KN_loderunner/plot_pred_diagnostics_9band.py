@@ -262,6 +262,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     color_anchored_head = ckpt.get("color_anchored_head", False)
     color_sed_rank = ckpt.get("color_sed_rank", 2)
     color_sed_dt_independent = ckpt.get("color_sed_dt_independent", False)
+    color_ztf_tie_twins = ckpt.get("color_ztf_tie_twins", False)
 
     # Study 123: redshift conditioning scalar. 0 for pre-123 checkpoints (no
     # key) -> no redshift input. > 0 widens the conditioner first-layer, so it
@@ -299,6 +300,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
     print("color_sed_dt_independent:", color_sed_dt_independent)
+    print("color_ztf_tie_twins:", color_ztf_tie_twins)
 
     backbone = LodeRunner(**model_args).to(device)
     backbone.noise_scale = noise_scale
@@ -334,6 +336,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         color_anchored_head=color_anchored_head,
         color_sed_rank=color_sed_rank,
         color_sed_dt_independent=color_sed_dt_independent,
+        color_ztf_tie_twins=color_ztf_tie_twins,
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

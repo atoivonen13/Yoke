@@ -914,6 +914,11 @@ def load_direct_loderunner_checkpoint_9band(
         color_sed_dt_independent=checkpoint_data.get(
             "color_sed_dt_independent", False
         ),
+        # False for pre-126 checkpoints (no key). True (Study 126) registers the
+        # ztf-slope alias buffer; the parameter set is unchanged so old and new
+        # checkpoints both strict-load, but forward() only ties when True, so it
+        # MUST match the training config to reproduce the trained head.
+        color_ztf_tie_twins=checkpoint_data.get("color_ztf_tie_twins", False),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

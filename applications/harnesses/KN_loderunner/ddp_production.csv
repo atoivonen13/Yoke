@@ -171,5 +171,13 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # not regressed. This is the LAST redshift wiring; if the shared bias still won't move,
 # the level residual is not redshift-addressable via this architecture -> close thread.
 125,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 126: ztf-twin SED-slope tie. Sole change vs 125 (COLOR_ZTF_TIE_TWINS=True):
+# alias W_band[ztfg/r/i] := W_band[ps1_g/r/i] so each ztf band fades like its
+# near-identical Rubin twin, offset by a free per-band zero point. Targets the
+# ztfg/r/i late-time plateau seen in the 125 dense plots (twin Rubin band tracks
+# the fade; ztf band stalls 2-8 mag bright because ZTF's ~21 floor drops its
+# faint detections so training never supervises the ztf tail). Read @1000: ztfg
+# RMSE 1.78 -> toward g's ~1.6/pivot? overall < 125's 1.2628? good bands intact?
+126,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 
