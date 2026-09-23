@@ -805,6 +805,19 @@ def main(args, rank, world_size, local_rank, device):
     # to the deployable sparse path for the waist-8 bypass control.
     PROBE_DENSE_CONTEXT = False
 
+    # Study 127: cross-stream training samples. When True, ADD (not replace) a
+    # dataset part that pairs REALISTIC context with a DENSE late-faint target of
+    # the SAME object on a shared per-object clock (t0 = first realistic
+    # detection). This supplies the deployment mapping the metric scores
+    # (sparse realistic context -> dense faint-late target), which the existing
+    # realistic and dense-dense concat parts never sample -- there context and
+    # target always come from ONE stream, so faint-late ztfg is only ever seen
+    # after a recent BRIGHT ztfg context point (horizon-exact diagnostic:
+    # 78.3% of training weight), while at eval that context is empty/ztfg-free
+    # 51.7% of the time. Uses --kn_dense_glob as the dense target source; needs a
+    # dense set to be provided. Off = champion 125 behavior unchanged.
+    ADD_CROSSSTREAM = True
+
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
     # and supervises the event nearest that lead time, instead of always the
@@ -1208,9 +1221,14 @@ def main(args, rank, world_size, local_rank, device):
     random.seed(DATA_SEED)
 
     def _make_9band(
-        data_glob: str, object_ids: set
+        data_glob: str, object_ids: set, target_data_glob: str = None
     ) -> Kilonova_lc_scalar_context_DataSet_9band:
-        """Build a 9-band dataset over one directory restricted to object_ids."""
+        """Build a 9-band dataset over one directory restricted to object_ids.
+
+        When ``target_data_glob`` is set, cross-stream mode: context is drawn from
+        ``data_glob`` and the target from ``target_data_glob`` (same objects,
+        shared per-object clock). See the dataset docstring.
+        """
         return Kilonova_lc_scalar_context_DataSet_9band(
             N_imgs=0,
             context_len=CONTEXT_LEN,
@@ -1228,6 +1246,7 @@ def main(args, rank, world_size, local_rank, device):
             object_ids=object_ids,
             append_phase=PHASE_FOURIER_BANDS > 0,
             append_redshift=REDSHIFT_FOURIER_BANDS > 0 or REDSHIFT_PIVOT_DIRECT,
+            target_data_glob=target_data_glob,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1282,6 +1301,35 @@ def main(args, rank, world_size, local_rank, device):
                 "only.",
                 flush=True,
             )
+
+        # Study 127: cross-stream part -- realistic CONTEXT paired with a DENSE
+        # late-faint TARGET of the same object on a shared clock. ADDED to (not
+        # replacing) the realistic and dense-dense parts, so no existing
+        # supervision is lost; this part alone carries the sparse-context ->
+        # faint-late mapping the eval scores.
+        if (
+            ADD_CROSSSTREAM
+            and args.kn_dense_glob
+            and glob.glob(args.kn_dense_glob)
+        ):
+            train_cross = _make_9band(
+                args.kn_realistic_glob,
+                train_stems,
+                target_data_glob=args.kn_dense_glob,
+            )
+            if len(train_cross) > 0:
+                train_parts.append(train_cross)
+                if rank == 0:
+                    print(
+                        f"Cross-stream training set added: {len(train_cross)} "
+                        "samples (realistic context -> dense target).",
+                        flush=True,
+                    )
+            elif rank == 0:
+                print(
+                    "Cross-stream enabled but yielded 0 samples; skipping.",
+                    flush=True,
+                )
 
         train_dataset = (
             ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
@@ -1492,6 +1540,7 @@ def main(args, rank, world_size, local_rank, device):
                     "max_context_len": MAX_CONTEXT_LEN,
                     "target_horizon_days": TARGET_HORIZON_DAYS,
                     "probe_dense_context": PROBE_DENSE_CONTEXT,
+                    "add_crossstream": ADD_CROSSSTREAM,
                     "train_filelist": args.train_filelist,
                     "validation_filelist": args.validation_filelist,
                     "kn_realistic_glob": args.kn_realistic_glob,
