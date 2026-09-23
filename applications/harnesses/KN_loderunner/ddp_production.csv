@@ -179,5 +179,24 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # faint detections so training never supervises the ztf tail). Read @1000: ztfg
 # RMSE 1.78 -> toward g's ~1.6/pivot? overall < 125's 1.2628? good bands intact?
 126,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 127: CROSS-STREAM training samples (realistic context -> dense late-faint
+# target of the SAME object). Sole change vs 125: ADD_CROSSSTREAM=True in
+# train_LodeRunner_ddp.py. Adds a THIRD ConcatDataset part (keeps the realistic and
+# dense-dense parts) via new target_data_glob arg on the 9band dataset: context from
+# the realistic (floor-limited) stream, target from the dense stream, both on a
+# shared per-object clock (t0 = first realistic detection), normalized with shared
+# realistic stats; anchors on realistic events reaching a dense target; lead~U(0,8d);
+# Dt = dense_target_t - realistic_anchor_t. Window x built by a shared _flatten_window
+# helper so model input is byte-identical to single-stream. Motivation: horizon-exact
+# diagnostic (diagnose_ztf_horizon_exact.py) showed the faint-late ztfg plateau is a
+# CONTEXT-CONTENT gap, not a lead-coverage gap -- 72.6% of ztfg-late training weight is
+# at lead>=2d but 78.3% pairs the faint target with a recent BRIGHT ztfg context point,
+# while at eval the realistic context is empty/ztfg-free 51.7% of the time. This study
+# supplies the missing (sparse-realistic-context -> dense-faint-target) mapping. DATA
+# lever, not cross-band sharing (117/118/126). Read @1000: (1) overall < 125's 1.2628
+# (ideally < 123's 1.2521)? (2) ztfg late RMSE down with bias->0? (3) good bands
+# (u/g/r/i/z/y) NOT regressed? (4) ztfg plateau eases in dense plots under realistic
+# sparse context. Fresh train.
+127,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 

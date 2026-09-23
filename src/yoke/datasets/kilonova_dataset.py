@@ -416,6 +416,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         object_ids: set = None,
         append_phase: bool = False,
         append_redshift: bool = False,
+        target_data_glob: str = None,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -492,6 +493,20 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 redshift?]``. The raw physical redshift is emitted (standardization
                 lives in the model, so it round-trips via the checkpoint). Window
                 mode only. When False the layout is unchanged.
+            target_data_glob (str): If set, enables **cross-stream mode**
+                (window + single-step only). ``data_glob`` supplies the CONTEXT
+                stream (the realistic, floor-limited observations) and
+                ``target_data_glob`` supplies the TARGET stream (the dense,
+                no-mag-cut companion) for the SAME objects, matched by filename
+                stem. Both streams are relativized to the SHARED per-object clock
+                ``t0 = context_stream.min()`` (the first realistic detection), so
+                the appended anchor phase and the target lead time match the dense
+                late-time eval, which builds context from the realistic stream and
+                scores dense targets on that common clock. This adds the
+                deployment mapping (sparse realistic context -> dense faint-late
+                target) that the single-stream concat never samples, because there
+                context and target always come from one stream. None (default)
+                keeps single-stream behavior byte-identical.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -551,6 +566,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # redshift_fourier_bands > 0. Read from injection_parameters per file.
         self.append_redshift = append_redshift
 
+        # Cross-stream mode: context from data_glob (realistic), target from
+        # target_data_glob (dense), same objects on a shared per-object clock.
+        self.target_data_glob = target_data_glob
+        self.cross_stream = target_data_glob is not None
+
         if self.window_mode:
             self.max_context_len = (
                 max_context_len if max_context_len is not None else context_len
@@ -581,6 +601,19 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 raise ValueError(
                     "target_horizon_days must be positive, got "
                     f"{target_horizon_days}"
+                )
+
+        if self.cross_stream:
+            if not self.window_mode:
+                raise ValueError(
+                    "target_data_glob (cross-stream mode) is only supported in "
+                    "time-window mode (set context_window_days)."
+                )
+            if self.n_rollout_steps != 1:
+                raise ValueError(
+                    "target_data_glob (cross-stream mode) supports only "
+                    "single-step supervision (n_rollout_steps == 1), got "
+                    f"{self.n_rollout_steps}."
                 )
 
         if means is None:
@@ -627,6 +660,15 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # Per-object redshift, parallel to events_per_file (only populated when
         # append_redshift; read from injection_parameters before data.close()).
         self.redshift_per_file = []
+        # Shared per-object phase-zero clock = the context stream's first
+        # detection time (times.min() BEFORE relativization), parallel to
+        # events_per_file. Recorded always (harmless); used in cross-stream mode
+        # to put the dense TARGET stream on the SAME clock as the realistic
+        # CONTEXT stream so anchor phase and lead time match the eval.
+        self._t0_per_file = []
+        # Cross-stream target events (dense stream), parallel to events_per_file
+        # by file_idx; only populated when cross_stream.
+        self.target_events_per_file = []
         self.samples = []
 
         for file_idx, fn in enumerate(self.file_prefix_list):
@@ -684,8 +726,11 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             values = values[order]
             bands = bands[order]
 
-            # Relative times within the file.
-            times = times - times.min()
+            # Relative times within the file. Record the phase-zero offset (this
+            # stream's first detection) so the dense TARGET stream can be put on
+            # the SAME clock in cross-stream mode.
+            t0 = float(times.min())
+            times = times - t0
 
             # Per-band normalization of the values.
             values = (values - self.means[bands]) / (self.stds[bands] + EPS)
@@ -695,9 +740,16 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             )
             self.stems_per_file.append(_stem(fn))
             self.redshift_per_file.append(redshift)
+            self._t0_per_file.append(t0)
 
             n_events = times.shape[0]
             file_idx = len(self.events_per_file) - 1
+
+            if self.cross_stream:
+                # Defer enumeration: cross-stream samples are anchored on the
+                # realistic stream but need the dense target stream loaded first.
+                # Enumerated in the dense-load pass below.
+                continue
 
             if self.window_mode:
                 # One sample per event after the first: the target is event
@@ -711,6 +763,103 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 max_start = n_events - context_len - 1
                 for startIDX in range(max_start + 1):
                     self.samples.append((file_idx, startIDX))
+
+        # ---------------------------------------------------------------------
+        # Cross-stream mode: load the dense TARGET stream for each object on the
+        # SHARED per-object clock (t0 = realistic first detection), then enumerate
+        # anchors on the realistic CONTEXT stream that can reach a dense target.
+        # ---------------------------------------------------------------------
+        if self.cross_stream:
+            # Map dense stems -> path, restricted to the same object split.
+            dense_files = sorted(glob.glob(self.target_data_glob))
+            if object_ids is not None:
+                dense_files = [
+                    f for f in dense_files if _stem(f) in object_ids
+                ]
+            dense_by_stem = {_stem(f): f for f in dense_files}
+
+            for file_idx, stem in enumerate(self.stems_per_file):
+                # Default: no dense target stream for this object.
+                self.target_events_per_file.append(None)
+
+                dense_path = dense_by_stem.get(stem)
+                if dense_path is None:
+                    continue
+
+                d_times, d_values, d_bands = self._read_merged_stream(
+                    dense_path
+                )
+                if d_times is None:
+                    continue
+
+                # Put the dense stream on the SAME clock as the realistic context
+                # (t0 = realistic first detection), NOT the dense stream's own
+                # min, so anchor phase and lead time match the eval.
+                t0 = self._t0_per_file[file_idx]
+                d_times = d_times - t0
+                d_values = (
+                    d_values - self.means[d_bands]
+                ) / (self.stds[d_bands] + EPS)
+                self.target_events_per_file[file_idx] = (
+                    d_times,
+                    d_values.astype(np.float32),
+                    d_bands,
+                )
+
+                # Enumerate anchors on the realistic stream that have >=1 dense
+                # target strictly later (so a horizon draw always has a
+                # candidate). anchor_idx spans all realistic events (there is no
+                # "next realistic event" requirement -- the target is dense).
+                r_times = self.events_per_file[file_idx][0]
+                last_dense_t = d_times[-1]
+                for anchor_idx in range(r_times.shape[0]):
+                    if last_dense_t > r_times[anchor_idx]:
+                        self.samples.append((file_idx, anchor_idx))
+
+    def _read_merged_stream(
+        self, npz_path: str
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read one npz into a merged, time-sorted, ABSOLUTE-time event stream.
+
+        Mirrors the per-file merge in ``__init__`` (same band order, upper-limit
+        dropping, and stable time sort) but returns ABSOLUTE times (no
+        min-subtraction) and does NOT normalize, so the caller can relativize to
+        a shared clock and normalize with the shared stats. Used to load the
+        dense TARGET stream in cross-stream mode.
+
+        Args:
+            npz_path (str): Path to the light-curve npz.
+
+        Returns:
+            (times, values, bands): absolute times, raw values, band indices,
+            each sorted by time; or ``(None, None, None)`` if no usable events.
+        """
+        data = np.load(npz_path, allow_pickle=True)
+        times, values, bands = [], [], []
+        for band_idx, key in enumerate(self.band_keys):
+            if key not in data.files:
+                continue
+            arr = data[key]
+            if arr.size == 0:
+                continue
+            if self.drop_upper_limits:
+                detected = np.isfinite(arr[:, self.error_col])
+                arr = arr[detected]
+                if arr.shape[0] == 0:
+                    continue
+            times.append(arr[:, 0].astype(np.float32))
+            values.append(arr[:, self.value_col].astype(np.float32))
+            bands.append(np.full(arr.shape[0], band_idx, dtype=np.int64))
+        data.close()
+
+        if not times:
+            return None, None, None
+
+        times = np.concatenate(times)
+        values = np.concatenate(values)
+        bands = np.concatenate(bands)
+        order = np.argsort(times, kind="stable")
+        return times[order], values[order], bands[order]
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -833,66 +982,43 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         gaps = times[cand] - times[anchor_idx]
         return int(cand[np.argmin(np.abs(gaps - lead_time))])
 
-    def _getitem_window(
-        self, index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return the (input, target, mask, Dt) tuple in time-window mode.
+    def _flatten_window(
+        self,
+        ctx_v: np.ndarray,
+        ctx_t: np.ndarray,
+        ctx_b: np.ndarray,
+        anchor_t: float,
+        file_idx: int,
+    ) -> np.ndarray:
+        """Build the flattened, padded window input ``x`` from selected context.
 
-        The context is every detection within ``context_window_days`` before the
-        target event, padded to ``max_context_len`` with a per-event validity
-        flag. The per-event feature gains a ``valid`` channel so the flattened
-        input carries the padding mask itself (the model does no masking):
-        ``[value, rel_t, valid, one_hot_band(n_bands)]``, width ``3 + n_bands``.
-
-        Real events fill the leading rows in time order (oldest first, matching
-        the fixed-count layout), with ``rel_t`` relative to the first *real*
-        event in the window; padded rows are all-zero with ``valid = 0``.
+        Single source of truth for the window-mode ``x`` layout, shared by the
+        single-stream ``_getitem_window`` and the cross-stream
+        ``_getitem_window_cross`` so their model input is byte-identical by
+        construction. The per-event layout is
+        ``[value, rel_t, valid, one_hot_band(n_bands)]`` (width ``3 + n_bands``),
+        padded to ``max_context_len``; ``rel_t`` is relative to the first real
+        event in the window. Optional trailing scalars are appended in the fixed
+        order ``[..., phase?, redshift?]``.
 
         Args:
-            index (int): Sample index (maps to a (file_idx, target_idx) pair).
+            ctx_v (np.ndarray): Selected context values (normalized), oldest
+                first, length ``n_real`` (<= ``max_context_len``).
+            ctx_t (np.ndarray): Selected context times (file-relative), oldest
+                first, same length as ``ctx_v``.
+            ctx_b (np.ndarray): Selected context band indices, same length.
+            anchor_t (float): Anchor event time (file-relative). Equals the
+                anchor phase (days since the curve's first detection) because the
+                stream is relativized to its first detection, so it is appended
+                directly as the phase scalar when ``append_phase``.
+            file_idx (int): Index into ``self.redshift_per_file`` for the
+                object's source redshift when ``append_redshift``.
 
         Returns:
-            x (torch.Tensor): Flattened padded context, shape
-                [max_context_len * (3 + n_bands)].
-            target (torch.Tensor): Normalized value per band, shape [n_bands];
-                only the observed band is meaningful.
-            mask (torch.Tensor): Float mask, shape [n_bands]; 1.0 for the
-                observed target band, 0.0 elsewhere.
-            Dt (torch.Tensor): Lead time from the most recent context event to
-                the target event.
+            np.ndarray: Flattened input of shape
+            ``[max_context_len * (3 + n_bands)] (+ append_phase) (+ append_redshift)``.
         """
-        file_idx, target_idx = self.samples[index]
-        times, values, bands = self.events_per_file[file_idx]
-
-        # Anchor the trailing window on the event immediately before the enumerated
-        # target (the most recent observation). With horizon-covering target
-        # sampling the supervised target is redrawn to a farther event so the
-        # lead time Dt is ~uniform in days; the anchor (hence the context) is
-        # unchanged, preserving train/inference parity.
-        anchor_idx = target_idx - 1
-        if self.target_horizon_days is not None:
-            target_idx = self._draw_target_idx(
-                times, anchor_idx, times.shape[0]
-            )
-
-        anchor_t = times[anchor_idx]
-        lo = anchor_t - self.context_window_days
-
-        # Context is events up to and including the anchor (never the target,
-        # which may now be several events ahead) within the trailing window.
-        prior_t = times[: anchor_idx + 1]
-        in_window = prior_t >= lo
-        sel_idx = np.nonzero(in_window)[0]
-        # Keep a temporally-spread subset (earliest + anchor always retained)
-        # when the window over-fills M, instead of dropping the early rise.
-        sel_idx = sel_idx[
-            window_select_positions(sel_idx.shape[0], self.max_context_len)
-        ]
-
-        ctx_t = times[sel_idx]
-        ctx_v = values[sel_idx]
-        ctx_b = bands[sel_idx]
-        n_real = sel_idx.shape[0]
+        n_real = ctx_v.shape[0]
 
         # rel_t relative to the first real event in the window (same convention
         # as the fixed-count path, which uses the window's first event).
@@ -925,7 +1051,75 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             x_flat = np.concatenate(
                 [x_flat, np.array([z], dtype=np.float32)]
             )
-        x = torch.tensor(x_flat, dtype=torch.float32)
+        return x_flat
+
+    def _getitem_window(
+        self, index: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the (input, target, mask, Dt) tuple in time-window mode.
+
+        The context is every detection within ``context_window_days`` before the
+        target event, padded to ``max_context_len`` with a per-event validity
+        flag. The per-event feature gains a ``valid`` channel so the flattened
+        input carries the padding mask itself (the model does no masking):
+        ``[value, rel_t, valid, one_hot_band(n_bands)]``, width ``3 + n_bands``.
+
+        Real events fill the leading rows in time order (oldest first, matching
+        the fixed-count layout), with ``rel_t`` relative to the first *real*
+        event in the window; padded rows are all-zero with ``valid = 0``.
+
+        Args:
+            index (int): Sample index (maps to a (file_idx, target_idx) pair).
+
+        Returns:
+            x (torch.Tensor): Flattened padded context, shape
+                [max_context_len * (3 + n_bands)].
+            target (torch.Tensor): Normalized value per band, shape [n_bands];
+                only the observed band is meaningful.
+            mask (torch.Tensor): Float mask, shape [n_bands]; 1.0 for the
+                observed target band, 0.0 elsewhere.
+            Dt (torch.Tensor): Lead time from the most recent context event to
+                the target event.
+        """
+        if self.cross_stream:
+            return self._getitem_window_cross(index)
+
+        file_idx, target_idx = self.samples[index]
+        times, values, bands = self.events_per_file[file_idx]
+
+        # Anchor the trailing window on the event immediately before the enumerated
+        # target (the most recent observation). With horizon-covering target
+        # sampling the supervised target is redrawn to a farther event so the
+        # lead time Dt is ~uniform in days; the anchor (hence the context) is
+        # unchanged, preserving train/inference parity.
+        anchor_idx = target_idx - 1
+        if self.target_horizon_days is not None:
+            target_idx = self._draw_target_idx(
+                times, anchor_idx, times.shape[0]
+            )
+
+        anchor_t = times[anchor_idx]
+        lo = anchor_t - self.context_window_days
+
+        # Context is events up to and including the anchor (never the target,
+        # which may now be several events ahead) within the trailing window.
+        prior_t = times[: anchor_idx + 1]
+        in_window = prior_t >= lo
+        sel_idx = np.nonzero(in_window)[0]
+        # Keep a temporally-spread subset (earliest + anchor always retained)
+        # when the window over-fills M, instead of dropping the early rise.
+        sel_idx = sel_idx[
+            window_select_positions(sel_idx.shape[0], self.max_context_len)
+        ]
+
+        ctx_t = times[sel_idx]
+        ctx_v = values[sel_idx]
+        ctx_b = bands[sel_idx]
+
+        x = torch.tensor(
+            self._flatten_window(ctx_v, ctx_t, ctx_b, anchor_t, file_idx),
+            dtype=torch.float32,
+        )
 
         # Target is the event at target_idx, in a per-band vector + mask.
         target_band = int(bands[target_idx])
@@ -941,6 +1135,105 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # which may be several events ahead under horizon-covering sampling.
         Dt = torch.tensor(
             times[target_idx] - times[anchor_idx],
+            dtype=torch.float32,
+        )
+
+        return x, target, mask, Dt
+
+    def _draw_target_idx_cross(
+        self, dense_times: np.ndarray, anchor_t: float
+    ) -> int:
+        """Draw a horizon-covering dense TARGET index ahead of a realistic anchor.
+
+        Cross-stream twin of :meth:`_draw_target_idx`. The lead time is measured
+        from the realistic ``anchor_t`` (both streams share a clock), and the
+        target is drawn from the DENSE stream: sample a lead ~uniform in days over
+        ``(0, target_horizon_days]`` (falling back to a single unit lead if the
+        horizon is unset) and return the dense event whose gap from the anchor is
+        nearest that lead, among dense events strictly after the anchor. The
+        caller guarantees at least one dense event follows the anchor.
+
+        Args:
+            dense_times (np.ndarray): Dense event times on the shared clock.
+            anchor_t (float): Realistic anchor time on the shared clock.
+
+        Returns:
+            int: The drawn dense target index (into ``dense_times``).
+        """
+        horizon = (
+            self.target_horizon_days
+            if self.target_horizon_days is not None
+            else 1.0
+        )
+        lead_time = np.random.uniform(0.0, horizon)
+        cand = np.nonzero(dense_times > anchor_t)[0]
+        gaps = dense_times[cand] - anchor_t
+        return int(cand[np.argmin(np.abs(gaps - lead_time))])
+
+    def _getitem_window_cross(
+        self, index: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the (input, target, mask, Dt) tuple in cross-stream window mode.
+
+        The CONTEXT is the trailing ``context_window_days`` window ending at a
+        realistic anchor event (selected identically to :meth:`_getitem_window`,
+        via the shared :meth:`_flatten_window`), and the TARGET is a
+        horizon-drawn DENSE event of the same object on the shared per-object
+        clock. This is the deployment mapping (sparse realistic context ->
+        dense faint-late target) the single-stream concat never samples.
+
+        Args:
+            index (int): Sample index (maps to a (file_idx, anchor_idx) pair).
+
+        Returns:
+            x (torch.Tensor): Flattened padded realistic context, byte-identical
+                in layout to :meth:`_getitem_window`.
+            target (torch.Tensor): Normalized dense value per band, shape
+                [n_bands]; only the drawn target band is meaningful.
+            mask (torch.Tensor): Float mask, shape [n_bands]; 1.0 for the target
+                band, 0.0 elsewhere.
+            Dt (torch.Tensor): Lead time from the realistic anchor to the dense
+                target (dense_target_t - anchor_t on the shared clock).
+        """
+        file_idx, anchor_idx = self.samples[index]
+        r_times, r_values, r_bands = self.events_per_file[file_idx]
+        d_times, d_values, d_bands = self.target_events_per_file[file_idx]
+
+        # Realistic context: identical trailing-window selection to
+        # _getitem_window, anchored at anchor_idx.
+        anchor_t = r_times[anchor_idx]
+        lo = anchor_t - self.context_window_days
+        prior_t = r_times[: anchor_idx + 1]
+        in_window = prior_t >= lo
+        sel_idx = np.nonzero(in_window)[0]
+        sel_idx = sel_idx[
+            window_select_positions(sel_idx.shape[0], self.max_context_len)
+        ]
+
+        ctx_t = r_times[sel_idx]
+        ctx_v = r_values[sel_idx]
+        ctx_b = r_bands[sel_idx]
+
+        x = torch.tensor(
+            self._flatten_window(ctx_v, ctx_t, ctx_b, anchor_t, file_idx),
+            dtype=torch.float32,
+        )
+
+        # Dense target, drawn to cover the forecast horizon from the anchor.
+        target_idx = self._draw_target_idx_cross(d_times, anchor_t)
+        target_band = int(d_bands[target_idx])
+        target = np.zeros(self.n_channels, dtype=np.float32)
+        mask = np.zeros(self.n_channels, dtype=np.float32)
+        target[target_band] = d_values[target_idx]
+        mask[target_band] = 1.0
+
+        target = torch.tensor(target, dtype=torch.float32)
+        mask = torch.tensor(mask, dtype=torch.float32)
+
+        # Lead time from the realistic anchor to the dense target (shared clock),
+        # matching the eval's dt = target_t - ctx_t[-1].
+        Dt = torch.tensor(
+            d_times[target_idx] - anchor_t,
             dtype=torch.float32,
         )
 
