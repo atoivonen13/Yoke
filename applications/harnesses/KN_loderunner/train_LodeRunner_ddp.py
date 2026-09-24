@@ -633,7 +633,8 @@ def main(args, rank, world_size, local_rank, device):
     # the last redshift wiring before the thread closes: if the shared under-fade
     # bias still does not move toward 0, the level residual is not redshift-
     # addressable via this architecture. 0/False -> legacy (byte-identical).
-    REDSHIFT_PIVOT_DIRECT = True
+    # Study 130: False -- back to the study-123 champion config.
+    REDSHIFT_PIVOT_DIRECT = False
 
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
@@ -816,7 +817,8 @@ def main(args, rank, world_size, local_rank, device):
     # 78.3% of training weight), while at eval that context is empty/ztfg-free
     # 51.7% of the time. Uses --kn_dense_glob as the dense target source; needs a
     # dense set to be provided. Off = champion 125 behavior unchanged.
-    ADD_CROSSSTREAM = True
+    # Study 130: False -- back to the study-123 champion config.
+    ADD_CROSSSTREAM = False
 
     # Study 128: dense-dense concat part on/off. The champion recipe adds a
     # dense-CONTEXT / dense-TARGET part (both streams dense) alongside realistic.
@@ -830,7 +832,22 @@ def main(args, rank, world_size, local_rank, device):
     # mapping). Pre-registered A/B: does removing the doubled dense supervision keep
     # the ztfg win while pulling the Rubin biases back toward 0? True = champion /
     # 127 behavior (dense-dense present).
-    DENSE_DENSE_CONCAT = False
+    # Study 128 RESULT: NO -- 1.2663, ztfg back to 1.78 (bias -0.89) and all
+    # biases back to 125-like levels. The level is set by the dense-target
+    # FRACTION of the mix, not by which dense part supplies it. Restored True.
+    DENSE_DENSE_CONCAT = True
+
+    # Study 129: realistic-context / realistic-TARGET part on/off. Realistic
+    # targets are floor-truncated (faint late points dropped), so they skew the
+    # learned level bright, while the eval scores DENSE truth. 125/127/128 showed
+    # the bias level tracks the dense-target fraction of the mix. Setting this
+    # False trains on dense-dense + cross-stream only: every target is dense (the
+    # scoring distribution), and the cross part keeps realistic CONTEXT so the
+    # deployment mapping is still trained. Norm stats are unaffected (computed
+    # from the realistic train files directly). Needs ADD_CROSSSTREAM and
+    # DENSE_DENSE_CONCAT on to leave anything to train on. True = 125/127
+    # behavior. Study 130: True -- back to the study-123 champion config.
+    REALISTIC_TARGET_CONCAT = True
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
@@ -887,6 +904,25 @@ def main(args, rank, world_size, local_rank, device):
     # pressure exactly where they fail. Order matches BAND_KEYS =
     # (ztfg, ztfr, ztfi, sdssu, ps1_g, ps1_r, ps1_i, ps1_z, ps1_y). Set to None
     # to recover the exact equal-weight objective.
+    #
+    # Study 130: BAND_WEIGHTS_MODE selects how the per-band weights are set.
+    #   "manual" -- the hand-set tensor below (every study 893b277..129). Its
+    #               rationale is stale: rollout is off, and the u ~-5 mag
+    #               under-fade it targeted was measured on a pre-color-head,
+    #               delta-on model. A quantile loss's per-band optimum does not
+    #               depend on that band's weight, so weights cannot fix a bias;
+    #               they only reallocate shared capacity -- and with the color
+    #               head's shared pivot m_ref they decide which bands set the
+    #               common level. Never A/B-tested.
+    #   "std"    -- weight each band by its train-only normalization std. Targets
+    #               are z-scored per band, so pinball_z * std_b == pinball in
+    #               MAGNITUDES exactly (pinball is linear in the residual): the
+    #               objective is then in the same units as the mag-RMSE metric,
+    #               with no hand-picked values. Rescaled to mean 1 for readable
+    #               logs (the weighted batch loss divides by sum(w), so scale is a
+    #               no-op).
+    #   "none"   -- equal weight in z-units (BAND_WEIGHTS = None).
+    BAND_WEIGHTS_MODE = "std"
     BAND_WEIGHTS = torch.tensor(
         [
             2.0,  # ztfg -- ZTF bands lag in rollout; up-weight from 1->2
@@ -1222,6 +1258,25 @@ def main(args, rank, world_size, local_rank, device):
         print("band_means:", band_means)
         print("band_stds:", band_stds)
 
+    # Resolve the per-band loss weights now that the train-only stds are known
+    # (identical on every rank: rank 0 writes the stats file, the rest read it).
+    if BAND_WEIGHTS_MODE == "std":
+        _bw = np.asarray(band_stds, dtype=np.float32)
+        BAND_WEIGHTS = torch.tensor(_bw / _bw.mean(), dtype=torch.float32)
+    elif BAND_WEIGHTS_MODE == "none":
+        BAND_WEIGHTS = None
+    elif BAND_WEIGHTS_MODE != "manual":
+        raise ValueError(
+            "BAND_WEIGHTS_MODE must be 'manual', 'std' or 'none', got "
+            f"{BAND_WEIGHTS_MODE!r}."
+        )
+    if rank == 0:
+        print(
+            f"Band loss weights ({BAND_WEIGHTS_MODE}):",
+            None if BAND_WEIGHTS is None else BAND_WEIGHTS.tolist(),
+            flush=True,
+        )
+
     # Object-level split makes every DDP rank build an identical-length dataset:
     # the train/val stem sets come from static files (no RNG), the file list is
     # sorted(glob(...)) then filtered by stem, and N_imgs=0 uses all matched
@@ -1286,12 +1341,20 @@ def main(args, rank, world_size, local_rank, device):
                 flush=True,
             )
     else:
-        # Realistic TRAIN objects (always present) plus, if a dense set is provided
-        # and matches files, the SAME train objects viewed densely -- concatenated to
-        # supervise late-time behavior. Validation stays realistic-only (matches the
-        # deployment metric).
-        train_real = _make_9band(args.kn_realistic_glob, train_stems)
-        train_parts = [train_real]
+        # Realistic TRAIN objects (unless REALISTIC_TARGET_CONCAT=False) plus, if a
+        # dense set is provided and matches files, the SAME train objects viewed
+        # densely -- concatenated to supervise late-time behavior. Validation stays
+        # realistic-only (matches the deployment metric).
+        train_parts = []
+        if REALISTIC_TARGET_CONCAT:
+            train_real = _make_9band(args.kn_realistic_glob, train_stems)
+            train_parts.append(train_real)
+        elif rank == 0:
+            print(
+                "REALISTIC_TARGET_CONCAT=False: realistic-target part omitted "
+                "(Study 129; every training target is dense).",
+                flush=True,
+            )
 
         if (
             DENSE_DENSE_CONCAT
@@ -1303,8 +1366,7 @@ def main(args, rank, world_size, local_rank, device):
                 train_parts.append(train_dense)
                 if rank == 0:
                     print(
-                        f"Dense training set added: {len(train_dense)} samples "
-                        f"(realistic: {len(train_real)} samples).",
+                        f"Dense training set added: {len(train_dense)} samples.",
                         flush=True,
                     )
             elif rank == 0:
@@ -1355,6 +1417,19 @@ def main(args, rank, world_size, local_rank, device):
                     flush=True,
                 )
 
+        if not train_parts:
+            raise ValueError(
+                "No training parts built: REALISTIC_TARGET_CONCAT=False needs "
+                "DENSE_DENSE_CONCAT and/or ADD_CROSSSTREAM with a matching "
+                f"kn_dense_glob ({args.kn_dense_glob!r})."
+            )
+        if rank == 0:
+            print(
+                "Training parts: "
+                + ", ".join(str(len(p)) for p in train_parts)
+                + f" samples (total {sum(len(p) for p in train_parts)}).",
+                flush=True,
+            )
         train_dataset = (
             ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         )
@@ -1554,6 +1629,7 @@ def main(args, rank, world_size, local_rank, device):
                     ),
                     "dt_weight_tau": DT_WEIGHT_TAU,
                     "dt_weight_gamma": DT_WEIGHT_GAMMA,
+                    "band_weights_mode": BAND_WEIGHTS_MODE,
                     "band_weights": (
                         BAND_WEIGHTS.tolist()
                         if BAND_WEIGHTS is not None
@@ -1566,6 +1642,7 @@ def main(args, rank, world_size, local_rank, device):
                     "probe_dense_context": PROBE_DENSE_CONTEXT,
                     "add_crossstream": ADD_CROSSSTREAM,
                     "dense_dense_concat": DENSE_DENSE_CONCAT,
+                    "realistic_target_concat": REALISTIC_TARGET_CONCAT,
                     "train_filelist": args.train_filelist,
                     "validation_filelist": args.validation_filelist,
                     "kn_realistic_glob": args.kn_realistic_glob,

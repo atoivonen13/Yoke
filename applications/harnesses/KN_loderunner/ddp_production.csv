@@ -208,6 +208,23 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # over-fade (g +0.80, RMSE 1.53->1.74), netting a champion tie (1.2549 vs 123's 1.2521).
 # Read @1000: (1) ztfg win retained (~1.59, bias~0)? (2) Rubin biases pull back toward 0?
 # (3) overall < 123's 1.2521 (net-champion test)? (4) mean|bias| < 127's 0.345? Fresh train.
+# RESULT: 1.2663, FALSIFIED -- ztfg back to 1.78/bias -0.89; biases back to 125-like
+# under-fade. Bias level tracks the dense-target FRACTION of the mix. Reverted to True.
 128,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 129: ALL-DENSE TARGETS. Built on 127 (ADD_CROSSSTREAM=True, DENSE_DENSE_CONCAT=
+# True). Sole change REALISTIC_TARGET_CONCAT=False: drop the realistic-target part, train
+# on dense-dense + cross-stream only (every target dense = scoring distribution; cross
+# keeps realistic context). Tests whether floor-truncated realistic targets cause the
+# mix-fraction-dependent bias seen in 125/127/128. Read @1000: all biases near 0 at once?
+# overall < 1.2521? ztfg spread <= 1.59? Caveats: fewer samples/epoch; val is still
+# realistic-target -> also eval with --exact_epoch at the final epoch.
+129,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 130: PRINCIPLED BAND LOSS WEIGHTS on the study-123 champion. All post-123 knobs
+# at their no-op (redshift off, cross-stream off, dense-dense + realistic on, ztf tie
+# off). Sole change BAND_WEIGHTS_MODE="std": per-band weight = train-only norm std
+# (mean-1), replacing the never-tested manual 2/2/2/3/2/1/1/1/1. Makes the pinball loss
+# exactly magnitude-units (matches the mag-RMSE metric). Read @1000 vs 123's 1.2521: a
+# tie is a win (untuned knob removed); watch the shared negative bias. 100 ep.
+130,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 
 
