@@ -298,8 +298,15 @@ def main(args, rank, world_size, local_rank, device):
     # 098's point+Huber confirmed the log's prediction (blue biases returned, RMSE
     # ~0.09 worse @100), so return to the pinball head whose 0.5 term controls the
     # blue-band bias. LOSS_TYPE below is ignored when N_QUANTILES > 1.
+    # Study 131: outer levels 0.1/0.9 -> 0.05/0.95 so the head emits a true 90%
+    # interval (the plot previously showed 80%). Sole change vs the 129 champion.
+    # NOT a pure relabel: the color-anchored head shares one per-band color across
+    # all quantiles (the scatter lives only in the pivot), so the outer pinball
+    # terms pull on the same colors the median uses -- moving them into the tails
+    # can shift the per-band median. Pinball loss values are not comparable to
+    # prior studies; compare late RMSE @1000 only.
     N_QUANTILES = 3
-    QUANTILE_LEVELS = (0.1, 0.5, 0.9)
+    QUANTILE_LEVELS = (0.05, 0.5, 0.95)
 
     # Per-quantile weights for the pinball combine (normalized to sum to 1 inside
     # PinballLoss, so the loss scale / effective LR is unchanged; only RELATIVE
@@ -633,8 +640,8 @@ def main(args, rank, world_size, local_rank, device):
     # the last redshift wiring before the thread closes: if the shared under-fade
     # bias still does not move toward 0, the level residual is not redshift-
     # addressable via this architecture. 0/False -> legacy (byte-identical).
-    # Study 130: False -- back to the study-123 champion config.
-    REDSHIFT_PIVOT_DIRECT = False
+    # Study 130 ran with False (123 base); restored True for the 129 champion.
+    REDSHIFT_PIVOT_DIRECT = True
 
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
@@ -817,8 +824,8 @@ def main(args, rank, world_size, local_rank, device):
     # 78.3% of training weight), while at eval that context is empty/ztfg-free
     # 51.7% of the time. Uses --kn_dense_glob as the dense target source; needs a
     # dense set to be provided. Off = champion 125 behavior unchanged.
-    # Study 130: False -- back to the study-123 champion config.
-    ADD_CROSSSTREAM = False
+    # Study 130 ran with False (123 base); restored True for the 129 champion.
+    ADD_CROSSSTREAM = True
 
     # Study 128: dense-dense concat part on/off. The champion recipe adds a
     # dense-CONTEXT / dense-TARGET part (both streams dense) alongside realistic.
@@ -846,8 +853,10 @@ def main(args, rank, world_size, local_rank, device):
     # deployment mapping is still trained. Norm stats are unaffected (computed
     # from the realistic train files directly). Needs ADD_CROSSSTREAM and
     # DENSE_DENSE_CONCAT on to leave anything to train on. True = 125/127
-    # behavior. Study 130: True -- back to the study-123 champion config.
-    REALISTIC_TARGET_CONCAT = True
+    # behavior. Study 129 RESULT: 1.2220 (new champion, -0.030 vs 123) -- every
+    # band except ztfg centered (mean|bias| 0.19), spread unchanged, so the gain
+    # is the bias share of MSE (7.3% -> 3.3%). Study 130 ran with True (123 base).
+    REALISTIC_TARGET_CONCAT = False
 
     # Horizon-covering target sampling (window mode only). When set, each sample
     # draws its target lead time ~uniform in days over (0, TARGET_HORIZON_DAYS]
@@ -922,7 +931,10 @@ def main(args, rank, world_size, local_rank, device):
     #               logs (the weighted batch loss divides by sum(w), so scale is a
     #               no-op).
     #   "none"   -- equal weight in z-units (BAND_WEIGHTS = None).
-    BAND_WEIGHTS_MODE = "std"
+    # Study 130 RESULT ("std" on the 123 base): 1.3450, +0.093 -- regressed, and
+    # spread rose in EVERY band (bias-free RMSE 1.205 -> 1.316), not a trade
+    # between bands. Reverted to "manual".
+    BAND_WEIGHTS_MODE = "manual"
     BAND_WEIGHTS = torch.tensor(
         [
             2.0,  # ztfg -- ZTF bands lag in rollout; up-weight from 1->2

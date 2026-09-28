@@ -37,6 +37,7 @@ import csv
 import json
 import os
 import sys
+from statistics import NormalDist
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -264,6 +265,45 @@ def _batched_forward(
     return out  # [P, Q, N_BANDS]
 
 
+def interval_bounds(q, levels, median_idx, interval):
+    """Lower/upper bounds of a central ``interval`` from the quantile axis.
+
+    When the head emits the exact ``(1 - interval) / 2`` and ``(1 + interval) / 2``
+    quantiles they are returned as-is. Otherwise the outer quantiles are widened
+    (or narrowed) about the median by the Gaussian ratio
+    ``z_{(1+interval)/2} / z_{level}``, separately on each side so any skew in the
+    learned band is kept. E.g. a (0.1, 0.5, 0.9) head plotted at 90% scales each
+    half-width by 1.645 / 1.282 = 1.28. This is an approximation -- the model only
+    learned the quantiles it was trained on.
+
+    Args:
+        q (np.ndarray): Predictions with the quantile axis at dim 1, [P, Q, ...].
+        levels (list | None): Quantile level of each index on the Q axis.
+        median_idx (int): Index of the median on the Q axis.
+        interval (float): Central coverage to plot, in (0, 1).
+
+    Returns:
+        tuple: ``(low, high, exact)`` -- arrays shaped like ``q[:, 0]`` and whether
+        the bounds are learned quantiles (True) or Gaussian-scaled (False).
+    """
+    n_q = q.shape[1]
+    if n_q == 1 or levels is None:
+        return q[:, 0], q[:, n_q - 1], True
+    lo_p, hi_p = 0.5 * (1.0 - interval), 0.5 * (1.0 + interval)
+    levels = [float(v) for v in levels]
+    for i, p_lo in enumerate(levels):
+        for j, p_hi in enumerate(levels):
+            if abs(p_lo - lo_p) < 1e-6 and abs(p_hi - hi_p) < 1e-6:
+                return q[:, i], q[:, j], True
+    med = q[:, median_idx]
+    z_target = NormalDist().inv_cdf(hi_p)
+    k_lo = z_target / -NormalDist().inv_cdf(levels[0])
+    k_hi = z_target / NormalDist().inv_cdf(levels[-1])
+    low = med - k_lo * (med - q[:, 0])
+    high = med + k_hi * (q[:, n_q - 1] - med)
+    return low, high, False
+
+
 def _rollout_scored(
     model: torch.nn.Module,
     device: torch.device,
@@ -407,6 +447,7 @@ def eval_object(
     uniform_stream: tuple | None = None,
     rollout: bool = False,
     probe_dense_context: bool = False,
+    plot_interval: float = 0.9,
 ):
     """Score one object's late-time dense truth against a realistic-context forecast.
 
@@ -598,10 +639,15 @@ def eval_object(
     n_q = curve_q.shape[1]
     curve = curve_q[:, median_idx, :]  # [60, N_BANDS] median point forecast
     curve_mag = curve * (stds[None, :] + EPS) + means[None, :]
-    # Outer-quantile curves for the shaded uncertainty band (== median when Q==1,
-    # so the band has zero width for a point head and nothing is drawn).
-    curve_low_mag = curve_q[:, 0, :] * (stds[None, :] + EPS) + means[None, :]
-    curve_high_mag = curve_q[:, n_q - 1, :] * (stds[None, :] + EPS) + means[None, :]
+    # Central-interval curves for the shaded uncertainty band (== median when
+    # Q==1, so the band has zero width for a point head and nothing is drawn).
+    # Only the plot uses plot_interval; the scored CSV keeps the raw outer
+    # quantiles so quantile_coverage.py stays valid.
+    curve_low, curve_high, interval_exact = interval_bounds(
+        curve_q, getattr(model, "quantile_levels", None), median_idx, plot_interval
+    )
+    curve_low_mag = curve_low * (stds[None, :] + EPS) + means[None, :]
+    curve_high_mag = curve_high * (stds[None, :] + EPS) + means[None, :]
 
     # Optional uniform-grid "true curve" for plotting, phase-aligned to the same
     # t0 (first realistic detection) so it overlays in the same frame. Never
@@ -622,6 +668,10 @@ def eval_object(
         "curve_mag": curve_mag.astype(np.float32),
         "curve_low_mag": curve_low_mag.astype(np.float32),
         "curve_high_mag": curve_high_mag.astype(np.float32),
+        "interval_label": (
+            f"forecast {plot_interval:.0%}"
+            + ("" if interval_exact else " (Gaussian-scaled)")
+        ),
         # Only the pre-cutoff realistic detections were shown to the model, so
         # plot those as the context (not the full realistic stream).
         "real": (r_t_ctx - t0, r_v_ctx, r_b_ctx),
@@ -672,8 +722,8 @@ def plot_object(result, stem, outpath):
                 r_ph[rm], r_v[rm], s=26, c=BAND_COLORS[b],
                 edgecolor="k", linewidth=0.4, label="realistic ctx",
             )
-        # Shaded quantile band (0.1-0.9) when the model has a quantile head. For a
-        # point head low == high == median, so skip drawing a zero-width band.
+        # Shaded central interval (--plot_interval) when the model has a quantile
+        # head. For a point head low == high == median, so skip a zero-width band.
         c_low = result.get("curve_low_mag")
         c_high = result.get("curve_high_mag")
         if (
@@ -684,7 +734,7 @@ def plot_object(result, stem, outpath):
             ax.fill_between(
                 result["curve_phase"], c_low[:, b], c_high[:, b],
                 color=BAND_COLORS[b], alpha=0.2, linewidth=0,
-                label="forecast 0.1-0.9",
+                label=result.get("interval_label", "forecast interval"),
             )
         ax.plot(
             result["curve_phase"], result["curve_mag"][:, b],
@@ -818,6 +868,16 @@ def get_args():
         type=int,
         default=12,
         help="Number of per-object forecast plots to write.",
+    )
+    p.add_argument(
+        "--plot_interval",
+        type=float,
+        default=0.9,
+        help="Central coverage of the shaded forecast band in the per-object "
+        "plots. Uses the learned quantiles when the head emits them exactly; "
+        "otherwise Gaussian-scales the outer quantiles about the median (e.g. a "
+        "0.1/0.5/0.9 head at 0.9 -> half-widths x1.28). Plot only -- the scored "
+        "CSV keeps the raw outer quantiles.",
     )
     p.add_argument(
         "--rollout",
@@ -965,6 +1025,7 @@ def main():
             uniform_stream=uniform_stream,
             rollout=args.rollout,
             probe_dense_context=args.probe_dense_context,
+            plot_interval=args.plot_interval,
         )
         if result is None:
             continue

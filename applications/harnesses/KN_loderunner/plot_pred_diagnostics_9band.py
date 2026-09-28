@@ -372,6 +372,12 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     else:
         print("Using raw (non-EMA) weights.")
 
+    # Quantile levels of the head's output axis, for plotting intervals at the
+    # right coverage. Checkpoints that predate the key but have a 3-quantile
+    # head were all trained with (0.1, 0.5, 0.9).
+    default_levels = [0.1, 0.5, 0.9] if n_quantiles == 3 else None
+    model.quantile_levels = ckpt.get("quantile_levels", default_levels)
+
     model.eval()
 
     return model, context_len, n_bands, context_window_days, max_context_len
