@@ -26,14 +26,21 @@ No model / GPU / torch. Run where the CSV lives:
 import argparse
 import csv
 from collections import defaultdict
+from statistics import NormalDist
 
 import numpy as np
 
 
 # 0.1-0.9 span of a standard normal (z_0.9 - z_0.1); a calibrated Gaussian band
-# has width ~ this * sigma, so width / GAUSS_1090_SPAN estimates the implied sigma
-# to compare against the residual RMSE.
+# has width ~ this * sigma, so width / span estimates the implied sigma to compare
+# against the residual RMSE. Default for --interval 0.8; other intervals use the
+# matching span (e.g. 3.2897 for the 0.05-0.95 head, --interval 0.9).
 GAUSS_1090_SPAN = 2.5631
+
+
+def gauss_span(interval: float) -> float:
+    """Width of the central ``interval`` of a standard normal, in sigmas."""
+    return 2.0 * NormalDist().inv_cdf(0.5 * (1.0 + interval))
 
 
 def _load(csv_path: str) -> dict:
@@ -74,14 +81,14 @@ def _load(csv_path: str) -> dict:
 
 
 def _row(label: str, true: np.ndarray, low: np.ndarray, high: np.ndarray,
-         resid: np.ndarray) -> str:
+         resid: np.ndarray, span: float = GAUSS_1090_SPAN) -> str:
     """Format one coverage/width line for a band (or the pooled total).
 
     Args:
         label (str): Band name or "OVERALL".
         true (np.ndarray): True magnitudes.
-        low (np.ndarray): Predicted 0.1 quantile.
-        high (np.ndarray): Predicted 0.9 quantile.
+        low (np.ndarray): Predicted lower outer quantile (pred_low).
+        high (np.ndarray): Predicted upper outer quantile (pred_high).
         resid (np.ndarray): Residuals (median pred - true).
 
     Returns:
@@ -96,7 +103,7 @@ def _row(label: str, true: np.ndarray, low: np.ndarray, high: np.ndarray,
     covered = np.mean((true >= lo) & (true <= hi))
     width = np.mean(hi - lo)
     rmse = np.sqrt(np.mean(resid**2))
-    implied_sigma = width / GAUSS_1090_SPAN
+    implied_sigma = width / span
     # ratio > 1 => band wider than residuals need (underconfident); < 1 =>
     # narrower (overconfident); ~1 => width matches the scatter.
     ratio = implied_sigma / rmse if rmse > 0 else float("nan")
@@ -108,11 +115,19 @@ def main() -> None:
     """Parse args and print per-band + overall coverage/width calibration."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--csv", required=True, help="latetime_scored_points.csv path")
+    p.add_argument(
+        "--interval",
+        type=float,
+        default=0.8,
+        help="Nominal central coverage of pred_low..pred_high: 0.8 for a "
+        "0.1/0.5/0.9 head (studies 079-130), 0.9 for 0.05/0.5/0.95 (study 131+).",
+    )
     args = p.parse_args()
+    span = gauss_span(args.interval)
 
     d = _load(args.csv)
     print(f"Loaded {d['true'].shape[0]} scored points from {args.csv}")
-    print("Target coverage for a calibrated 0.1-0.9 band: 0.80")
+    print(f"Target coverage for a calibrated central band: {args.interval:.2f}")
     print("width/RMSE ratio ~1.0 => band width matches residual scatter "
           "(learned floor); <1 overconfident, >1 underconfident.\n")
     header = (f"  {'band':<8}{'n':>7}{'coverage':>10}{'width':>11}"
@@ -120,11 +135,12 @@ def main() -> None:
     print(header)
     print("  " + "-" * (len(header) - 2))
 
-    print(_row("OVERALL", d["true"], d["low"], d["high"], d["resid"]))
+    print(_row("OVERALL", d["true"], d["low"], d["high"], d["resid"], span))
     print()
     for band in sorted(set(d["band"])):
         m = d["band"] == band
-        print(_row(band, d["true"][m], d["low"][m], d["high"][m], d["resid"][m]))
+        print(_row(band, d["true"][m], d["low"][m], d["high"][m], d["resid"][m],
+                   span))
 
 
 if __name__ == "__main__":

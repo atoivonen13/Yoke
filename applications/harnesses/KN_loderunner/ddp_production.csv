@@ -226,5 +226,14 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # exactly magnitude-units (matches the mag-RMSE metric). Read @1000 vs 123's 1.2521: a
 # tie is a win (untuned knob removed); watch the shared negative bias. 100 ep.
 130,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# RESULTS: 129 = 1.2220, NEW CHAMPION (all-dense targets centered every band but ztfg;
+# gain is bias, spread flat). 130 = 1.3450, REGRESSED +0.093 (spread up in every band);
+# reverted to BAND_WEIGHTS_MODE="manual". Script flags now = the 129 champion config.
 
 
+
+# Study 131: 90% INTERVAL HEAD on the study-129 champion. 129 config exactly (all-dense
+# targets, pivot-direct redshift, manual band weights). Sole change QUANTILE_LEVELS
+# (0.1,0.5,0.9) -> (0.05,0.5,0.95). Pinball loss not comparable to prior studies; read
+# late RMSE @1000 vs 129's 1.2220 (tie = keep), plus quantile_coverage.py --interval 0.9.
+131,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
