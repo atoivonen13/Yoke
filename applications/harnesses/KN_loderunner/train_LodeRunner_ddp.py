@@ -307,8 +307,10 @@ def main(args, rank, world_size, local_rank, device):
     # prior studies; compare late RMSE @1000 only.
     # Study 132: back to (0.1, 0.5, 0.9) so 132 (MAX_CONTEXT_LEN 24) is a sole
     # change vs the 129 champion; 131 carries the 0.05/0.95 test on its own.
+    # After 131 (1.2377, seed-level tie with 129) the recipe keeps (0.05, 0.5, 0.95)
+    # for a true 90% band; per-band width is fixed post hoc (calibrate_intervals.py).
     N_QUANTILES = 3
-    QUANTILE_LEVELS = (0.1, 0.5, 0.9)
+    QUANTILE_LEVELS = (0.05, 0.5, 0.95)
 
     # Per-quantile weights for the pinball combine (normalized to sum to 1 inside
     # PinballLoss, so the loss scale / effective LR is unchanged; only RELATIVE
@@ -768,8 +770,11 @@ def main(args, rank, world_size, local_rank, device):
     # first detections / rise) -- vs only 11.0% (realistic) / 16.9% (dense) of
     # training anchors. 24 covers 99.9% of eval contexts and ~all training
     # samples. Widens the conditioner input 144 -> 288; fresh study required.
+    # Study 132 RESULT: 1.3431, REGRESSED +0.121 vs 129 (1.2220), every band worse
+    # and uniformly too bright (mean|bias| 0.19 -> 0.41; bias-free 1.202 -> 1.267).
+    # Reverted to 12.
     CONTEXT_WINDOW_DAYS = 2.0
-    MAX_CONTEXT_LEN = 24
+    MAX_CONTEXT_LEN = 12
 
     # Study 089 (dense-context CEILING probe). When True, BOTH the training and
     # validation CONTEXT are drawn from the dense companion set (kn_dense_glob)
