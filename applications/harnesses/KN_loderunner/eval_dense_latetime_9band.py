@@ -265,6 +265,28 @@ def _batched_forward(
     return out  # [P, Q, N_BANDS]
 
 
+def load_interval_calibration(path):
+    """Load per-band interval scales written by ``calibrate_intervals.py``.
+
+    Args:
+        path (str): Calibration JSON (``{"interval", "bands": {name: {k_lo,
+            k_hi}}}``).
+
+    Returns:
+        dict: ``interval`` plus ``k_lo`` / ``k_hi`` arrays in BAND_NAMES order;
+        bands absent from the JSON keep a scale of 1 (raw quantiles).
+    """
+    with open(path) as fh:
+        cal = json.load(fh)
+    k_lo = np.ones(N_BANDS, dtype=np.float32)
+    k_hi = np.ones(N_BANDS, dtype=np.float32)
+    for b, name in enumerate(BAND_NAMES):
+        if name in cal["bands"]:
+            k_lo[b] = cal["bands"][name]["k_lo"]
+            k_hi[b] = cal["bands"][name]["k_hi"]
+    return {"interval": float(cal["interval"]), "k_lo": k_lo, "k_hi": k_hi}
+
+
 def interval_bounds(q, levels, median_idx, interval):
     """Lower/upper bounds of a central ``interval`` from the quantile axis.
 
@@ -448,6 +470,7 @@ def eval_object(
     rollout: bool = False,
     probe_dense_context: bool = False,
     plot_interval: float = 0.9,
+    interval_calibration: dict | None = None,
 ):
     """Score one object's late-time dense truth against a realistic-context forecast.
 
@@ -472,6 +495,11 @@ def eval_object(
       training rollout and ``get_rollout_from_stream`` do. Each step's ``Dt`` is
       measured from the last FED event, not the fixed last realistic detection.
       This measures the true inference path (and exposes drift).
+
+    ``interval_calibration`` (from ``load_interval_calibration``) rescales the raw
+    outer quantiles per band about the median (``calibrate_intervals.py``). When
+    given, scored points gain ``pred_low_cal`` / ``pred_high_cal`` and the plotted
+    band is the calibrated one (``plot_interval`` is then ignored).
     """
     r_t, r_v, r_b, r_ul, r_z = real_stream
     d_t, d_v, d_b, d_ul, _d_z = dense_stream
@@ -614,18 +642,22 @@ def eval_object(
             pred_low = float(pred_q[j, low_idx, band] * sb + means[band])
             pred_high = float(pred_q[j, high_idx, band] * sb + means[band])
             true_mag = float(d_v[idx])
-            scored.append(
-                {
-                    "phase": float(d_t[idx]) - t0,
-                    "lead_time": float(lead_times[j]),
-                    "band": band,
-                    "pred_mag": pred_mag,
-                    "pred_low": pred_low,
-                    "pred_high": pred_high,
-                    "true_mag": true_mag,
-                    "residual_mag": pred_mag - true_mag,
-                }
-            )
+            point = {
+                "phase": float(d_t[idx]) - t0,
+                "lead_time": float(lead_times[j]),
+                "band": band,
+                "pred_mag": pred_mag,
+                "pred_low": pred_low,
+                "pred_high": pred_high,
+                "true_mag": true_mag,
+                "residual_mag": pred_mag - true_mag,
+            }
+            if interval_calibration is not None:
+                k_lo = interval_calibration["k_lo"][band]
+                k_hi = interval_calibration["k_hi"][band]
+                point["pred_low_cal"] = pred_mag - k_lo * (pred_mag - pred_low)
+                point["pred_high_cal"] = pred_mag + k_hi * (pred_high - pred_mag)
+            scored.append(point)
 
     # Smooth forecast curve for plotting: sweep lead time from 0 to the farthest
     # scored late-time point, predicting all bands at each lead time -- also a
@@ -648,6 +680,21 @@ def eval_object(
     )
     curve_low_mag = curve_low * (stds[None, :] + EPS) + means[None, :]
     curve_high_mag = curve_high * (stds[None, :] + EPS) + means[None, :]
+    interval_label = (
+        f"forecast {plot_interval:.0%}"
+        + ("" if interval_exact else " (Gaussian-scaled)")
+    )
+    if interval_calibration is not None:
+        # Calibrated band: per-band scales applied to the RAW outer quantiles.
+        raw_low = curve_q[:, 0, :] * (stds[None, :] + EPS) + means[None, :]
+        raw_high = curve_q[:, n_q - 1, :] * (stds[None, :] + EPS) + means[None, :]
+        k_lo = interval_calibration["k_lo"][None, :]
+        k_hi = interval_calibration["k_hi"][None, :]
+        curve_low_mag = curve_mag - k_lo * (curve_mag - raw_low)
+        curve_high_mag = curve_mag + k_hi * (raw_high - curve_mag)
+        interval_label = (
+            f"forecast {interval_calibration['interval']:.0%} (calibrated)"
+        )
 
     # Optional uniform-grid "true curve" for plotting, phase-aligned to the same
     # t0 (first realistic detection) so it overlays in the same frame. Never
@@ -668,10 +715,7 @@ def eval_object(
         "curve_mag": curve_mag.astype(np.float32),
         "curve_low_mag": curve_low_mag.astype(np.float32),
         "curve_high_mag": curve_high_mag.astype(np.float32),
-        "interval_label": (
-            f"forecast {plot_interval:.0%}"
-            + ("" if interval_exact else " (Gaussian-scaled)")
-        ),
+        "interval_label": interval_label,
         # Only the pre-cutoff realistic detections were shown to the model, so
         # plot those as the context (not the full realistic stream).
         "real": (r_t_ctx - t0, r_v_ctx, r_b_ctx),
@@ -880,6 +924,15 @@ def get_args():
         "CSV keeps the raw outer quantiles.",
     )
     p.add_argument(
+        "--interval_calibration",
+        type=str,
+        default=None,
+        help="Per-band interval scales JSON from calibrate_intervals.py (fit on "
+        "the VALIDATION split). When given, the plots shade the calibrated band "
+        "(overriding --plot_interval) and the CSV gains pred_low_cal / "
+        "pred_high_cal. The median, and so RMSE, is unchanged. DIRECT mode only.",
+    )
+    p.add_argument(
         "--rollout",
         action="store_true",
         help="Score the AUTOREGRESSIVE forecast: feed each prediction back as "
@@ -994,6 +1047,21 @@ def main():
     if args.max_objects > 0:
         stems = stems[: args.max_objects]
 
+    interval_calibration = None
+    if args.interval_calibration is not None:
+        if args.rollout:
+            raise ValueError("--interval_calibration applies to DIRECT mode only.")
+        interval_calibration = load_interval_calibration(args.interval_calibration)
+        print(
+            f"Interval calibration ({interval_calibration['interval']:.0%}) from "
+            f"{args.interval_calibration}: "
+            + ", ".join(
+                f"{BAND_NAMES[b]} {interval_calibration['k_lo'][b]:.2f}/"
+                f"{interval_calibration['k_hi'][b]:.2f}"
+                for b in range(N_BANDS)
+            )
+        )
+
     all_scored = []
     plotted = 0
     n_eval = 0
@@ -1026,6 +1094,7 @@ def main():
             rollout=args.rollout,
             probe_dense_context=args.probe_dense_context,
             plot_interval=args.plot_interval,
+            interval_calibration=interval_calibration,
         )
         if result is None:
             continue
@@ -1084,21 +1153,44 @@ def main():
     csv_path = os.path.join(args.outdir, "latetime_scored_points.csv")
     with open(csv_path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(
-            ["stem", "band", "phase_days", "lead_time_days",
-             "pred_mag", "pred_low", "pred_high", "true_mag", "residual_mag"]
-        )
+        cols = ["stem", "band", "phase_days", "lead_time_days",
+                "pred_mag", "pred_low", "pred_high", "true_mag", "residual_mag"]
+        if interval_calibration is not None:
+            cols += ["pred_low_cal", "pred_high_cal"]
+        w.writerow(cols)
         for s in all_scored:
             # pred_low/high present only on the DIRECT quantile path; fall back to
             # the point forecast (rollout path, or a point head) so the columns are
             # always populated.
-            w.writerow([
+            row = [
                 s["stem"], BAND_NAMES[s["band"]], f"{s['phase']:.4f}",
                 f"{s['lead_time']:.4f}", f"{s['pred_mag']:.4f}",
                 f"{s.get('pred_low', s['pred_mag']):.4f}",
                 f"{s.get('pred_high', s['pred_mag']):.4f}",
                 f"{s['true_mag']:.4f}", f"{s['residual_mag']:.4f}",
-            ])
+            ]
+            if interval_calibration is not None:
+                row += [f"{s['pred_low_cal']:.4f}", f"{s['pred_high_cal']:.4f}"]
+            w.writerow(row)
+
+    if interval_calibration is not None:
+        # Calibrated coverage on THIS eval's points (held out when the scales
+        # were fit on the validation split).
+        true = np.asarray([s["true_mag"] for s in all_scored])
+        lo = np.asarray([s["pred_low_cal"] for s in all_scored])
+        hi = np.asarray([s["pred_high_cal"] for s in all_scored])
+        lo_raw = np.asarray([s["pred_low"] for s in all_scored])
+        hi_raw = np.asarray([s["pred_high"] for s in all_scored])
+        cov = (true >= lo) & (true <= hi)
+        cov_raw = (true >= lo_raw) & (true <= hi_raw)
+        print(f"\nInterval coverage (target "
+              f"{interval_calibration['interval']:.2f}): raw / calibrated")
+        print(f"  {'ALL':>5}: {cov_raw.mean():.3f} / {cov.mean():.3f}")
+        for b in range(N_BANDS):
+            m = bands == b
+            if np.any(m):
+                print(f"  {BAND_NAMES[b]:>5}: {cov_raw[m].mean():.3f} / "
+                      f"{cov[m].mean():.3f}")
 
     print(f"\nWrote {plotted} per-object plots, the RMSE-vs-lead plot, and "
           f"{csv_path} in {args.outdir}")
