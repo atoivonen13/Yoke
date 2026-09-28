@@ -305,8 +305,10 @@ def main(args, rank, world_size, local_rank, device):
     # terms pull on the same colors the median uses -- moving them into the tails
     # can shift the per-band median. Pinball loss values are not comparable to
     # prior studies; compare late RMSE @1000 only.
+    # Study 132: back to (0.1, 0.5, 0.9) so 132 (MAX_CONTEXT_LEN 24) is a sole
+    # change vs the 129 champion; 131 carries the 0.05/0.95 test on its own.
     N_QUANTILES = 3
-    QUANTILE_LEVELS = (0.05, 0.5, 0.95)
+    QUANTILE_LEVELS = (0.1, 0.5, 0.9)
 
     # Per-quantile weights for the pinball combine (normalized to sum to 1 inside
     # PinballLoss, so the loss scale / effective LR is unchanged; only RELATIVE
@@ -758,8 +760,16 @@ def main(args, rank, world_size, local_rank, device):
     # widening the window and spreading the context dilute the local-slope signal.
     # window_select_positions is reverted to the legacy trailing rule, so this
     # 2 d/12 config reproduces the 075 champion exactly.
+    # Study 132: MAX_CONTEXT_LEN 12 -> 24 at the SAME 2 d window (sole change vs
+    # 129). Untested combination: 072/078 also widened the window to 5 d, 077
+    # changed the selection rule. context_overfill_stats.py: the eval context
+    # (realistic, phase <= 2 d) over-fills 12 for 57.0% of test objects and the
+    # trailing rule drops 13.7% of its in-window events -- always the OLDEST (the
+    # first detections / rise) -- vs only 11.0% (realistic) / 16.9% (dense) of
+    # training anchors. 24 covers 99.9% of eval contexts and ~all training
+    # samples. Widens the conditioner input 144 -> 288; fresh study required.
     CONTEXT_WINDOW_DAYS = 2.0
-    MAX_CONTEXT_LEN = 12
+    MAX_CONTEXT_LEN = 24
 
     # Study 089 (dense-context CEILING probe). When True, BOTH the training and
     # validation CONTEXT are drawn from the dense companion set (kn_dense_glob)

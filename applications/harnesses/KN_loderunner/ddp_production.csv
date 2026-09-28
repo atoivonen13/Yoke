@@ -237,3 +237,9 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # (0.1,0.5,0.9) -> (0.05,0.5,0.95). Pinball loss not comparable to prior studies; read
 # late RMSE @1000 vs 129's 1.2220 (tie = keep), plus quantile_coverage.py --interval 0.9.
 131,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+
+# Study 132: CONTEXT CAP 12 -> 24 on the study-129 champion (window stays 2 d). 129 config
+# exactly, QUANTILE_LEVELS restored to (0.1,0.5,0.9). Eval context over-fills 12 for 57% of
+# test objects (13.7% of events dropped, oldest first) vs 11-17% of training anchors; 24
+# covers 99.9%. Read late RMSE @1000 vs 129's 1.2220.
+132,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
