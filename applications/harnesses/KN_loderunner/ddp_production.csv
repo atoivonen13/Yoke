@@ -247,3 +247,9 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 132,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 # RESULT 132: 1.3431 (MAE 1.0149), REGRESSED +0.121 vs 129 -- every band, uniformly too bright
 # (mean|bias| 0.19 -> 0.41) and more spread (bias-free 1.202 -> 1.267). Reverted MAX_CONTEXT_LEN to 12.
+
+# Study 133: 131 config again (0.05/0.5/0.95, cap 12) -- train script differs from 131 only
+# in comments, so this is a RE-SEED of 131.
+133,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# RESULT 133: 1.2924 (MAE 0.9332), +0.055 vs 131 with no config change -- seed spread is ~0.05,
+# not 0.02. Same biases as 131; all spread (bias-free 1.216 -> 1.270).
