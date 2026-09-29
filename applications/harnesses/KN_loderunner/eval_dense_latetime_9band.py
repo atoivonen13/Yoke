@@ -216,6 +216,11 @@ def _stem_to_path(data_glob: str) -> dict:
     return {_stem(f): f for f in glob.glob(data_glob)}
 
 
+# Largest forward batch known to fit the backbone's 32-bit conv indexing
+# (lowered by _batched_forward on overflow).
+_FORWARD_BATCH_LIMIT = [256]
+
+
 def _batched_forward(
     model: torch.nn.Module,
     x: torch.Tensor,
@@ -250,13 +255,26 @@ def _batched_forward(
     """
     lead_times = np.asarray(lead_times, dtype=np.float32)
     median_idx = getattr(model, "median_idx", 0)
+    # The backbone runs on a large pseudo-image per row, so a full chunk can
+    # overflow the conv's 32-bit indexing. Halve the chunk until it fits and
+    # remember the size that worked for later calls.
+    max_batch = min(max_batch, _FORWARD_BATCH_LIMIT[0])
     chunks = []
     with torch.inference_mode():
-        for start in range(0, lead_times.shape[0], max_batch):
+        start = 0
+        while start < lead_times.shape[0]:
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
             Dt = torch.tensor(chunk, dtype=torch.float32, device=device)
-            pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
+            try:
+                pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
+            except RuntimeError as err:
+                if "canUse32BitIndexMath" not in str(err) or chunk.shape[0] == 1:
+                    raise
+                max_batch = max(1, chunk.shape[0] // 2)
+                _FORWARD_BATCH_LIMIT[0] = max_batch
+                continue
+            start += chunk.shape[0]
             # Quantile head returns [B, n_quantiles, N_BANDS]; point head returns
             # [B, N_BANDS]. Normalize to a quantile axis of length >= 1 so the two
             # heads share one code path.
