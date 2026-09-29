@@ -153,6 +153,17 @@ parser.add_argument(
     "realistic TRAIN objects to supervise late-time behavior. Validation and "
     "the primary metric stay realistic-only.",
 )
+parser.add_argument(
+    "--kn_uniform_glob",
+    type=str,
+    default=(
+        "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
+        "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
+    ),
+    help="Glob for the uniform-grid light-curve files (same objects, noise-free, "
+    "no limiting magnitude: the true light curve). Used as the cross-stream "
+    "TARGET set when UNIFORM_CROSSSTREAM_TARGET is True.",
+)
 
 # Change some default filepaths. The KN split lists hold object stems (one per
 # line), shared across the realistic and dense directories; see
@@ -842,6 +853,17 @@ def main(args, rank, world_size, local_rank, device):
     # Study 130 ran with False (123 base); restored True for the 129 champion.
     ADD_CROSSSTREAM = True
 
+    # Study 134: cross-stream TARGET set. The goal is the TRUE light curve, even
+    # below the ZTF limiting magnitude. The dense set is depth-limited (ZTF dense
+    # truth stops at ~23 mag), and 133's uniform-truth score showed every band's
+    # forecast floors at its dense-training depth: 77% of the ztfg late grid is
+    # beyond depth with bias -4.5 mag, invisible to the dense RMSE. When True,
+    # the cross-stream part's targets come from --kn_uniform_glob (noise-free, no
+    # limiting mag) instead of --kn_dense_glob: same realistic context and same
+    # sample count, only the target set changes. The dense-dense part is
+    # unchanged. False = 129/133 behavior.
+    UNIFORM_CROSSSTREAM_TARGET = True
+
     # Study 128: dense-dense concat part on/off. The champion recipe adds a
     # dense-CONTEXT / dense-TARGET part (both streams dense) alongside realistic.
     # Study 127 showed that combining THAT part with the new cross-stream part
@@ -1317,13 +1339,21 @@ def main(args, rank, world_size, local_rank, device):
     random.seed(DATA_SEED)
 
     def _make_9band(
-        data_glob: str, object_ids: set, target_data_glob: str = None
+        data_glob: str,
+        object_ids: set,
+        target_data_glob: str = None,
+        target_drop_upper_limits: bool = None,
+        target_random_tiebreak: bool = False,
     ) -> Kilonova_lc_scalar_context_DataSet_9band:
         """Build a 9-band dataset over one directory restricted to object_ids.
 
         When ``target_data_glob`` is set, cross-stream mode: context is drawn from
         ``data_glob`` and the target from ``target_data_glob`` (same objects,
-        shared per-object clock). See the dataset docstring.
+        shared per-object clock). ``target_drop_upper_limits`` overrides the
+        upper-limit dropping for the target stream only (None = same as the
+        context); ``target_random_tiebreak`` breaks equal-lead target ties at
+        random (needed for the band-synchronous uniform grid). See the dataset
+        docstring.
         """
         return Kilonova_lc_scalar_context_DataSet_9band(
             N_imgs=0,
@@ -1343,6 +1373,8 @@ def main(args, rank, world_size, local_rank, device):
             append_phase=PHASE_FOURIER_BANDS > 0,
             append_redshift=REDSHIFT_FOURIER_BANDS > 0 or REDSHIFT_PIVOT_DIRECT,
             target_data_glob=target_data_glob,
+            target_drop_upper_limits=target_drop_upper_limits,
+            target_random_tiebreak=target_random_tiebreak,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1419,23 +1451,46 @@ def main(args, rank, world_size, local_rank, device):
         # late-faint TARGET of the same object on a shared clock. ADDED to (not
         # replacing) the realistic and dense-dense parts, so no existing
         # supervision is lost; this part alone carries the sparse-context ->
-        # faint-late mapping the eval scores.
+        # faint-late mapping the eval scores. Study 134: with
+        # UNIFORM_CROSSSTREAM_TARGET the targets are the uniform-grid true curve
+        # (no limiting mag), so faint-late supervision reaches below the ZTF
+        # depth. Its rows are all truth, so no upper-limit dropping on targets,
+        # and every band shares each grid time, so equal-lead ties are broken at
+        # random (else every target would be ztfg, the first band).
+        if UNIFORM_CROSSSTREAM_TARGET:
+            cross_target_glob = args.kn_uniform_glob
+            cross_target_drop_ul = False
+            cross_target_tiebreak = True
+            cross_target_name = "uniform"
+            if not (cross_target_glob and glob.glob(cross_target_glob)):
+                raise FileNotFoundError(
+                    "UNIFORM_CROSSSTREAM_TARGET=True but kn_uniform_glob matched "
+                    f"no files: {cross_target_glob!r}."
+                )
+        else:
+            cross_target_glob = args.kn_dense_glob
+            cross_target_drop_ul = None
+            cross_target_tiebreak = False
+            cross_target_name = "dense"
         if (
             ADD_CROSSSTREAM
-            and args.kn_dense_glob
-            and glob.glob(args.kn_dense_glob)
+            and cross_target_glob
+            and glob.glob(cross_target_glob)
         ):
             train_cross = _make_9band(
                 args.kn_realistic_glob,
                 train_stems,
-                target_data_glob=args.kn_dense_glob,
+                target_data_glob=cross_target_glob,
+                target_drop_upper_limits=cross_target_drop_ul,
+                target_random_tiebreak=cross_target_tiebreak,
             )
             if len(train_cross) > 0:
                 train_parts.append(train_cross)
                 if rank == 0:
                     print(
                         f"Cross-stream training set added: {len(train_cross)} "
-                        "samples (realistic context -> dense target).",
+                        f"samples (realistic context -> {cross_target_name} "
+                        "target).",
                         flush=True,
                     )
             elif rank == 0:
@@ -1668,6 +1723,8 @@ def main(args, rank, world_size, local_rank, device):
                     "target_horizon_days": TARGET_HORIZON_DAYS,
                     "probe_dense_context": PROBE_DENSE_CONTEXT,
                     "add_crossstream": ADD_CROSSSTREAM,
+                    "uniform_crossstream_target": UNIFORM_CROSSSTREAM_TARGET,
+                    "kn_uniform_glob": args.kn_uniform_glob,
                     "dense_dense_concat": DENSE_DENSE_CONCAT,
                     "realistic_target_concat": REALISTIC_TARGET_CONCAT,
                     "train_filelist": args.train_filelist,
