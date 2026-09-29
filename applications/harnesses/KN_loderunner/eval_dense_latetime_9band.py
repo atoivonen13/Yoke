@@ -37,6 +37,8 @@ import csv
 import json
 import os
 import sys
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from statistics import NormalDist
 
 import matplotlib
@@ -79,6 +81,9 @@ ERROR_COL = 2
 N_BANDS = len(BAND_KEYS)
 DROP_UPPER_LIMITS = True  # matches training for the realistic (context) stream
 FILELIST_DIR = "/net/sescratch1/exempt/artimis/atoivonen/filelists"
+# npz reader threads and how many objects they may read ahead of the model.
+IO_WORKERS = 8
+IO_PREFETCH = 32
 
 
 def study_tag(study: int) -> str:
@@ -246,7 +251,7 @@ def _batched_forward(
     lead_times = np.asarray(lead_times, dtype=np.float32)
     median_idx = getattr(model, "median_idx", 0)
     chunks = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for start in range(0, lead_times.shape[0], max_batch):
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
@@ -472,6 +477,7 @@ def eval_object(
     probe_dense_context: bool = False,
     plot_interval: float = 0.9,
     interval_calibration: dict | None = None,
+    need_curve: bool = True,
 ):
     """Score one object's late-time dense truth against a realistic-context forecast.
 
@@ -501,6 +507,10 @@ def eval_object(
     outer quantiles per band about the median (``calibrate_intervals.py``). When
     given, scored points gain ``pred_low_cal`` / ``pred_high_cal`` and the plotted
     band is the calibrated one (``plot_interval`` is then ignored).
+
+    ``need_curve=False`` skips the smooth plotting curve (its ``curve_*`` keys
+    are None); the scored points are unchanged. Use it for objects that will
+    not be plotted.
     """
     r_t, r_v, r_b, r_ul, r_z = real_stream
     d_t, d_v, d_b, d_ul, _d_z = dense_stream
@@ -603,6 +613,59 @@ def eval_object(
     if late_idx.shape[0] == 0:
         return None
 
+    # Uniform-truth points (DIRECT only), scored below. The uniform grid shares
+    # epochs across bands: forecast each unique lead time once, then pick each
+    # point's band.
+    u_idx = None
+    if uniform_stream is not None and not rollout:
+        u_t, u_v, u_b, _u_ul, _u_z = uniform_stream
+        u_phase = u_t - t0
+        u_lead = u_t - last_real_t
+        u_mask = (
+            (u_phase > late_time_cutoff_days)
+            & (u_phase <= late_time_max_days)
+            & (u_lead > 0)
+            & np.isfinite(u_v)
+        )
+        if np.any(u_mask):
+            u_idx = np.nonzero(u_mask)[0]
+            uniq, inv = np.unique(
+                u_lead[u_idx].astype(np.float32), return_inverse=True
+            )
+
+    # Smooth forecast curve lead times for plotting: 0 to the farthest scored
+    # late-time point.
+    lead_grid = None
+    if need_curve:
+        max_dt = float(lead_times.max())
+        lead_grid = np.linspace(0.0, max_dt, 60).astype(np.float32)
+
+    # Every lead time above is forecast from the SAME fixed context x, so run
+    # them all in ONE batched forward and split the rows afterwards (each row
+    # depends only on x and its own Dt). The rollout path builds its own
+    # contexts, so only the curve comes from here.
+    segments = []
+    if not rollout:
+        segments.append(lead_times)
+    if u_idx is not None:
+        segments.append(uniq)
+    if lead_grid is not None:
+        segments.append(lead_grid)
+    all_q = None
+    if segments:
+        all_q = _batched_forward(
+            model, x, np.concatenate(segments), device, return_quantiles=True
+        )  # [sum(P), Q, N_BANDS]
+    offset = 0
+    if not rollout:
+        pred_q = all_q[offset : offset + lead_times.shape[0]]
+        offset += lead_times.shape[0]
+    if u_idx is not None:
+        u_q = all_q[offset : offset + uniq.shape[0]][inv]
+        offset += uniq.shape[0]
+    if lead_grid is not None:
+        curve_q = all_q[offset : offset + lead_grid.shape[0]]
+
     if rollout:
         # AUTOREGRESSIVE: grow the context, feeding each (normalized) prediction
         # back before the next step. Mirrors get_rollout_from_stream and the
@@ -629,9 +692,7 @@ def eval_object(
     else:
         # Keep the full quantile axis so the 0.1/0.9 bands can be scored/plotted.
         # For a point head Q == 1 and low/high collapse to the median (no-op).
-        pred_q = _batched_forward(
-            model, x, lead_times, device, return_quantiles=True
-        )  # [P, Q, N_BANDS]
+        # pred_q [P, Q, N_BANDS] came from the shared forward above.
         median_idx = getattr(model, "median_idx", 0)
         n_q = pred_q.shape[1]
         low_idx, high_idx = 0, n_q - 1  # outer quantiles (== median when Q == 1)
@@ -660,42 +721,69 @@ def eval_object(
                 point["pred_high_cal"] = pred_mag + k_hi * (pred_high - pred_mag)
             scored.append(point)
 
-    # Smooth forecast curve for plotting: sweep lead time from 0 to the farthest
-    # scored late-time point, predicting all bands at each lead time -- also a
-    # single batched forward pass.
-    max_dt = float(lead_times.max())
-    lead_grid = np.linspace(0.0, max_dt, 60).astype(np.float32)
-    curve_q = _batched_forward(
-        model, x, lead_grid, device, return_quantiles=True
-    )  # [60, Q, N_BANDS]
-    median_idx = getattr(model, "median_idx", 0)
-    n_q = curve_q.shape[1]
-    curve = curve_q[:, median_idx, :]  # [60, N_BANDS] median point forecast
-    curve_mag = curve * (stds[None, :] + EPS) + means[None, :]
-    # Central-interval curves for the shaded uncertainty band (== median when
-    # Q==1, so the band has zero width for a point head and nothing is drawn).
-    # Only the plot uses plot_interval; the scored CSV keeps the raw outer
-    # quantiles so quantile_coverage.py stays valid.
-    curve_low, curve_high, interval_exact = interval_bounds(
-        curve_q, getattr(model, "quantile_levels", None), median_idx, plot_interval
-    )
-    curve_low_mag = curve_low * (stds[None, :] + EPS) + means[None, :]
-    curve_high_mag = curve_high * (stds[None, :] + EPS) + means[None, :]
-    interval_label = (
-        f"forecast {plot_interval:.0%}"
-        + ("" if interval_exact else " (Gaussian-scaled)")
-    )
-    if interval_calibration is not None:
-        # Calibrated band: per-band scales applied to the RAW outer quantiles.
-        raw_low = curve_q[:, 0, :] * (stds[None, :] + EPS) + means[None, :]
-        raw_high = curve_q[:, n_q - 1, :] * (stds[None, :] + EPS) + means[None, :]
-        k_lo = interval_calibration["k_lo"][None, :]
-        k_hi = interval_calibration["k_hi"][None, :]
-        curve_low_mag = curve_mag - k_lo * (curve_mag - raw_low)
-        curve_high_mag = curve_mag + k_hi * (raw_high - curve_mag)
-        interval_label = (
-            f"forecast {interval_calibration['interval']:.0%} (calibrated)"
+    # Uniform-truth score (DIRECT only): the same forecast scored against the
+    # noise-free, no-limiting-mag uniform grid over the same phase window and the
+    # same lead-time rule. The dense truth is survey-depth limited, so it never
+    # scores the forecast where an object has faded out of reach (e.g. faint-late
+    # ZTF); this does. Diagnostic only -- the dense score stays the headline.
+    uniform_scored = None
+    if u_idx is not None:
+        # u_q [P, Q, N_BANDS] came from the shared forward above.
+        u_band = u_b[u_idx].astype(np.int64)
+        rows = np.arange(u_idx.shape[0])
+        sb = stds[u_band] + EPS
+        mb = means[u_band]
+        median_idx = getattr(model, "median_idx", 0)
+        n_q = u_q.shape[1]
+        uniform_scored = {
+            "band": u_band,
+            "phase": u_phase[u_idx].astype(np.float32),
+            "lead_time": u_lead[u_idx].astype(np.float32),
+            "pred_mag": u_q[rows, median_idx, u_band] * sb + mb,
+            "pred_low": u_q[rows, 0, u_band] * sb + mb,
+            "pred_high": u_q[rows, n_q - 1, u_band] * sb + mb,
+            "true_mag": u_v[u_idx].astype(np.float32),
+        }
+
+    # Smooth forecast curve for plotting, predicting all bands at each lead
+    # time of lead_grid (curve_q [60, Q, N_BANDS] from the shared forward).
+    curve_phase = curve_mag = curve_low_mag = curve_high_mag = None
+    interval_label = None
+    if need_curve:
+        median_idx = getattr(model, "median_idx", 0)
+        n_q = curve_q.shape[1]
+        curve = curve_q[:, median_idx, :]  # [60, N_BANDS] median point forecast
+        curve_mag = curve * (stds[None, :] + EPS) + means[None, :]
+        # Central-interval curves for the shaded uncertainty band (== median
+        # when Q==1, so the band has zero width for a point head and nothing is
+        # drawn). Only the plot uses plot_interval; the scored CSV keeps the raw
+        # outer quantiles so quantile_coverage.py stays valid.
+        curve_low, curve_high, interval_exact = interval_bounds(
+            curve_q, getattr(model, "quantile_levels", None), median_idx,
+            plot_interval,
         )
+        curve_low_mag = curve_low * (stds[None, :] + EPS) + means[None, :]
+        curve_high_mag = curve_high * (stds[None, :] + EPS) + means[None, :]
+        interval_label = (
+            f"forecast {plot_interval:.0%}"
+            + ("" if interval_exact else " (Gaussian-scaled)")
+        )
+        if interval_calibration is not None:
+            # Calibrated band: per-band scales applied to the RAW outer quantiles.
+            raw_low = curve_q[:, 0, :] * (stds[None, :] + EPS) + means[None, :]
+            raw_high = (curve_q[:, n_q - 1, :] * (stds[None, :] + EPS)
+                        + means[None, :])
+            k_lo = interval_calibration["k_lo"][None, :]
+            k_hi = interval_calibration["k_hi"][None, :]
+            curve_low_mag = curve_mag - k_lo * (curve_mag - raw_low)
+            curve_high_mag = curve_mag + k_hi * (raw_high - curve_mag)
+            interval_label = (
+                f"forecast {interval_calibration['interval']:.0%} (calibrated)"
+            )
+        curve_phase = (last_real_t - t0) + lead_grid
+        curve_mag = curve_mag.astype(np.float32)
+        curve_low_mag = curve_low_mag.astype(np.float32)
+        curve_high_mag = curve_high_mag.astype(np.float32)
 
     # Optional uniform-grid "true curve" for plotting, phase-aligned to the same
     # t0 (first realistic detection) so it overlays in the same frame. Never
@@ -710,12 +798,13 @@ def eval_object(
 
     return {
         "scored": scored,
+        "uniform_scored": uniform_scored,
         "t0": t0,
         "last_real_t": last_real_t,
-        "curve_phase": (last_real_t - t0) + lead_grid,
-        "curve_mag": curve_mag.astype(np.float32),
-        "curve_low_mag": curve_low_mag.astype(np.float32),
-        "curve_high_mag": curve_high_mag.astype(np.float32),
+        "curve_phase": curve_phase,
+        "curve_mag": curve_mag,
+        "curve_low_mag": curve_low_mag,
+        "curve_high_mag": curve_high_mag,
         "interval_label": interval_label,
         # Only the pre-cutoff realistic detections were shown to the model, so
         # plot those as the context (not the full realistic stream).
@@ -861,9 +950,11 @@ def get_args():
         "grid). When it matches files, each per-object plot overlays this as a "
         "continuous 'true curve' line so the forecast can be read curve-vs-curve "
         "even where the survey-limited dense truth has no detections (e.g. deep "
-        "late-time u/g). Plotting only -- never scored, never fed to the model. "
-        "Silently skipped if no files match, so it auto-activates once the set "
-        "is generated.",
+        "late-time u/g). Also scored as a SECONDARY diagnostic (test split, "
+        "DIRECT mode): uniform-truth RMSE/bias per band, split within / beyond "
+        "the dense depth, plus latetime_uniform_scored_points.csv. The dense "
+        "score stays the headline; never fed to the model. Silently skipped if "
+        "no files match.",
     )
     p.add_argument(
         "--test_filelist",
@@ -1000,6 +1091,7 @@ def run_split(
     split_label,
     interval_calibration=None,
     n_plots=0,
+    score_uniform=True,
 ):
     """Evaluate one split, print its summary, and write its CSV / lead plot.
 
@@ -1013,6 +1105,8 @@ def run_split(
         split_label (str): Name printed in the summary (e.g. "test").
         interval_calibration (dict | None): Per-band scales for the band.
         n_plots (int): Number of per-object plots to write.
+        score_uniform (bool): Also score against the uniform-grid truth (when
+            ``uniform_map`` has the object) and write its summary and CSV.
 
     Returns:
         list | None: Scored points (dicts with ``stem``), or None if none scored.
@@ -1026,6 +1120,7 @@ def run_split(
         stems = stems[: args.max_objects]
 
     all_scored = []
+    uniform_scored = []  # per-object dicts of arrays (uniform-truth score)
     plotted = 0
     n_eval = 0
     # When the model was trained with the flagged-UL context channel, the
@@ -1034,43 +1129,66 @@ def run_split(
     # the checkpoint metadata so eval matches training.
     ul_channel = getattr(model, "upper_limit_channel", False)
     real_drop_ul = DROP_UPPER_LIMITS and not ul_channel
-    for stem in stems:
+
+    # The uniform stream only feeds the uniform score and the plots, so it is
+    # not read when the split needs neither (the calibration pass).
+    read_uniform = score_uniform or n_plots > 0
+
+    def read_streams(stem):
         real_stream = read_merged_stream(real_map[stem], real_drop_ul)
         dense_stream = read_merged_stream(dense_map[stem], drop_upper_limits=False)
         uniform_stream = None
-        if stem in uniform_map:
+        if read_uniform and stem in uniform_map:
             uniform_stream = read_merged_stream(
                 uniform_map[stem], drop_upper_limits=False
             )
-        result = eval_object(
-            real_stream,
-            dense_stream,
-            model,
-            device,
-            means,
-            stds,
-            context_window_days,
-            max_context_len,
-            args.late_time_cutoff_days,
-            args.late_time_max_days,
-            uniform_stream=uniform_stream,
-            rollout=args.rollout,
-            probe_dense_context=args.probe_dense_context,
-            plot_interval=args.plot_interval,
-            interval_calibration=interval_calibration,
-        )
-        if result is None:
-            continue
-        n_eval += 1
-        for s in result["scored"]:
-            s["stem"] = stem
-            all_scored.append(s)
-        if plotted < n_plots:
-            plot_object(
-                result, stem,
-                os.path.join(outdir, f"latetime_{stem}.png"),
+        return real_stream, dense_stream, uniform_stream
+
+    # Read the npz files on a thread pool, a bounded window ahead of the model,
+    # so file IO overlaps the forward passes. Objects are still consumed in
+    # stem order, so the output is unchanged.
+    with ThreadPoolExecutor(max_workers=IO_WORKERS) as pool:
+        pending = deque()
+        next_i = 0
+        for stem in stems:
+            while next_i < len(stems) and len(pending) < IO_PREFETCH:
+                pending.append(pool.submit(read_streams, stems[next_i]))
+                next_i += 1
+            real_stream, dense_stream, uniform_stream = pending.popleft().result()
+            result = eval_object(
+                real_stream,
+                dense_stream,
+                model,
+                device,
+                means,
+                stds,
+                context_window_days,
+                max_context_len,
+                args.late_time_cutoff_days,
+                args.late_time_max_days,
+                uniform_stream=uniform_stream,
+                rollout=args.rollout,
+                probe_dense_context=args.probe_dense_context,
+                plot_interval=args.plot_interval,
+                interval_calibration=interval_calibration,
+                # Only plotted objects need the smooth forecast curve.
+                need_curve=plotted < n_plots,
             )
-            plotted += 1
+            if result is None:
+                continue
+            n_eval += 1
+            for s in result["scored"]:
+                s["stem"] = stem
+                all_scored.append(s)
+            if score_uniform and result["uniform_scored"] is not None:
+                result["uniform_scored"]["stem"] = stem
+                uniform_scored.append(result["uniform_scored"])
+            if plotted < n_plots:
+                plot_object(
+                    result, stem,
+                    os.path.join(outdir, f"latetime_{stem}.png"),
+                )
+                plotted += 1
 
     if not all_scored:
         print(f"[{split_label}] No late-time points scored (check the cutoff and "
@@ -1105,7 +1223,17 @@ def run_split(
         m = (lead >= edges[i]) & (lead < edges[i + 1])
         if np.any(m):
             rmse_bin[i] = np.sqrt(np.mean(resid[m] ** 2))
-    ax.plot(centers, rmse_bin, "o-")
+    ax.plot(centers, rmse_bin, "o-", label="dense truth (scored)")
+    uni = _concat_uniform(uniform_scored) if uniform_scored else None
+    if uni is not None:
+        u_resid = uni["pred_mag"] - uni["true_mag"]
+        u_rmse_bin = np.full(centers.shape[0], np.nan)
+        for i in range(centers.shape[0]):
+            m = (uni["lead_time"] >= edges[i]) & (uni["lead_time"] < edges[i + 1])
+            if np.any(m):
+                u_rmse_bin[i] = np.sqrt(np.mean(u_resid[m] ** 2))
+        ax.plot(centers, u_rmse_bin, "s--", label="uniform truth")
+        ax.legend()
     ax.set_xlabel("Lead time from last realistic detection [days]")
     ax.set_ylabel("Late-time forecast RMSE [mag]")
     ax.set_title("Dense late-time forecast error vs lead time")
@@ -1156,9 +1284,90 @@ def run_split(
                 print(f"  {BAND_NAMES[b]:>5}: {cov_raw[m].mean():.3f} / "
                       f"{cov[m].mean():.3f}")
 
+    if uni is not None:
+        dense_true = np.asarray([s["true_mag"] for s in all_scored])
+        report_uniform(uni, bands, dense_true, split_label)
+        write_uniform_csv(
+            uni, os.path.join(outdir, "latetime_uniform_scored_points.csv")
+        )
+
     print(f"\n[{split_label}] Wrote {plotted} per-object plots, the RMSE-vs-lead "
           f"plot, and {csv_path} in {outdir}")
     return all_scored
+
+
+def _concat_uniform(per_object):
+    """Concatenate per-object uniform-truth score dicts into flat arrays."""
+    keys = ("band", "phase", "lead_time", "pred_mag", "pred_low", "pred_high",
+            "true_mag")
+    out = {k: np.concatenate([o[k] for o in per_object]) for k in keys}
+    out["stem"] = np.concatenate(
+        [np.full(o["band"].shape[0], o["stem"], dtype=object) for o in per_object]
+    )
+    return out
+
+
+def report_uniform(uni, dense_bands, dense_true, split_label):
+    """Print the uniform-truth score, split at each band's dense-truth depth.
+
+    The dense truth only scores points brighter than the survey depth, so the
+    headline RMSE is blind to a forecast that stops fading once an object drops
+    out of reach. Scoring against the noise-free uniform grid over the same
+    window shows that error. Each band's "dense depth" is the 99th percentile of
+    the scored dense truth magnitudes; uniform points fainter than it fall where
+    the dense metric has (almost) no points.
+
+    Args:
+        uni (dict): Flat uniform-truth arrays from ``_concat_uniform``.
+        dense_bands, dense_true (np.ndarray): Band / truth of the dense scored
+            points (sets the per-band depth).
+        split_label (str): Split name for the printout.
+    """
+    resid = uni["pred_mag"] - uni["true_mag"]
+    print(f"\n[{split_label}] UNIFORM-truth late-time error (same window and lead "
+          f"rule; noise-free, no depth limit): {resid.shape[0]} points, "
+          f"{np.unique(uni['stem']).shape[0]} objects")
+    print(f"Overall uniform RMSE (mag): {np.sqrt(np.mean(resid**2)):.4f}  "
+          f"MAE: {np.mean(np.abs(resid)):.4f}  bias: {np.mean(resid):+.4f}")
+
+    def _stats(r):
+        if r.shape[0] == 0:
+            return f"{'-':>7}{'-':>8}"
+        return f"{np.sqrt(np.mean(r**2)):>7.3f}{np.mean(r):>+8.3f}"
+
+    print("Per band: all | within dense depth | beyond dense depth "
+          "(RMSE, bias; + = forecast too faint)")
+    print(f"  {'band':>5}{'depth':>7}{'n':>8}{'RMSE':>7}{'bias':>8}"
+          f"{'n_in':>8}{'RMSE':>7}{'bias':>8}{'n_out':>8}{'RMSE':>7}{'bias':>8}")
+    for b in range(N_BANDS):
+        m = uni["band"] == b
+        dm = dense_bands == b
+        if not np.any(m) or not np.any(dm):
+            continue
+        depth = float(np.percentile(dense_true[dm], 99))
+        beyond = m & (uni["true_mag"] > depth)
+        within = m & ~beyond
+        print(f"  {BAND_NAMES[b]:>5}{depth:>7.2f}{m.sum():>8d}{_stats(resid[m])}"
+              f"{within.sum():>8d}{_stats(resid[within])}"
+              f"{beyond.sum():>8d}{_stats(resid[beyond])}")
+
+
+def write_uniform_csv(uni, csv_path):
+    """Write the per-point uniform-truth score."""
+    resid = uni["pred_mag"] - uni["true_mag"]
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["stem", "band", "phase_days", "lead_time_days", "pred_mag",
+                    "pred_low", "pred_high", "true_mag", "residual_mag"])
+        for i in range(resid.shape[0]):
+            w.writerow([
+                uni["stem"][i], BAND_NAMES[uni["band"][i]],
+                f"{uni['phase'][i]:.4f}", f"{uni['lead_time'][i]:.4f}",
+                f"{uni['pred_mag'][i]:.4f}", f"{uni['pred_low'][i]:.4f}",
+                f"{uni['pred_high'][i]:.4f}", f"{uni['true_mag'][i]:.4f}",
+                f"{resid[i]:.4f}",
+            ])
+    print(f"Wrote {csv_path}")
 
 
 def fit_calibration_from_scored(scored, interval, out_path):
@@ -1318,7 +1527,7 @@ def main():
         cal_scored = run_split(
             **common, split_stems=cal_stems,
             outdir=os.path.join(args.outdir, "calibration_split"),
-            split_label="calibration", n_plots=0,
+            split_label="calibration", n_plots=0, score_uniform=False,
         )
         if cal_scored is None:
             raise ValueError("Calibration split scored no points.")
