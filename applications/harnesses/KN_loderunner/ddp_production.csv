@@ -253,3 +253,6 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 133,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 # RESULT 133: 1.2924 (MAE 0.9332), +0.055 vs 131 with no config change -- seed spread is ~0.05,
 # not 0.02. Same biases as 131; all spread (bias-free 1.216 -> 1.270).
+# Study 134: 133 config + UNIFORM_CROSSSTREAM_TARGET=True -- cross-stream targets from the uniform
+# (true-curve, no limiting mag) set instead of dense. Headline = uniform-truth RMSE (133: 1.9872).
+134,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py

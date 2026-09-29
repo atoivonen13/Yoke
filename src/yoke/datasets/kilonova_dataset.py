@@ -417,6 +417,8 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         append_phase: bool = False,
         append_redshift: bool = False,
         target_data_glob: str = None,
+        target_drop_upper_limits: bool = None,
+        target_random_tiebreak: bool = False,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -507,6 +509,17 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 target) that the single-stream concat never samples, because there
                 context and target always come from one stream. None (default)
                 keeps single-stream behavior byte-identical.
+            target_drop_upper_limits (bool): Upper-limit dropping for the
+                cross-stream TARGET stream only. None (default) follows
+                ``drop_upper_limits``. Pass False for a noise-free uniform-grid
+                target set (the true light curve, no limiting magnitude), whose
+                rows are all truth regardless of the error column. Target rows
+                with a non-finite value are always dropped.
+            target_random_tiebreak (bool): Cross-stream only. Break ties between
+                equally-near target events uniformly at random instead of taking
+                the first (lowest band index). Needed for a uniform-grid target
+                set, where every band shares each grid time, or every target
+                would be the first band. False (default) keeps the legacy draw.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -570,6 +583,12 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # target_data_glob (dense), same objects on a shared per-object clock.
         self.target_data_glob = target_data_glob
         self.cross_stream = target_data_glob is not None
+        self.target_drop_upper_limits = (
+            drop_upper_limits
+            if target_drop_upper_limits is None
+            else target_drop_upper_limits
+        )
+        self.target_random_tiebreak = target_random_tiebreak
 
         if self.window_mode:
             self.max_context_len = (
@@ -787,7 +806,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                     continue
 
                 d_times, d_values, d_bands = self._read_merged_stream(
-                    dense_path
+                    dense_path, self.target_drop_upper_limits
                 )
                 if d_times is None:
                     continue
@@ -817,7 +836,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                         self.samples.append((file_idx, anchor_idx))
 
     def _read_merged_stream(
-        self, npz_path: str
+        self, npz_path: str, drop_upper_limits: bool = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Read one npz into a merged, time-sorted, ABSOLUTE-time event stream.
 
@@ -825,15 +844,20 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         dropping, and stable time sort) but returns ABSOLUTE times (no
         min-subtraction) and does NOT normalize, so the caller can relativize to
         a shared clock and normalize with the shared stats. Used to load the
-        dense TARGET stream in cross-stream mode.
+        dense (or uniform) TARGET stream in cross-stream mode. Rows with a
+        non-finite value are dropped (they cannot be a target).
 
         Args:
             npz_path (str): Path to the light-curve npz.
+            drop_upper_limits (bool): Drop rows with a non-finite error. None
+                follows ``self.drop_upper_limits``.
 
         Returns:
             (times, values, bands): absolute times, raw values, band indices,
             each sorted by time; or ``(None, None, None)`` if no usable events.
         """
+        if drop_upper_limits is None:
+            drop_upper_limits = self.drop_upper_limits
         data = np.load(npz_path, allow_pickle=True)
         times, values, bands = [], [], []
         for band_idx, key in enumerate(self.band_keys):
@@ -842,11 +866,12 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             arr = data[key]
             if arr.size == 0:
                 continue
-            if self.drop_upper_limits:
-                detected = np.isfinite(arr[:, self.error_col])
-                arr = arr[detected]
-                if arr.shape[0] == 0:
-                    continue
+            keep = np.isfinite(arr[:, self.value_col])
+            if drop_upper_limits:
+                keep = keep & np.isfinite(arr[:, self.error_col])
+            arr = arr[keep]
+            if arr.shape[0] == 0:
+                continue
             times.append(arr[:, 0].astype(np.float32))
             values.append(arr[:, self.value_col].astype(np.float32))
             bands.append(np.full(arr.shape[0], band_idx, dtype=np.int64))
@@ -1153,6 +1178,13 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         nearest that lead, among dense events strictly after the anchor. The
         caller guarantees at least one dense event follows the anchor.
 
+        Several events can tie for nearest when bands share epochs (a
+        uniform-grid target set samples every band at each grid time). With
+        ``target_random_tiebreak`` the tie is broken uniformly at random, so each
+        band is supervised equally rather than always the first band in
+        ``band_keys`` order; with a single nearest event no extra random draw is
+        made. Without it the legacy first-nearest ``argmin`` is kept.
+
         Args:
             dense_times (np.ndarray): Dense event times on the shared clock.
             anchor_t (float): Realistic anchor time on the shared clock.
@@ -1168,7 +1200,13 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         lead_time = np.random.uniform(0.0, horizon)
         cand = np.nonzero(dense_times > anchor_t)[0]
         gaps = dense_times[cand] - anchor_t
-        return int(cand[np.argmin(np.abs(gaps - lead_time))])
+        dist = np.abs(gaps - lead_time)
+        if not self.target_random_tiebreak:
+            return int(cand[np.argmin(dist)])
+        nearest = np.nonzero(dist == dist.min())[0]
+        if nearest.shape[0] == 1:
+            return int(cand[nearest[0]])
+        return int(cand[nearest[np.random.randint(nearest.shape[0])]])
 
     def _getitem_window_cross(
         self, index: int
