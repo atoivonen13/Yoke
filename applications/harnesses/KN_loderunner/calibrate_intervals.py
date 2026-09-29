@@ -20,7 +20,10 @@ median (and so RMSE) is untouched, and the learned per-point shape of the band
 Points of one object are correlated, so the conformal guarantee is approximate;
 the held-out ``--check_csv`` coverage is the honest read.
 
-Calibrate on the VALIDATION split, never on test. Workflow (cluster):
+Calibrate on the VALIDATION split, never on test. ``eval_dense_latetime_9band.py``
+does this by default in one go (best checkpoint -> val eval -> fit these scales
+-> test eval + calibrated plots; it imports ``fit_scales`` / ``report`` from
+here). This script is the standalone path for re-fitting from saved CSVs:
 
     # 1. eval the checkpoint on the val objects (writes a scored CSV)
     python eval_dense_latetime_9band.py --study 131 --epoch 100 \\
@@ -102,6 +105,31 @@ def fit_band_scales(med, low, high, true, interval: float) -> tuple:
             max(0.0, conformal_scale(s_hi, level)))
 
 
+def fit_scales(d: dict, interval: float, min_points: int = 100) -> dict:
+    """Fit per-band scales on a calibration set.
+
+    Args:
+        d (dict): Arrays keyed band (names), med, low, high, true.
+        interval (float): Target central coverage.
+        min_points (int): Bands with fewer points keep k = 1.
+
+    Returns:
+        dict: ``{band: {"k_lo", "k_hi", "n"}}``.
+    """
+    scales = {}
+    for band in sorted(set(d["band"])):
+        m = d["band"] == band
+        n = int(m.sum())
+        if n < min_points:
+            print(f"  {band}: only {n} points (< {min_points}), keeping k = 1")
+            k_lo, k_hi = 1.0, 1.0
+        else:
+            k_lo, k_hi = fit_band_scales(d["med"][m], d["low"][m], d["high"][m],
+                                         d["true"][m], interval)
+        scales[band] = {"k_lo": k_lo, "k_hi": k_hi, "n": n}
+    return scales
+
+
 def apply_scales(med, low, high, k_lo, k_hi) -> tuple:
     """Rescale the band's half-widths about the median (arrays broadcast)."""
     return med - k_lo * (med - low), med + k_hi * (high - med)
@@ -157,17 +185,7 @@ def main() -> None:
     d = load_scored(args.csv)
     print(f"Calibration set: {d['true'].shape[0]} points from {args.csv}")
     print(f"Target central coverage: {args.interval:.2f}")
-    scales = {}
-    for band in sorted(set(d["band"])):
-        m = d["band"] == band
-        n = int(m.sum())
-        if n < args.min_points:
-            print(f"  {band}: only {n} points (< {args.min_points}), keeping k = 1")
-            k_lo, k_hi = 1.0, 1.0
-        else:
-            k_lo, k_hi = fit_band_scales(d["med"][m], d["low"][m], d["high"][m],
-                                         d["true"][m], args.interval)
-        scales[band] = {"k_lo": k_lo, "k_hi": k_hi, "n": n}
+    scales = fit_scales(d, args.interval, args.min_points)
 
     report(d, scales, "Calibration split (in-sample -- cov cal ~target by construction)")
     if args.check_csv is not None:
