@@ -256,3 +256,8 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # Study 134: 133 config + UNIFORM_CROSSSTREAM_TARGET=True -- cross-stream targets from the uniform
 # (true-curve, no limiting mag) set instead of dense. Headline = uniform-truth RMSE (133: 1.9872).
 134,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# Study 135: 134 config relaunched from 572b08a so the uniform cross-stream targets actually ran.
+135,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+# RESULT 135: uniform 1.5584 (vs 1.99), dense 1.3059 -- gain ~all ztfg.
+# Study 136: 135 + UNIFORM_DENSEDENSE_TARGET=True -- dense-dense part targets from the uniform set too.
+136,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py

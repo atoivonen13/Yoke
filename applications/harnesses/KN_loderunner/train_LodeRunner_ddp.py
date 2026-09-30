@@ -881,6 +881,18 @@ def main(args, rank, world_size, local_rank, device):
     # FRACTION of the mix, not by which dense part supplies it. Restored True.
     DENSE_DENSE_CONCAT = True
 
+    # Study 136: dense-dense part TARGET set. Study 135 (uniform cross-stream
+    # targets) cut the uniform RMSE 1.99 -> 1.56, almost all in ztfg, but ztfr /
+    # ztfi beyond-depth bias barely moved (-2.0 -> -1.9, -1.7 -> -1.6). The
+    # dense-dense part is 2.1x the cross part (344822 vs 161894 samples) and its
+    # ZTF targets still stop at the ~23 mag dense depth, so it keeps pulling the
+    # faint ZTF level bright. When True, the dense-dense part keeps its DENSE
+    # context but draws its targets from --kn_uniform_glob (the cross-stream path
+    # with dense as the context set; shared clock = first dense event), so no
+    # training target is depth-truncated. Needs DENSE_DENSE_CONCAT. False =
+    # 135 behavior (dense context -> dense target).
+    UNIFORM_DENSEDENSE_TARGET = True
+
     # Study 129: realistic-context / realistic-TARGET part on/off. Realistic
     # targets are floor-truncated (faint late points dropped), so they skew the
     # learned level bright, while the eval scores DENSE truth. 125/127/128 showed
@@ -1415,17 +1427,45 @@ def main(args, rank, world_size, local_rank, device):
                 flush=True,
             )
 
+        # Uniform-grid targets (Studies 134/136): the rows are all truth, so no
+        # upper-limit dropping on targets, and every band shares each grid time,
+        # so equal-lead ties are broken at random (else every target would be
+        # ztfg, the first band).
+        if UNIFORM_CROSSSTREAM_TARGET or (
+            DENSE_DENSE_CONCAT and UNIFORM_DENSEDENSE_TARGET
+        ):
+            if not (args.kn_uniform_glob and glob.glob(args.kn_uniform_glob)):
+                raise FileNotFoundError(
+                    "A uniform-target part is enabled but kn_uniform_glob matched "
+                    f"no files: {args.kn_uniform_glob!r}."
+                )
+
         if (
             DENSE_DENSE_CONCAT
             and args.kn_dense_glob
             and glob.glob(args.kn_dense_glob)
         ):
-            train_dense = _make_9band(args.kn_dense_glob, train_stems)
+            if UNIFORM_DENSEDENSE_TARGET:
+                # Study 136: dense CONTEXT -> uniform TARGET via the cross-stream
+                # path (dense is the context set, so its clock is the first
+                # dense event -- the same clock as the single-stream dense part).
+                train_dense = _make_9band(
+                    args.kn_dense_glob,
+                    train_stems,
+                    target_data_glob=args.kn_uniform_glob,
+                    target_drop_upper_limits=False,
+                    target_random_tiebreak=True,
+                )
+                dense_target_name = "uniform"
+            else:
+                train_dense = _make_9band(args.kn_dense_glob, train_stems)
+                dense_target_name = "dense"
             if len(train_dense) > 0:
                 train_parts.append(train_dense)
                 if rank == 0:
                     print(
-                        f"Dense training set added: {len(train_dense)} samples.",
+                        f"Dense training set added: {len(train_dense)} samples "
+                        f"(dense context -> {dense_target_name} target).",
                         flush=True,
                     )
             elif rank == 0:
@@ -1454,19 +1494,12 @@ def main(args, rank, world_size, local_rank, device):
         # faint-late mapping the eval scores. Study 134: with
         # UNIFORM_CROSSSTREAM_TARGET the targets are the uniform-grid true curve
         # (no limiting mag), so faint-late supervision reaches below the ZTF
-        # depth. Its rows are all truth, so no upper-limit dropping on targets,
-        # and every band shares each grid time, so equal-lead ties are broken at
-        # random (else every target would be ztfg, the first band).
+        # depth (glob checked above).
         if UNIFORM_CROSSSTREAM_TARGET:
             cross_target_glob = args.kn_uniform_glob
             cross_target_drop_ul = False
             cross_target_tiebreak = True
             cross_target_name = "uniform"
-            if not (cross_target_glob and glob.glob(cross_target_glob)):
-                raise FileNotFoundError(
-                    "UNIFORM_CROSSSTREAM_TARGET=True but kn_uniform_glob matched "
-                    f"no files: {cross_target_glob!r}."
-                )
         else:
             cross_target_glob = args.kn_dense_glob
             cross_target_drop_ul = None
@@ -1726,6 +1759,7 @@ def main(args, rank, world_size, local_rank, device):
                     "uniform_crossstream_target": UNIFORM_CROSSSTREAM_TARGET,
                     "kn_uniform_glob": args.kn_uniform_glob,
                     "dense_dense_concat": DENSE_DENSE_CONCAT,
+                    "uniform_densedense_target": UNIFORM_DENSEDENSE_TARGET,
                     "realistic_target_concat": REALISTIC_TARGET_CONCAT,
                     "train_filelist": args.train_filelist,
                     "validation_filelist": args.validation_filelist,
