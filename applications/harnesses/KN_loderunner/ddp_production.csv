@@ -262,3 +262,9 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # Study 136: 135 + UNIFORM_DENSEDENSE_TARGET=True -- dense-dense part targets from the uniform set too.
 136,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 # RESULT 136: uniform 1.4070 (vs 135 1.5584), dense 1.3882 -- ZTF beyond-depth bias toward 0; ztfg/ztfr within-depth too faint; i/z brighter.
+# Study 137: 136 config at 200 epochs with a RUN-LONG LR schedule (LR_GLOBAL_STEP=True). Through 136
+# the scheduler was rebuilt each epoch and replayed from step 1 (20-step warmup + 30-step cosine to
+# 0.5x, every epoch, never annealed). Now the steps count over the whole run: 200 ep x 50 batches =
+# 10000 steps; warmup 250 (5 ep), single cosine to 0.1x anchor on the last step. total_epochs 200 in
+# training_input.tmpl + training_START.input. Headline = uniform RMSE vs 136's 1.4070.
+137,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
