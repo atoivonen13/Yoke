@@ -176,6 +176,11 @@ class CosineWithWarmupScheduler(_LRScheduler):
             group -- byte-identical to the legacy single-group behavior. Use this
             for discriminative fine-tuning (e.g. a smaller LR on an unfrozen
             backbone tail than on the freshly-trained head).
+        global_step (bool): Compute the LR from ``last_epoch`` (restored from the
+            ``last_epoch`` arg on a restart) instead of ``_step_count``, which
+            PyTorch resets on every construction. ``False`` (default) keeps the
+            legacy behavior: a scheduler rebuilt at each restart replays the
+            schedule from step 1. On an uninterrupted run both are identical.
 
     """
 
@@ -189,6 +194,7 @@ class CosineWithWarmupScheduler(_LRScheduler):
         min_fraction: float = 0.5,
         last_epoch: int = -1,
         lr_mults: list = None,
+        global_step: bool = False,
     ) -> None:
         """Initialize scheduler."""
         self.anchor_lr = anchor_lr
@@ -196,6 +202,7 @@ class CosineWithWarmupScheduler(_LRScheduler):
         self.num_cycles = num_cycles
         self.min_fraction = min_fraction
         self.terminal_steps = terminal_steps
+        self.global_step = global_step
 
         self.num_param_groups = len(optimizer.param_groups)
 
@@ -213,8 +220,10 @@ class CosineWithWarmupScheduler(_LRScheduler):
 
     def get_lr(self) -> float:
         """Return learning rate."""
+        # last_epoch + 1 == _step_count on a fresh run (both start at 0 / 1).
+        step = self.last_epoch + 1 if self.global_step else self._step_count
         lr = cos_decay_lr_calc(
-            step=self._step_count,
+            step=step,
             anchor_lr=self.anchor_lr,
             warmup_steps=self.warmup_steps,
             terminal_steps=self.terminal_steps,

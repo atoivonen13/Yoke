@@ -351,6 +351,18 @@ def main(args, rank, world_size, local_rank, device):
     # mean-optimal while avoiding blow-ups. None disables it (legacy behavior).
     GRAD_CLIP_NORM = 1.0
 
+    # Study 137: run-long LR schedule. The cosine scheduler computed its LR from
+    # _step_count, which PyTorch resets whenever the scheduler is rebuilt -- and
+    # cycle_epochs=1 rebuilds it every epoch. So through study 136 the schedule
+    # replayed from step 1 each epoch: a 20-step warmup + 30-step cosine to
+    # MIN_FRACTION (TERMINAL_STEPS=50 == NTRN_BATCH), an identical per-epoch
+    # sawtooth in [0.5, 1.0]x anchor with no run-level anneal, whatever
+    # total_epochs was. True = compute the LR from the restored global step, so
+    # WARMUP_STEPS / TERMINAL_STEPS count steps over the whole run (set
+    # TERMINAL_STEPS = total_epochs * NTRN_BATCH for a single anneal ending on
+    # the last step). False = the legacy per-epoch sawtooth.
+    LR_GLOBAL_STEP = True
+
     # Diagnostic baseline. When True, the frozen backbone is skipped in forward()
     # and the tiled conditioner output feeds pooling+head directly, turning the
     # trainable path into a pure MLP (conditioner -> pool -> head). Adds no params
@@ -1209,10 +1221,15 @@ def main(args, rank, world_size, local_rank, device):
     # Learning Rate Scheduler
     #############################################
     print("Starting epoch: ", starting_epoch)
+    # starting_epoch = epochs already completed, each train_batches scheduler
+    # steps, so the restored step is train_batches * starting_epoch - 1 (the
+    # constructor's initial step() then lands on the uninterrupted-run value).
+    # Was train_batches * (starting_epoch - 1): one epoch behind, harmless while
+    # the LR ignored last_epoch, wrong under LR_GLOBAL_STEP.
     if starting_epoch == 0:
         last_epoch = -1
     else:
-        last_epoch = train_batches * (starting_epoch - 1)
+        last_epoch = train_batches * starting_epoch - 1
 
     # Scale the anchor LR by global batchsize
     #
@@ -1242,7 +1259,16 @@ def main(args, rank, world_size, local_rank, device):
         # Preserve the head-vs-backbone-tail LR ratio (Study 082). [1.0] when the
         # backbone is frozen -> byte-identical to the legacy single-group schedule.
         lr_mults=param_group_lr_mults,
+        global_step=LR_GLOBAL_STEP,
     )
+    if rank == 0:
+        print(
+            f"LR schedule: global_step={LR_GLOBAL_STEP}, restored step "
+            f"{last_epoch + 1}, lr now {LRsched.get_last_lr()[0]:.3e} "
+            f"(anchor {ddp_anchor_lr:.3e}, warmup {warmup_steps}, "
+            f"terminal {terminal_steps})",
+            flush=True,
+        )
 
     #############################################
     # Data Initialization (Distributed Dataloader)
@@ -1722,6 +1748,7 @@ def main(args, rank, world_size, local_rank, device):
                     "quantile_levels": list(QUANTILE_LEVELS),
                     "loss_type": LOSS_TYPE,
                     "grad_clip_norm": GRAD_CLIP_NORM,
+                    "lr_global_step": LR_GLOBAL_STEP,
                     "bypass_backbone": BYPASS_BACKBONE,
                     "bypass_channels": BYPASS_CHANNELS,
                     "phase_fourier_bands": PHASE_FOURIER_BANDS,

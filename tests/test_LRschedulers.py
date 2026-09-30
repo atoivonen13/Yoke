@@ -123,6 +123,49 @@ def test_cosine_with_warmup_scheduler(optimizer: SGD) -> None:
                 assert lr >= 0.001 * 0.1
 
 
+def test_cosine_with_warmup_scheduler_global_step_restart() -> None:
+    """A global_step scheduler rebuilt at each epoch matches an uninterrupted one."""
+    steps_per_epoch, n_epochs = 10, 6
+    kwargs = dict(
+        anchor_lr=0.001,
+        terminal_steps=steps_per_epoch * n_epochs,
+        warmup_steps=5,
+        num_cycles=0.5,
+        min_fraction=0.1,
+    )
+    params = torch.nn.Linear(2, 1).parameters()
+    optimizer = SGD(params, lr=0.1)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UserWarning)
+        scheduler = CosineWithWarmupScheduler(optimizer, global_step=True, **kwargs)
+        uninterrupted = []
+        for _ in range(steps_per_epoch * n_epochs):
+            uninterrupted.append(optimizer.param_groups[0]["lr"])
+            optimizer.step()
+            scheduler.step()
+
+        restarted = []
+        for epoch in range(n_epochs):
+            optimizer = SGD(torch.nn.Linear(2, 1).parameters(), lr=0.1)
+            for group in optimizer.param_groups:
+                group["initial_lr"] = 0.1
+            scheduler = CosineWithWarmupScheduler(
+                optimizer,
+                last_epoch=steps_per_epoch * epoch - 1,
+                global_step=True,
+                **kwargs,
+            )
+            for _ in range(steps_per_epoch):
+                restarted.append(optimizer.param_groups[0]["lr"])
+                optimizer.step()
+                scheduler.step()
+
+    assert np.allclose(uninterrupted, restarted)
+    # Anneals across the whole run, ending at the trough.
+    assert uninterrupted[-1] == pytest.approx(0.001 * 0.1, rel=0.05)
+
+
 def test_constant_with_warmup_scheduler(optimizer: SGD) -> None:
     """Test ConstantWithWarmupScheduler."""
     scheduler = ConstantWithWarmupScheduler(
