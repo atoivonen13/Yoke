@@ -34,6 +34,7 @@ never trains.
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -84,6 +85,10 @@ FILELIST_DIR = "/net/sescratch1/exempt/artimis/atoivonen/filelists"
 # npz reader threads and how many objects they may read ahead of the model.
 IO_WORKERS = 8
 IO_PREFETCH = 32
+# Per-split record of the inputs that produced its scored CSVs, so a re-run with
+# the same checkpoint and settings reloads them instead of re-evaluating.
+EVAL_META_NAME = "eval_meta.json"
+BAND_INDEX = {name: b for b, name in enumerate(BAND_NAMES)}
 
 
 def study_tag(study: int) -> str:
@@ -1061,9 +1066,30 @@ def get_args():
         help="Target central coverage of the calibrated band.",
     )
     p.add_argument(
+        "--calibration_truth",
+        choices=("uniform", "dense"),
+        default="uniform",
+        help="Truth the interval scales are fit against on the calibration split. "
+        "'uniform' (default) fits on the noise-free, no-depth-limit grid, so the "
+        "band covers the TRUE curve including below the survey limit. 'dense' is "
+        "the old behavior: the dense truth stops at ~23 mag in ZTF, so it only "
+        "sees too-bright misses and shrinks the faint side of the ZTF band "
+        "(study 136: ztfg k_hi 0.34, uniform coverage 0.69). Falls back to "
+        "'dense' when --uniform_glob matches no files.",
+    )
+    p.add_argument(
         "--no_calibration",
         action="store_true",
         help="Skip the calibration split: test eval with the raw quantile band.",
+    )
+    p.add_argument(
+        "--recompute",
+        action="store_true",
+        help="Ignore saved results. By default a split whose outdir holds scored "
+        "CSVs from the SAME checkpoint (path and mtime) and settings is reloaded "
+        "instead of re-evaluated (only the per-object plots rerun the model), "
+        "and a matching <outdir>/interval_calibration.json is loaded instead of "
+        "refit.",
     )
     p.add_argument(
         "--rollout",
@@ -1091,6 +1117,122 @@ def _read_stems(path):
     """Stems listed one per line in ``path``."""
     with open(path) as fh:
         return {line.strip() for line in fh if line.strip()}
+
+
+def _split_stems(args, real_map, dense_map, split_stems):
+    """Objects a split evaluates, in eval order.
+
+    Returns:
+        tuple: (number of paired in-split objects, the stems actually evaluated
+        after the ``--max_objects`` cap).
+    """
+    stems = sorted(set(real_map) & set(dense_map))
+    if split_stems is not None:
+        stems = [s for s in stems if s in split_stems]
+    n_in_split = len(stems)
+    if args.max_objects > 0:
+        stems = stems[: args.max_objects]
+    return n_in_split, stems
+
+
+def _split_signature(args, stems, interval_calibration, score_uniform):
+    """Everything that determines a split's scored CSVs, as a JSON-able dict.
+
+    Saved results are reused only when this matches exactly. The checkpoint is
+    identified by path, size and mtime, so a checkpoint rewritten in place
+    (e.g. a re-run study) invalidates the cache.
+    """
+    ckpt = os.path.realpath(args.ckpt)
+    cal = None
+    if interval_calibration is not None:
+        cal = {
+            "interval": float(interval_calibration["interval"]),
+            "k_lo": np.asarray(interval_calibration["k_lo"], dtype=float).tolist(),
+            "k_hi": np.asarray(interval_calibration["k_hi"], dtype=float).tolist(),
+        }
+    sig = {
+        "ckpt": ckpt,
+        "ckpt_size": os.path.getsize(ckpt),
+        "ckpt_mtime": os.path.getmtime(ckpt),
+        "use_ema": bool(getattr(args, "use_ema", False)),
+        "rollout": bool(args.rollout),
+        "probe_dense_context": bool(args.probe_dense_context),
+        "late_time_cutoff_days": args.late_time_cutoff_days,
+        "late_time_max_days": args.late_time_max_days,
+        "realistic_glob": args.realistic_glob,
+        "dense_glob": args.dense_glob,
+        "uniform_glob": args.uniform_glob if score_uniform else None,
+        "norm_stats_path": args.norm_stats_path,
+        "n_stems": len(stems),
+        "stems_sha1": hashlib.sha1("\n".join(stems).encode()).hexdigest(),
+        "score_uniform": bool(score_uniform),
+        "interval_calibration": cal,
+    }
+    # Round-trip so it compares equal to a signature read back from disk.
+    return json.loads(json.dumps(sig))
+
+
+def _read_scored_csv(path):
+    """Scored points from ``latetime_scored_points.csv`` (run_split's dicts)."""
+    scored = []
+    with open(path, newline="") as fh:
+        for row in csv.DictReader(fh):
+            s = {
+                "stem": row["stem"],
+                "band": BAND_INDEX[row["band"]],
+                "phase": float(row["phase_days"]),
+                "lead_time": float(row["lead_time_days"]),
+                "pred_mag": float(row["pred_mag"]),
+                "pred_low": float(row["pred_low"]),
+                "pred_high": float(row["pred_high"]),
+                "true_mag": float(row["true_mag"]),
+                "residual_mag": float(row["residual_mag"]),
+            }
+            if "pred_low_cal" in row:
+                s["pred_low_cal"] = float(row["pred_low_cal"])
+                s["pred_high_cal"] = float(row["pred_high_cal"])
+            scored.append(s)
+    return scored
+
+
+def _read_uniform_csv(path):
+    """Flat uniform-truth arrays (``_concat_uniform`` form) from its CSV."""
+    with open(path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    cols = {"phase": "phase_days", "lead_time": "lead_time_days",
+            "pred_mag": "pred_mag", "pred_low": "pred_low",
+            "pred_high": "pred_high", "true_mag": "true_mag"}
+    uni = {k: np.array([float(r[c]) for r in rows], dtype=np.float32)
+           for k, c in cols.items()}
+    uni["band"] = np.array([BAND_INDEX[r["band"]] for r in rows], dtype=np.int64)
+    uni["stem"] = np.array([r["stem"] for r in rows], dtype=object)
+    return uni
+
+
+def _load_cached_split(outdir, signature, split_label):
+    """Saved results for ``signature`` in ``outdir``, or None if absent/stale.
+
+    Returns:
+        tuple | None: (meta, scored, uni) with ``uni`` None when the split has
+        no uniform CSV.
+    """
+    meta_path = os.path.join(outdir, EVAL_META_NAME)
+    csv_path = os.path.join(outdir, "latetime_scored_points.csv")
+    uni_path = os.path.join(outdir, "latetime_uniform_scored_points.csv")
+    if not (os.path.exists(meta_path) and os.path.exists(csv_path)):
+        return None
+    with open(meta_path) as fh:
+        meta = json.load(fh)
+    if meta.get("signature") != signature:
+        diff = sorted(k for k in signature
+                      if meta.get("signature", {}).get(k) != signature[k])
+        print(f"[{split_label}] Saved results in {outdir} are stale (differs in: "
+              f"{', '.join(diff)}); re-evaluating.")
+        return None
+    if meta["has_uniform"] and not os.path.exists(uni_path):
+        return None
+    uni = _read_uniform_csv(uni_path) if meta["has_uniform"] else None
+    return meta, _read_scored_csv(csv_path), uni
 
 
 def run_split(
@@ -1127,20 +1269,17 @@ def run_split(
             ``uniform_map`` has the object) and write its summary and CSV.
 
     Returns:
-        list | None: Scored points (dicts with ``stem``), or None if none scored.
+        tuple | None: (scored points as dicts with ``stem``, flat uniform-truth
+        arrays or None), or None if no points scored.
+
+    Unless ``--recompute``, a split whose ``outdir`` already holds results from
+    the same checkpoint and settings (``eval_meta.json``) is reloaded from its
+    CSVs instead of re-evaluated; the model only reruns for missing plots.
     """
     os.makedirs(outdir, exist_ok=True)
-    stems = sorted(set(real_map) & set(dense_map))
-    if split_stems is not None:
-        stems = [s for s in stems if s in split_stems]
-    print(f"\n[{split_label}] paired & in-split objects: {len(stems)}")
-    if args.max_objects > 0:
-        stems = stems[: args.max_objects]
+    n_in_split, stems = _split_stems(args, real_map, dense_map, split_stems)
+    print(f"\n[{split_label}] paired & in-split objects: {n_in_split}")
 
-    all_scored = []
-    uniform_scored = []  # per-object dicts of arrays (uniform-truth score)
-    plotted = 0
-    n_eval = 0
     # When the model was trained with the flagged-UL context channel, the
     # realistic (context) stream must KEEP upper limits so they reach the
     # flagged-context path; otherwise drop them as before. Auto-detected from
@@ -1148,65 +1287,107 @@ def run_split(
     ul_channel = getattr(model, "upper_limit_channel", False)
     real_drop_ul = DROP_UPPER_LIMITS and not ul_channel
 
-    # The uniform stream only feeds the uniform score and the plots, so it is
-    # not read when the split needs neither (the calibration pass).
-    read_uniform = score_uniform or n_plots > 0
+    def evaluate(plots_only=False):
+        """Run the model over ``stems``; ``plots_only`` stops after the plots."""
+        all_scored = []
+        uniform_scored = []  # per-object dicts of arrays (uniform-truth score)
+        plot_stems = []
+        n_eval = 0
+        # The uniform stream only feeds the uniform score and the plots, so it
+        # is not read when the split needs neither (the calibration pass).
+        read_uniform = score_uniform or n_plots > 0
 
-    def read_streams(stem):
-        real_stream = read_merged_stream(real_map[stem], real_drop_ul)
-        dense_stream = read_merged_stream(dense_map[stem], drop_upper_limits=False)
-        uniform_stream = None
-        if read_uniform and stem in uniform_map:
-            uniform_stream = read_merged_stream(
-                uniform_map[stem], drop_upper_limits=False
+        def read_streams(stem):
+            real_stream = read_merged_stream(real_map[stem], real_drop_ul)
+            dense_stream = read_merged_stream(
+                dense_map[stem], drop_upper_limits=False
             )
-        return real_stream, dense_stream, uniform_stream
-
-    # Read the npz files on a thread pool, a bounded window ahead of the model,
-    # so file IO overlaps the forward passes. Objects are still consumed in
-    # stem order, so the output is unchanged.
-    with ThreadPoolExecutor(max_workers=IO_WORKERS) as pool:
-        pending = deque()
-        next_i = 0
-        for stem in stems:
-            while next_i < len(stems) and len(pending) < IO_PREFETCH:
-                pending.append(pool.submit(read_streams, stems[next_i]))
-                next_i += 1
-            real_stream, dense_stream, uniform_stream = pending.popleft().result()
-            result = eval_object(
-                real_stream,
-                dense_stream,
-                model,
-                device,
-                means,
-                stds,
-                context_window_days,
-                max_context_len,
-                args.late_time_cutoff_days,
-                args.late_time_max_days,
-                uniform_stream=uniform_stream,
-                rollout=args.rollout,
-                probe_dense_context=args.probe_dense_context,
-                plot_interval=args.plot_interval,
-                interval_calibration=interval_calibration,
-                # Only plotted objects need the smooth forecast curve.
-                need_curve=plotted < n_plots,
-            )
-            if result is None:
-                continue
-            n_eval += 1
-            for s in result["scored"]:
-                s["stem"] = stem
-                all_scored.append(s)
-            if score_uniform and result["uniform_scored"] is not None:
-                result["uniform_scored"]["stem"] = stem
-                uniform_scored.append(result["uniform_scored"])
-            if plotted < n_plots:
-                plot_object(
-                    result, stem,
-                    os.path.join(outdir, f"latetime_{stem}.png"),
+            uniform_stream = None
+            if read_uniform and stem in uniform_map:
+                uniform_stream = read_merged_stream(
+                    uniform_map[stem], drop_upper_limits=False
                 )
-                plotted += 1
+            return real_stream, dense_stream, uniform_stream
+
+        # Read the npz files on a thread pool, a bounded window ahead of the
+        # model, so file IO overlaps the forward passes. Objects are still
+        # consumed in stem order, so the output is unchanged.
+        with ThreadPoolExecutor(max_workers=IO_WORKERS) as pool:
+            pending = deque()
+            next_i = 0
+            for stem in stems:
+                if plots_only and len(plot_stems) >= n_plots:
+                    for fut in pending:
+                        fut.cancel()
+                    break
+                while next_i < len(stems) and len(pending) < IO_PREFETCH:
+                    pending.append(pool.submit(read_streams, stems[next_i]))
+                    next_i += 1
+                real_stream, dense_stream, uniform_stream = (
+                    pending.popleft().result()
+                )
+                result = eval_object(
+                    real_stream,
+                    dense_stream,
+                    model,
+                    device,
+                    means,
+                    stds,
+                    context_window_days,
+                    max_context_len,
+                    args.late_time_cutoff_days,
+                    args.late_time_max_days,
+                    uniform_stream=uniform_stream,
+                    rollout=args.rollout,
+                    probe_dense_context=args.probe_dense_context,
+                    plot_interval=args.plot_interval,
+                    interval_calibration=interval_calibration,
+                    # Only plotted objects need the smooth forecast curve.
+                    need_curve=len(plot_stems) < n_plots,
+                )
+                if result is None:
+                    continue
+                n_eval += 1
+                for s in result["scored"]:
+                    s["stem"] = stem
+                    all_scored.append(s)
+                if score_uniform and result["uniform_scored"] is not None:
+                    result["uniform_scored"]["stem"] = stem
+                    uniform_scored.append(result["uniform_scored"])
+                if len(plot_stems) < n_plots:
+                    plot_object(
+                        result, stem,
+                        os.path.join(outdir, f"latetime_{stem}.png"),
+                    )
+                    plot_stems.append(stem)
+        uni = _concat_uniform(uniform_scored) if uniform_scored else None
+        return all_scored, uni, n_eval, plot_stems
+
+    signature = _split_signature(args, stems, interval_calibration, score_uniform)
+    cached = (None if args.recompute
+              else _load_cached_split(outdir, signature, split_label))
+    plots_regenerated = False
+    if cached is not None:
+        meta, all_scored, uni = cached
+        n_eval = meta["n_eval"]
+        plot_stems = meta["plot_stems"]
+        print(f"[{split_label}] Loaded saved results for this checkpoint from "
+              f"{outdir} (pass --recompute to re-evaluate).")
+        # Fewer saved plots than objects means every object was plotted.
+        plots_current = (
+            (len(plot_stems) >= n_plots or len(plot_stems) == n_eval)
+            and (n_plots == 0 or meta["plot_interval"] == args.plot_interval)
+            and all(os.path.exists(os.path.join(outdir, f"latetime_{s}.png"))
+                    for s in plot_stems[:n_plots])
+        )
+        if not plots_current:
+            print(f"[{split_label}] Regenerating the {n_plots} per-object plots.")
+            plot_stems = evaluate(plots_only=True)[3]
+            plots_regenerated = True
+        else:
+            plot_stems = plot_stems[:n_plots]
+    else:
+        all_scored, uni, n_eval, plot_stems = evaluate()
 
     if not all_scored:
         print(f"[{split_label}] No late-time points scored (check the cutoff and "
@@ -1242,7 +1423,6 @@ def run_split(
         if np.any(m):
             rmse_bin[i] = np.sqrt(np.mean(resid[m] ** 2))
     ax.plot(centers, rmse_bin, "o-", label="dense truth (scored)")
-    uni = _concat_uniform(uniform_scored) if uniform_scored else None
     if uni is not None:
         u_resid = uni["pred_mag"] - uni["true_mag"]
         u_rmse_bin = np.full(centers.shape[0], np.nan)
@@ -1259,13 +1439,95 @@ def run_split(
     fig.savefig(os.path.join(outdir, "latetime_rmse_vs_lead.png"), dpi=130)
     plt.close(fig)
 
-    # Full per-point CSV.
+    # Full per-point CSV (already on disk when the results were reloaded).
     csv_path = os.path.join(outdir, "latetime_scored_points.csv")
+    uni_csv_path = os.path.join(outdir, "latetime_uniform_scored_points.csv")
+    if cached is None:
+        write_scored_csv(all_scored, csv_path, interval_calibration is not None)
+        if uni is not None:
+            write_uniform_csv(uni, uni_csv_path)
+        with open(os.path.join(outdir, EVAL_META_NAME), "w") as fh:
+            json.dump({
+                "signature": signature,
+                "n_eval": n_eval,
+                "has_uniform": uni is not None,
+                "plot_stems": plot_stems,
+                "plot_interval": args.plot_interval,
+            }, fh, indent=2)
+    elif plots_regenerated:
+        # Record which objects the new plots cover.
+        meta["plot_stems"] = plot_stems
+        meta["plot_interval"] = args.plot_interval
+        with open(os.path.join(outdir, EVAL_META_NAME), "w") as fh:
+            json.dump(meta, fh, indent=2)
+
+    if interval_calibration is not None:
+        # Calibrated coverage on THIS split's points (held out when the scales
+        # were fit on the validation split).
+        true = np.asarray([s["true_mag"] for s in all_scored])
+        lo = np.asarray([s["pred_low_cal"] for s in all_scored])
+        hi = np.asarray([s["pred_high_cal"] for s in all_scored])
+        lo_raw = np.asarray([s["pred_low"] for s in all_scored])
+        hi_raw = np.asarray([s["pred_high"] for s in all_scored])
+        cov = (true >= lo) & (true <= hi)
+        cov_raw = (true >= lo_raw) & (true <= hi_raw)
+        if uni is not None:
+            # The same scales on the uniform truth, which (unlike the dense
+            # truth) reaches below the survey depth.
+            k_lo = interval_calibration["k_lo"][uni["band"]]
+            k_hi = interval_calibration["k_hi"][uni["band"]]
+            u_lo = uni["pred_mag"] - k_lo * (uni["pred_mag"] - uni["pred_low"])
+            u_hi = uni["pred_mag"] + k_hi * (uni["pred_high"] - uni["pred_mag"])
+            u_true = uni["true_mag"]
+            u_cov = (u_true >= u_lo) & (u_true <= u_hi)
+            u_cov_raw = (u_true >= uni["pred_low"]) & (u_true <= uni["pred_high"])
+            u_faint = u_true > u_hi
+        print(f"\n[{split_label}] Interval coverage (target "
+              f"{interval_calibration['interval']:.2f}): raw / calibrated"
+              + ("  | uniform truth: raw / calibrated, calibrated misses "
+                 "fainter / brighter" if uni is not None else ""))
+
+        def _cov_line(name, m, um):
+            line = f"  {name:>5}: {cov_raw[m].mean():.3f} / {cov[m].mean():.3f}"
+            if uni is not None and np.any(um):
+                line += (f"  | {u_cov_raw[um].mean():.3f} / {u_cov[um].mean():.3f}"
+                         f"  {u_faint[um].mean():.3f} / "
+                         f"{1.0 - u_cov[um].mean() - u_faint[um].mean():.3f}")
+            return line
+
+        print(_cov_line("ALL", np.ones_like(cov),
+                        None if uni is None else np.ones_like(u_cov)))
+        for b in range(N_BANDS):
+            m = bands == b
+            if np.any(m):
+                print(_cov_line(BAND_NAMES[b], m,
+                                None if uni is None else uni["band"] == b))
+
+    if uni is not None:
+        dense_true = np.asarray([s["true_mag"] for s in all_scored])
+        report_uniform(uni, bands, dense_true, split_label)
+
+    if cached is None:
+        print(f"\n[{split_label}] Wrote {len(plot_stems)} per-object plots, the "
+              f"RMSE-vs-lead plot, {csv_path}"
+              + (f", {uni_csv_path}" if uni is not None else "")
+              + f" in {outdir}")
+    else:
+        print(f"\n[{split_label}] Reused {csv_path}"
+              + (f" and {uni_csv_path}" if uni is not None else "")
+              + f"; {'regenerated' if plots_regenerated else 'kept'} "
+              f"{len(plot_stems)} per-object plots; redrew the RMSE-vs-lead plot "
+              f"in {outdir}")
+    return all_scored, uni
+
+
+def write_scored_csv(all_scored, csv_path, calibrated):
+    """Write the per-point dense-truth score (``latetime_scored_points.csv``)."""
     with open(csv_path, "w", newline="") as fh:
         w = csv.writer(fh)
         cols = ["stem", "band", "phase_days", "lead_time_days",
                 "pred_mag", "pred_low", "pred_high", "true_mag", "residual_mag"]
-        if interval_calibration is not None:
+        if calibrated:
             cols += ["pred_low_cal", "pred_high_cal"]
         w.writerow(cols)
         for s in all_scored:
@@ -1279,39 +1541,9 @@ def run_split(
                 f"{s.get('pred_high', s['pred_mag']):.4f}",
                 f"{s['true_mag']:.4f}", f"{s['residual_mag']:.4f}",
             ]
-            if interval_calibration is not None:
+            if calibrated:
                 row += [f"{s['pred_low_cal']:.4f}", f"{s['pred_high_cal']:.4f}"]
             w.writerow(row)
-
-    if interval_calibration is not None:
-        # Calibrated coverage on THIS split's points (held out when the scales
-        # were fit on the validation split).
-        true = np.asarray([s["true_mag"] for s in all_scored])
-        lo = np.asarray([s["pred_low_cal"] for s in all_scored])
-        hi = np.asarray([s["pred_high_cal"] for s in all_scored])
-        lo_raw = np.asarray([s["pred_low"] for s in all_scored])
-        hi_raw = np.asarray([s["pred_high"] for s in all_scored])
-        cov = (true >= lo) & (true <= hi)
-        cov_raw = (true >= lo_raw) & (true <= hi_raw)
-        print(f"\n[{split_label}] Interval coverage (target "
-              f"{interval_calibration['interval']:.2f}): raw / calibrated")
-        print(f"  {'ALL':>5}: {cov_raw.mean():.3f} / {cov.mean():.3f}")
-        for b in range(N_BANDS):
-            m = bands == b
-            if np.any(m):
-                print(f"  {BAND_NAMES[b]:>5}: {cov_raw[m].mean():.3f} / "
-                      f"{cov[m].mean():.3f}")
-
-    if uni is not None:
-        dense_true = np.asarray([s["true_mag"] for s in all_scored])
-        report_uniform(uni, bands, dense_true, split_label)
-        write_uniform_csv(
-            uni, os.path.join(outdir, "latetime_uniform_scored_points.csv")
-        )
-
-    print(f"\n[{split_label}] Wrote {plotted} per-object plots, the RMSE-vs-lead "
-          f"plot, and {csv_path} in {outdir}")
-    return all_scored
 
 
 def _concat_uniform(per_object):
@@ -1388,13 +1620,38 @@ def write_uniform_csv(uni, csv_path):
     print(f"Wrote {csv_path}")
 
 
-def fit_calibration_from_scored(scored, interval, out_path):
+def load_saved_calibration(path, split_signature, interval):
+    """A calibration JSON previously fit on the same split, or None.
+
+    Only JSONs written by ``fit_calibration_from_scored`` qualify: they record
+    the calibration split's signature (checkpoint, settings, objects). Refitting
+    from the reloaded CSV instead could shift the scales in the last digit (the
+    CSV is rounded), which would needlessly invalidate the saved test split.
+    """
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        cal = json.load(fh)
+    if (cal.get("calibration_split") != split_signature
+            or float(cal["interval"]) != float(interval)):
+        print(f"Saved {path} does not match this checkpoint/settings; refitting.")
+        return None
+    print(f"Loaded saved interval calibration {path} (pass --recompute to refit).")
+    return load_interval_calibration(path)
+
+
+def fit_calibration_from_scored(scored, interval, out_path, split_signature=None,
+                                uni=None):
     """Fit per-band interval scales on scored points and write the JSON.
 
     Args:
         scored (list): Scored points from ``run_split`` on the CALIBRATION split.
         interval (float): Target central coverage.
         out_path (str): Calibration JSON to write.
+        split_signature (dict | None): The calibration split's signature, saved
+            so ``load_saved_calibration`` can reuse the JSON.
+        uni (dict | None): The split's flat uniform-truth arrays. When given the
+            scales are fit on them instead of the dense points.
 
     Returns:
         dict | None: The calibration in ``load_interval_calibration`` form, or
@@ -1405,18 +1662,30 @@ def fit_calibration_from_scored(scored, interval, out_path):
     if "pred_low" not in scored[0]:
         print("Checkpoint has no quantile head; skipping interval calibration.")
         return None
-    d = {
-        "band": np.array([BAND_NAMES[s["band"]] for s in scored], dtype=object),
-        "med": np.array([s["pred_mag"] for s in scored]),
-        "low": np.array([s["pred_low"] for s in scored]),
-        "high": np.array([s["pred_high"] for s in scored]),
-        "true": np.array([s["true_mag"] for s in scored]),
-    }
+    if uni is not None:
+        d = {
+            "band": np.array(BAND_NAMES, dtype=object)[uni["band"]],
+            "med": uni["pred_mag"].astype(np.float64),
+            "low": uni["pred_low"].astype(np.float64),
+            "high": uni["pred_high"].astype(np.float64),
+            "true": uni["true_mag"].astype(np.float64),
+        }
+    else:
+        d = {
+            "band": np.array([BAND_NAMES[s["band"]] for s in scored],
+                             dtype=object),
+            "med": np.array([s["pred_mag"] for s in scored]),
+            "low": np.array([s["pred_low"] for s in scored]),
+            "high": np.array([s["pred_high"] for s in scored]),
+            "true": np.array([s["true_mag"] for s in scored]),
+        }
+    truth = "uniform" if uni is not None else "dense"
     scales = fit_scales(d, interval)
-    report(d, scales,
-           "Calibration split (in-sample -- cov cal ~target by construction)")
+    report(d, scales, f"Calibration split, {truth} truth (in-sample -- cov cal "
+           "~target by construction)")
     with open(out_path, "w") as fh:
-        json.dump({"interval": interval, "bands": scales}, fh, indent=2)
+        json.dump({"interval": interval, "truth": truth, "bands": scales,
+                   "calibration_split": split_signature}, fh, indent=2)
     print(f"Wrote {out_path}")
     return load_interval_calibration(out_path)
 
@@ -1427,7 +1696,8 @@ def main():
     By default the whole post-training pass runs in one go on ONE checkpoint:
     pick it (best val loss unless --exact_epoch / --ckpt), eval the calibration
     (validation) split, fit per-band interval scales on it, then eval + plot the
-    test split with the calibrated band.
+    test split with the calibrated band. Steps already done for the same
+    checkpoint and settings are loaded from disk (``--recompute`` redoes them).
     """
     args = get_args()
     tag = study_tag(args.study)
@@ -1542,17 +1812,38 @@ def main():
                 f"{len(overlap)} objects are in both --calibrate_filelist and "
                 "--test_filelist; the calibration split must be disjoint."
             )
-        cal_scored = run_split(
-            **common, split_stems=cal_stems,
-            outdir=os.path.join(args.outdir, "calibration_split"),
-            split_label="calibration", n_plots=0, score_uniform=False,
+        cal_uniform = args.calibration_truth == "uniform"
+        if cal_uniform and not uniform_map:
+            print("--calibration_truth uniform: --uniform_glob matched no files; "
+                  "fitting the interval scales on the dense truth instead.")
+            cal_uniform = False
+        print(f"Interval scales fit on the {'uniform' if cal_uniform else 'dense'} "
+              "truth of the calibration split.")
+        cal_json = os.path.join(args.outdir, "interval_calibration.json")
+        cal_signature = _split_signature(
+            args, _split_stems(args, real_map, dense_map, cal_stems)[1],
+            None, score_uniform=cal_uniform,
         )
-        if cal_scored is None:
-            raise ValueError("Calibration split scored no points.")
-        interval_calibration = fit_calibration_from_scored(
-            cal_scored, args.calibration_interval,
-            os.path.join(args.outdir, "interval_calibration.json"),
-        )
+        if not args.recompute:
+            interval_calibration = load_saved_calibration(
+                cal_json, cal_signature, args.calibration_interval
+            )
+        if interval_calibration is None:
+            cal_result = run_split(
+                **common, split_stems=cal_stems,
+                outdir=os.path.join(args.outdir, "calibration_split"),
+                split_label="calibration", n_plots=0, score_uniform=cal_uniform,
+            )
+            if cal_result is None:
+                raise ValueError("Calibration split scored no points.")
+            cal_scored, cal_uni = cal_result
+            if cal_uniform and cal_uni is None:
+                print("No calibration object has a uniform file; fitting the "
+                      "interval scales on the dense truth instead.")
+            interval_calibration = fit_calibration_from_scored(
+                cal_scored, args.calibration_interval, cal_json,
+                split_signature=cal_signature, uni=cal_uni,
+            )
     elif args.interval_calibration is not None:
         interval_calibration = load_interval_calibration(args.interval_calibration)
 
