@@ -419,6 +419,10 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         target_data_glob: str = None,
         target_drop_upper_limits: bool = None,
         target_random_tiebreak: bool = False,
+        max_anchor_phase: float = None,
+        eval_matched_phase: tuple = None,
+        eval_draws_per_object: int = 1,
+        eval_draw_seed: int = 0,
     ) -> None:
         """Initialize the dataset and build the merged-event sample index.
 
@@ -520,6 +524,27 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 the first (lowest band index). Needed for a uniform-grid target
                 set, where every band shares each grid time, or every target
                 would be the first band. False (default) keeps the legacy draw.
+            max_anchor_phase (float): Window + single-step only. If set, only
+                anchors whose phase (time since the context stream's first
+                detection) is at most this many days become samples. The dense
+                late-time eval always forecasts from the last detection at phase
+                <= its cutoff (2 d), so this trains only on the anchor phases it
+                is scored on. None (default) keeps every anchor.
+            eval_matched_phase (tuple): Cross-stream only. ``(lo, hi)`` in days.
+                If set, the sample index replicates the dense late-time eval: one
+                anchor per object (the last context event with phase <= ``lo``)
+                and a target drawn uniformly from the target events with phase in
+                ``(lo, hi]`` (the scored region), not by lead time. Draws are
+                seeded per sample index, so the set is identical every epoch and
+                across restarts. Intended for validation. None (default) keeps
+                the training enumeration.
+            eval_draws_per_object (int): Eval-matched only. Target draws per
+                object. Samples are ordered draw-major (every object's first
+                draw, then every object's second, ...), so a validation pass
+                truncated by ``num_val_batches`` still spans as many objects as
+                possible.
+            eval_draw_seed (int): Eval-matched only. Seed for the per-sample
+                target draws.
         """
         # Select the dataset directory. NOTE: the chosen set must be consistent
         # with the normalization stats (both Rubin+ZTF). The old
@@ -633,6 +658,34 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                     "target_data_glob (cross-stream mode) supports only "
                     "single-step supervision (n_rollout_steps == 1), got "
                     f"{self.n_rollout_steps}."
+                )
+
+        self.max_anchor_phase = max_anchor_phase
+        if max_anchor_phase is not None and (
+            not self.window_mode or self.n_rollout_steps != 1
+        ):
+            raise ValueError(
+                "max_anchor_phase is only supported in time-window mode with "
+                "single-step supervision (n_rollout_steps == 1)."
+            )
+
+        self.eval_matched_phase = eval_matched_phase
+        self.eval_draw_seed = eval_draw_seed
+        if eval_matched_phase is not None:
+            if not self.cross_stream:
+                raise ValueError(
+                    "eval_matched_phase is only supported in cross-stream mode "
+                    "(set target_data_glob)."
+                )
+            lo, hi = eval_matched_phase
+            if not hi > lo:
+                raise ValueError(
+                    f"eval_matched_phase needs lo < hi, got {eval_matched_phase}."
+                )
+            if eval_draws_per_object < 1:
+                raise ValueError(
+                    "eval_draws_per_object must be >= 1, got "
+                    f"{eval_draws_per_object}."
                 )
 
         if means is None:
@@ -774,7 +827,14 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 # One sample per event after the first: the target is event
                 # target_idx and the context is the trailing window ending at
                 # target_idx - 1 (always non-empty, so short curves contribute).
+                # times are relative to the first event, so times[anchor] is
+                # the anchor phase.
                 for target_idx in range(1, n_events):
+                    if (
+                        self.max_anchor_phase is not None
+                        and times[target_idx - 1] > self.max_anchor_phase
+                    ):
+                        continue
                     self.samples.append((file_idx, target_idx))
             else:
                 # Legacy fixed-count windows: startIDX indexes the window start,
@@ -796,6 +856,8 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                     f for f in dense_files if _stem(f) in object_ids
                 ]
             dense_by_stem = {_stem(f): f for f in dense_files}
+            # (file_idx, anchor_idx) per object in eval-matched mode.
+            eval_anchors = []
 
             for file_idx, stem in enumerate(self.stems_per_file):
                 # Default: no dense target stream for this object.
@@ -830,10 +892,31 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 # candidate). anchor_idx spans all realistic events (there is no
                 # "next realistic event" requirement -- the target is dense).
                 r_times = self.events_per_file[file_idx][0]
+                if self.eval_matched_phase is not None:
+                    # One anchor per object: the last context event at phase
+                    # <= lo, as the eval does. Needs a scored target in (lo, hi].
+                    lo, hi = self.eval_matched_phase
+                    n_ctx = int(np.searchsorted(r_times, lo, side="right"))
+                    if n_ctx == 0:
+                        continue
+                    if not np.any((d_times > lo) & (d_times <= hi)):
+                        continue
+                    eval_anchors.append((file_idx, n_ctx - 1))
+                    continue
                 last_dense_t = d_times[-1]
                 for anchor_idx in range(r_times.shape[0]):
+                    if (
+                        self.max_anchor_phase is not None
+                        and r_times[anchor_idx] > self.max_anchor_phase
+                    ):
+                        continue
                     if last_dense_t > r_times[anchor_idx]:
                         self.samples.append((file_idx, anchor_idx))
+
+            # Draw-major order: every object's first draw, then every object's
+            # second, ... (see eval_draws_per_object).
+            for _ in range(eval_draws_per_object):
+                self.samples.extend(eval_anchors)
 
     def _read_merged_stream(
         self, npz_path: str, drop_upper_limits: bool = None
@@ -1257,8 +1340,16 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
             dtype=torch.float32,
         )
 
-        # Dense target, drawn to cover the forecast horizon from the anchor.
-        target_idx = self._draw_target_idx_cross(d_times, anchor_t)
+        if self.eval_matched_phase is not None:
+            # Eval-matched: a fixed draw (seeded by index) over the scored
+            # region, so every epoch validates on the same (context, target)s.
+            lo, hi = self.eval_matched_phase
+            scored = np.nonzero((d_times > lo) & (d_times <= hi))[0]
+            rng = np.random.default_rng((self.eval_draw_seed, index))
+            target_idx = int(scored[rng.integers(scored.shape[0])])
+        else:
+            # Dense target, drawn to cover the forecast horizon from the anchor.
+            target_idx = self._draw_target_idx_cross(d_times, anchor_t)
         target_band = int(d_bands[target_idx])
         target = np.zeros(self.n_channels, dtype=np.float32)
         mask = np.zeros(self.n_channels, dtype=np.float32)
