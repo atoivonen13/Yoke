@@ -270,8 +270,9 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 137,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 # RESULT 137 @epoch 100 of 200: uniform 1.3313 (vs 136 1.4070), dense 1.3356 -- every band better, ~3/4 of it spread; i/z brightening gone. Confounded (epochs + anneal), single seed.
 # RESULT 137 (all 200 epochs done): best realistic-val checkpoint is still epoch 90 -> the 1.3313 is the epoch-90 model.
-# Study 138: 137 config (same schedule, 200 ep) + train on the eval's task. TARGET_HORIZON_DAYS 8->10 (eval leads reach ~9.7 d;
+# Study 138: 137 config + train on the eval's task, 100 epochs (total_epochs 200->100) with the CSV row unchanged from 137, so
+# the LR follows 137's exact trajectory to epoch 100 (ends at ~0.56x anchor; 137's best epoch was 90 on it). Changes: TARGET_HORIZON_DAYS 8->10 (eval leads reach ~9.7 d;
 # 6.6% of scored targets were beyond 8 d), MAX_ANCHOR_PHASE_DAYS=2.0 (training anchors only at phase <= 2 d, as the eval),
 # VAL_UNIFORM_TARGET=True (val = realistic ctx <= 2 d -> uniform target in (2,10], 4 fixed seeded draws/object, so the
-# best-val epoch tracks the uniform headline). NVAL_BATCH 20->200 so each epoch scores the full ~4000-sample val set.
-138,yoke311,1,4,128,1,1,9,1,2,5,50,200,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+# best-val epoch tracks the uniform headline). NVAL_BATCH stays 20: 400 val samples/epoch = 1 fixed draw for 400 objects.
+138,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
