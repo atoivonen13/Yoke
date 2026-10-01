@@ -937,7 +937,32 @@ def main(args, rank, world_size, local_rank, device):
     # 100 winners forward (rollout off, delta off, quantile head) but restores the
     # full horizon so the result is DIRECTLY comparable to the 080/093 champion
     # (1.86 @1000 on 2->10). Eval MUST use --late_time_max_days 10.0 to match.
-    TARGET_HORIZON_DAYS = 8.0
+    # Study 138: 8.0 -> 10.0. The eval forecasts from the last detection at
+    # phase <= 2 d (median 1.58 d) out to phase 10 d, so leads reach ~9.7 d and
+    # ~6.6% of scored targets were beyond the trained 8 d (RMSE 1.91 in the
+    # 9.2 d lead bin). Same eval (--late_time_max_days 10.0).
+    TARGET_HORIZON_DAYS = 10.0
+
+    # Study 138: only anchors at phase <= MAX_ANCHOR_PHASE_DAYS become training
+    # samples (phase on each part's own context clock). The eval always
+    # forecasts from phase <= 2 d (--late_time_cutoff_days), but uncapped, only
+    # ~64% of cross-stream and ~38% of dense-context anchors were there (dense
+    # has ~43 anchors / object, realistic ~20). Side effect: the mix shifts
+    # toward realistic context (~16 dense : ~13 realistic anchors / object).
+    # None = every anchor (<= 137 behavior).
+    MAX_ANCHOR_PHASE_DAYS = 2.0
+
+    # Study 138: validate on the eval's task instead of realistic -> realistic.
+    # Val = realistic context ending at phase <= 2 d -> a uniform-grid target in
+    # (2, 10] d, one fixed seeded draw per (object, draw) so every epoch scores
+    # the same samples. The "best epoch" picked by the eval
+    # (resolve_best_checkpoint) then tracks the uniform headline. Val losses are
+    # not comparable to <= 137 val CSVs. False = realistic-only val.
+    # VAL_PHASE_RANGE = (eval --late_time_cutoff_days, --late_time_max_days).
+    VAL_UNIFORM_TARGET = True
+    VAL_PHASE_RANGE = (2.0, 10.0)
+    VAL_DRAWS_PER_OBJECT = 4
+    VAL_DRAW_SEED = 0
     # In window mode the model's first layer is sized by the padded width.
     WRAPPER_CONTEXT_LEN = (
         MAX_CONTEXT_LEN if CONTEXT_WINDOW_DAYS is not None else CONTEXT_LEN
@@ -1382,6 +1407,8 @@ def main(args, rank, world_size, local_rank, device):
         target_data_glob: str = None,
         target_drop_upper_limits: bool = None,
         target_random_tiebreak: bool = False,
+        max_anchor_phase: float = None,
+        eval_matched_phase: tuple = None,
     ) -> Kilonova_lc_scalar_context_DataSet_9band:
         """Build a 9-band dataset over one directory restricted to object_ids.
 
@@ -1390,8 +1417,10 @@ def main(args, rank, world_size, local_rank, device):
         shared per-object clock). ``target_drop_upper_limits`` overrides the
         upper-limit dropping for the target stream only (None = same as the
         context); ``target_random_tiebreak`` breaks equal-lead target ties at
-        random (needed for the band-synchronous uniform grid). See the dataset
-        docstring.
+        random (needed for the band-synchronous uniform grid).
+        ``max_anchor_phase`` keeps only anchors at phase <= that value;
+        ``eval_matched_phase`` builds the fixed eval-matched validation set
+        (``VAL_DRAWS_PER_OBJECT`` / ``VAL_DRAW_SEED``). See the dataset docstring.
         """
         return Kilonova_lc_scalar_context_DataSet_9band(
             N_imgs=0,
@@ -1413,6 +1442,10 @@ def main(args, rank, world_size, local_rank, device):
             target_data_glob=target_data_glob,
             target_drop_upper_limits=target_drop_upper_limits,
             target_random_tiebreak=target_random_tiebreak,
+            max_anchor_phase=max_anchor_phase,
+            eval_matched_phase=eval_matched_phase,
+            eval_draws_per_object=VAL_DRAWS_PER_OBJECT,
+            eval_draw_seed=VAL_DRAW_SEED,
         )
 
     if PROBE_DENSE_CONTEXT:
@@ -1444,7 +1477,11 @@ def main(args, rank, world_size, local_rank, device):
         # realistic-only (matches the deployment metric).
         train_parts = []
         if REALISTIC_TARGET_CONCAT:
-            train_real = _make_9band(args.kn_realistic_glob, train_stems)
+            train_real = _make_9band(
+                args.kn_realistic_glob,
+                train_stems,
+                max_anchor_phase=MAX_ANCHOR_PHASE_DAYS,
+            )
             train_parts.append(train_real)
         elif rank == 0:
             print(
@@ -1481,10 +1518,15 @@ def main(args, rank, world_size, local_rank, device):
                     target_data_glob=args.kn_uniform_glob,
                     target_drop_upper_limits=False,
                     target_random_tiebreak=True,
+                    max_anchor_phase=MAX_ANCHOR_PHASE_DAYS,
                 )
                 dense_target_name = "uniform"
             else:
-                train_dense = _make_9band(args.kn_dense_glob, train_stems)
+                train_dense = _make_9band(
+                    args.kn_dense_glob,
+                    train_stems,
+                    max_anchor_phase=MAX_ANCHOR_PHASE_DAYS,
+                )
                 dense_target_name = "dense"
             if len(train_dense) > 0:
                 train_parts.append(train_dense)
@@ -1542,6 +1584,7 @@ def main(args, rank, world_size, local_rank, device):
                 target_data_glob=cross_target_glob,
                 target_drop_upper_limits=cross_target_drop_ul,
                 target_random_tiebreak=cross_target_tiebreak,
+                max_anchor_phase=MAX_ANCHOR_PHASE_DAYS,
             )
             if len(train_cross) > 0:
                 train_parts.append(train_cross)
@@ -1575,7 +1618,46 @@ def main(args, rank, world_size, local_rank, device):
             ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         )
 
-        val_dataset = _make_9band(args.kn_realistic_glob, val_stems)
+        if rank == 0 and MAX_ANCHOR_PHASE_DAYS is not None:
+            print(
+                f"MAX_ANCHOR_PHASE_DAYS={MAX_ANCHOR_PHASE_DAYS}: training anchors "
+                f"capped at phase <= {MAX_ANCHOR_PHASE_DAYS} d (Study 138).",
+                flush=True,
+            )
+
+        if VAL_UNIFORM_TARGET:
+            # Study 138: the eval's task on the val objects -- realistic context
+            # ending at phase <= 2 d -> uniform target in (2, 10] d
+            # (VAL_PHASE_RANGE), fixed seeded draws. All targets are truth (no upper-limit
+            # drop); draws are uniform over the scored grid points, so no band
+            # tie-break is needed.
+            if not (args.kn_uniform_glob and glob.glob(args.kn_uniform_glob)):
+                raise FileNotFoundError(
+                    "VAL_UNIFORM_TARGET=True but kn_uniform_glob matched no "
+                    f"files: {args.kn_uniform_glob!r}."
+                )
+            val_dataset = _make_9band(
+                args.kn_realistic_glob,
+                val_stems,
+                target_data_glob=args.kn_uniform_glob,
+                target_drop_upper_limits=False,
+                eval_matched_phase=VAL_PHASE_RANGE,
+            )
+            if rank == 0:
+                n_val_obj = len(val_dataset) // VAL_DRAWS_PER_OBJECT
+                n_val_used = val_batches * batch_size * world_size
+                print(
+                    f"Validation: realistic ctx (phase <= {VAL_PHASE_RANGE[0]} d)"
+                    f" -> uniform target in ({VAL_PHASE_RANGE[0]}, "
+                    f"{VAL_PHASE_RANGE[1]}] d, "
+                    f"{n_val_obj} objects x {VAL_DRAWS_PER_OBJECT} draws = "
+                    f"{len(val_dataset)} samples; {n_val_used} scored per epoch "
+                    f"(val_batches {val_batches} x batch {batch_size} x "
+                    f"{world_size} ranks).",
+                    flush=True,
+                )
+        else:
+            val_dataset = _make_9band(args.kn_realistic_glob, val_stems)
 
 
     # NOTE: For DDP the batch_size is the per-GPU batch_size!!!
@@ -1749,6 +1831,8 @@ def main(args, rank, world_size, local_rank, device):
                     "loss_type": LOSS_TYPE,
                     "grad_clip_norm": GRAD_CLIP_NORM,
                     "lr_global_step": LR_GLOBAL_STEP,
+                    "max_anchor_phase_days": MAX_ANCHOR_PHASE_DAYS,
+                    "val_uniform_target": VAL_UNIFORM_TARGET,
                     "bypass_backbone": BYPASS_BACKBONE,
                     "bypass_channels": BYPASS_CHANNELS,
                     "phase_fourier_bands": PHASE_FOURIER_BANDS,
