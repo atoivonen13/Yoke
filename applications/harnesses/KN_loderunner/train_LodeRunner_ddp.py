@@ -592,7 +592,11 @@ def main(args, rank, world_size, local_rank, device):
     # 0.1x hurt (bias flipped under->over-fade); the encoder is best left frozen as
     # a feature extractor. Restored to the champion "decoder" scope. "full" remains
     # wired in checkpointing.py if a lower encoder-only LR is ever tried (3rd group).
-    BACKBONE_FINETUNE_SCOPE = "decoder"
+    # Study 140: "full" (sole change vs 138). 107's loss to decoder (+0.010, inside
+    # noise) was under the per-epoch LR sawtooth (warmup back to 1.0x every epoch),
+    # on dense truth, and on the old training task. Re-tested on the 138 recipe
+    # with the run-long anneal. Encoder trains at the same 0.1x mult as the decoder.
+    BACKBONE_FINETUNE_SCOPE = "full"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
@@ -953,7 +957,10 @@ def main(args, rank, world_size, local_rank, device):
     # Study 138 RESULT (with the 8->10 horizon + uniform val): uniform 1.2365,
     # -0.095 vs 137, all spread; ZTF r/i beyond-depth more too-bright.
     # Study 139: None (sole change vs 138) to split the cap from the horizon.
-    MAX_ANCHOR_PHASE_DAYS = None
+    # Study 139 RESULT: uniform 1.3006 (+0.064 vs 138, every band worse) -> the
+    # cap carries 138's gain; the 8->10 horizon alone is ~137 (within noise).
+    # Study 140: restored to 2.0.
+    MAX_ANCHOR_PHASE_DAYS = 2.0
 
     # Study 138: validate on the eval's task instead of realistic -> realistic.
     # Val = realistic context ending at phase <= 2 d -> a uniform-grid target in
