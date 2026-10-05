@@ -404,7 +404,13 @@ def main(args, rank, world_size, local_rank, device):
     # A/B partner is 103 (bypass, waist 8) -- NOT the waist-32 champion 101. Compare
     # 104 vs 103 to isolate the backbone at matched waist. Requires SPATIAL_RENDER
     # =False and BACKBONE_TAIL_LR_MULT=0.1 (scope="tail") below.
-    BYPASS_BACKBONE = False
+    # Study 141: TRUE (vs 138; run in parallel with 140's full-scope test). Does
+    # the fine-tuned backbone still earn its cost on the 138 recipe? Last checked
+    # as 103 (bypass, waist 8) 1.4978 vs 104 (backbone, tail) 1.4287, under the
+    # per-epoch LR sawtooth and the old training task. Waist stays 8
+    # (BYPASS_CHANNELS=None) to match 138, so the backbone is the only change;
+    # BACKBONE_TAIL_LR_MULT -> 0.0 below (bypass has nothing to unfreeze).
+    BYPASS_BACKBONE = True
 
     # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
     # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
@@ -553,7 +559,9 @@ def main(args, rank, world_size, local_rank, device):
     # Study 110 restores 0.1 (the 106 champion value) so the EMA change is the SOLE
     # variable vs the champion; 108's 0.03 @1000 is still pending, so we do NOT
     # stack the unproven LR change under the EMA test.
-    BACKBONE_TAIL_LR_MULT = 0.1
+    # Study 141: 0.0 -- BYPASS_BACKBONE=True, so the backbone never runs and
+    # build_finetune_optimizer raises on a nonzero mult.
+    BACKBONE_TAIL_LR_MULT = 0.0
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
@@ -596,7 +604,9 @@ def main(args, rank, world_size, local_rank, device):
     # noise) was under the per-epoch LR sawtooth (warmup back to 1.0x every epoch),
     # on dense truth, and on the old training task. Re-tested on the 138 recipe
     # with the run-long anneal. Encoder trains at the same 0.1x mult as the decoder.
-    BACKBONE_FINETUNE_SCOPE = "full"
+    # Study 141: back to "decoder" (the 138 value). Inert under bypass
+    # (BACKBONE_TAIL_LR_MULT=0.0); 140 keeps its own "full" copy of this script.
+    BACKBONE_FINETUNE_SCOPE = "decoder"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
