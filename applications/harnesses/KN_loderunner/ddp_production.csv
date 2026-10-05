@@ -280,3 +280,7 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # Study 139: 138 with MAX_ANCHOR_PHASE_DAYS=None (sole change) -- horizon 10 + uniform-target val kept, anchor-phase cap
 # off. Splits 138's gain: horizon vs cap. 100 epochs, row identical to 137/138. Headline = uniform vs 138's 1.2365.
 139,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+# RESULT 139 (best-val epoch 85): uniform 1.3006 (vs 138 1.2365, +0.064), dense 1.2988 -- every band worse than 138; ztfr beyond-depth back to -0.18. The anchor-phase cap carries 138's gain; horizon 8->10 alone ~ 137 (within noise).
+# Study 140: 138 config (MAX_ANCHOR_PHASE_DAYS=2.0 restored) + BACKBONE_FINETUNE_SCOPE decoder->full (sole change vs 138):
+# the shared encoder also trains, at the same 0.1x mult. Re-tests 107 (lost +0.010 under the per-epoch LR sawtooth). 100 epochs, row identical to 138.
+140,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
