@@ -950,7 +950,10 @@ def main(args, rank, world_size, local_rank, device):
     # has ~43 anchors / object, realistic ~20). Side effect: the mix shifts
     # toward realistic context (~16 dense : ~13 realistic anchors / object).
     # None = every anchor (<= 137 behavior).
-    MAX_ANCHOR_PHASE_DAYS = 2.0
+    # Study 138 RESULT (with the 8->10 horizon + uniform val): uniform 1.2365,
+    # -0.095 vs 137, all spread; ZTF r/i beyond-depth more too-bright.
+    # Study 139: None (sole change vs 138) to split the cap from the horizon.
+    MAX_ANCHOR_PHASE_DAYS = None
 
     # Study 138: validate on the eval's task instead of realistic -> realistic.
     # Val = realistic context ending at phase <= 2 d -> a uniform-grid target in

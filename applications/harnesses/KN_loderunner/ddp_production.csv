@@ -276,3 +276,7 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # VAL_UNIFORM_TARGET=True (val = realistic ctx <= 2 d -> uniform target in (2,10], 4 fixed seeded draws/object, so the
 # best-val epoch tracks the uniform headline). NVAL_BATCH stays 20: 400 val samples/epoch = 1 fixed draw for 400 objects.
 138,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+# RESULT 138 (best-val epoch 95): uniform 1.2365 (vs 137 1.3313, -0.095), dense 1.2060 -- every band better, nearly all spread; ztfr/ztfi beyond-depth bias -0.56/-0.72. Confounded (horizon + anchor cap + val), single seed.
+# Study 139: 138 with MAX_ANCHOR_PHASE_DAYS=None (sole change) -- horizon 10 + uniform-target val kept, anchor-phase cap
+# off. Splits 138's gain: horizon vs cap. 100 epochs, row identical to 137/138. Headline = uniform vs 138's 1.2365.
+139,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
