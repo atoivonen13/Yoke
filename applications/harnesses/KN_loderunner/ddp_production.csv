@@ -288,3 +288,4 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # both inert under bypass). Waist stays 8 (BYPASS_CHANNELS=None). Runs in parallel with 140: is the backbone still worth it on the
 # 138 recipe? 100 epochs, row identical to 138. Launch AFTER 140's study dir has its own copy of the script.
 141,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+# RESULT 141 (best-val epoch 85): uniform 1.3452 (vs 138 1.2365, +0.109), dense 1.3180 -- every band worse, u worst (1.592 -> 1.918). The fine-tuned backbone earns its place on the 138 recipe; bypass stays off.
