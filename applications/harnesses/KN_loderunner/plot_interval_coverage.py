@@ -28,6 +28,7 @@ Points of one object are correlated, so every CI resamples OBJECTS, not points.
 Magnitudes: larger = fainter, so "truth <= q_tau" means truth brighter than q.
 
     python plot_interval_coverage.py --study 141
+    # -> runs/study_141/.../interval_diagnostics/study141_interval_pp_uniform.png, ...
     # or point at an eval dir directly
     python plot_interval_coverage.py \\
         --eval_dir runs/study_141/dense_latetime_eval_9band
@@ -39,6 +40,7 @@ eval writes it there by default); without it only the raw band is plotted.
 import argparse
 import json
 import os
+import re
 from statistics import NormalDist
 
 import matplotlib
@@ -338,25 +340,25 @@ def print_tables(pp_rows, lead_res, truth, variants) -> None:
             f"{by_c[c]:>6.2f}" if c in by_c else f"{'-':>6}" for c in centers))
 
 
-def run_truth(df, truth, variants, boot, outdir, depths=None) -> None:
-    """Every plot + table for one truth set."""
+def run_truth(df, truth, variants, boot, outdir, prefix, depths=None) -> None:
+    """Every plot + table for one truth set; filenames start with ``prefix``."""
     pp_rows = plot_pp(df, variants, boot, truth,
-                      os.path.join(outdir, f"interval_pp_{truth}.png"))
-    plot_pit(df, variants, truth, os.path.join(outdir, f"interval_pit_{truth}.png"))
+                      os.path.join(outdir, f"{prefix}interval_pp_{truth}.png"))
+    plot_pit(df, variants, truth, os.path.join(outdir, f"{prefix}interval_pit_{truth}.png"))
     hits = _hit_arrays(df, variants)
     lead_res = plot_coverage_vs(
         df, variants, boot, truth, "lead", np.arange(0.0, 11.0, 1.0),
-        "lead time (d)", os.path.join(outdir, f"interval_cov_lead_{truth}.png"),
+        "lead time (d)", os.path.join(outdir, f"{prefix}interval_cov_lead_{truth}.png"),
         hits=hits)
     plot_misses_vs_lead(df, variants, boot, truth,
-                        os.path.join(outdir, f"interval_miss_lead_{truth}.png"),
+                        os.path.join(outdir, f"{prefix}interval_miss_lead_{truth}.png"),
                         hits)
     if depths is not None:
         df["dmag_depth"] = df["true"] - df["band"].map(depths)
         plot_coverage_vs(
             df, variants, boot, truth, "dmag_depth", np.arange(-6.0, 9.0, 1.0),
             "truth mag - dense depth", os.path.join(
-                outdir, f"interval_cov_depth_{truth}.png"),
+                outdir, f"{prefix}interval_cov_depth_{truth}.png"),
             title_extra=" (> 0 = beyond dense depth)", hits=hits)
     print_tables(pp_rows, lead_res, truth, variants)
 
@@ -385,6 +387,12 @@ def main() -> None:
             p.error("give --study or --eval_dir")
         args.eval_dir = f"runs/study_{args.study:03d}/dense_latetime_eval_9band"
     outdir = args.outdir or os.path.join(args.eval_dir, "interval_diagnostics")
+    # Study number for the filenames: --study, else the runs/study_NNN in the path.
+    study = args.study
+    if study is None:
+        hit = re.search(r"study_?(\d+)", os.path.abspath(args.eval_dir))
+        study = int(hit.group(1)) if hit else None
+    prefix = f"study{study:03d}_" if study is not None else ""
     os.makedirs(outdir, exist_ok=True)
 
     cal_path = args.calibration or os.path.join(args.eval_dir,
@@ -400,7 +408,7 @@ def main() -> None:
 
     if args.truth in ("dense", "both"):
         boot = ObjectBootstrap(dense["stem"].to_numpy(), args.n_boot, args.seed)
-        run_truth(dense, "dense", variants, boot, outdir)
+        run_truth(dense, "dense", variants, boot, outdir, prefix)
     if args.truth in ("uniform", "both"):
         if not os.path.exists(uni_csv):
             print(f"No {uni_csv}; skipping uniform truth.")
@@ -409,7 +417,7 @@ def main() -> None:
         add_variants(uni, scales)
         print(f"Uniform: {len(uni)} points, {uni['stem'].nunique()} objects")
         boot = ObjectBootstrap(uni["stem"].to_numpy(), args.n_boot, args.seed)
-        run_truth(uni, "uniform", variants, boot, outdir,
+        run_truth(uni, "uniform", variants, boot, outdir, prefix,
                   depths=dense_depths(dense))
 
 
