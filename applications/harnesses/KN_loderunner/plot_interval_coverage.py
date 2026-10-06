@@ -98,10 +98,13 @@ MIN_OBJ_POINTS = 5
 STUDY_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300")
 
 
-def load_points(csv_path: str) -> pd.DataFrame:
-    """Load a scored-points CSV (dense or uniform) with the columns used here."""
+def load_points(csv_path: str, extra_cols: tuple = ()) -> pd.DataFrame:
+    """Load a scored-points CSV (dense or uniform) with the columns used here.
+
+    ``extra_cols`` are kept under their CSV names.
+    """
     cols = ["stem", "band", "lead_time_days", "pred_mag", "pred_low",
-            "pred_high", "true_mag"]
+            "pred_high", "true_mag", *extra_cols]
     df = pd.read_csv(csv_path, usecols=cols)
     return df.rename(columns={"lead_time_days": "lead", "pred_mag": "med",
                               "pred_low": "low", "pred_high": "high",
