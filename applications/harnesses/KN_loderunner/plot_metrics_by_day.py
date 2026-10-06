@@ -10,8 +10,16 @@ light-curve day (phase since first detection; ``--x lead`` for lead time):
     median,
   * coverage of the 90% interval (target 0.90).
 
-One panel per band plus ``all`` (every band's points pooled, like the eval's
-overall RMSE: sqrt of the ``all`` MSE over every day is the eval's number).
+One panel per band plus two over all filters:
+
+  * ``all`` -- every band's points pooled, like the eval's overall RMSE (sqrt of
+    the ``all`` MSE over every day is the eval's number). Bands with more points
+    weigh more, which matters for dense truth (faint bands lose late points).
+  * ``mean`` -- the plain average of the per-band values, every filter weighted
+    equally. A day bin is shown only if every band has enough points in it.
+
+``*_filter_avg_*`` puts the three metrics' filter averages side by side
+(solid = equal-weight mean, dashed = pooled).
 The interval is the calibrated one when the eval dir has
 ``interval_calibration.json`` (``--band raw`` forces the raw band). Calibration
 only rescales the outer quantiles, so MSE is the same either way.
@@ -23,7 +31,8 @@ tables are paired.
 
     python plot_metrics_by_day.py --studies 138
     python plot_metrics_by_day.py --studies 138 140 141 --truth uniform
-    # -> runs/metrics_by_day_compare/study138_140_141_mse_by_phase_uniform.png, ...
+    # -> runs/metrics_by_day_compare/study138_140_141_mse_by_phase_uniform.png,
+    #    ..._filter_avg_by_phase_uniform.png, ...
 """
 
 import argparse
@@ -34,7 +43,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-
 from plot_interval_coverage import (  # noqa: E402
     BAND_COLORS,
     BAND_NAMES,
@@ -49,7 +57,8 @@ from plot_interval_coverage import (  # noqa: E402
     point_scores,
 )
 
-GROUPS = BAND_NAMES + ("all",)
+GROUPS = BAND_NAMES + ("all", "mean")
+GROUP_TITLES = {"all": "all bands (pooled)", "mean": "filter average (equal weight)"}
 # name -> (point_scores key, axis label, reference line, table format)
 METRICS = {
     "mse": ("sq_resid", "MSE of the median (mag$^2$)", None, "{:>7.3f}"),
@@ -96,6 +105,28 @@ def load_entry(eval_dir, truth, band, x_col, edges) -> dict | None:
             "idx": day_bins(x, edges)}
 
 
+def group_boot(e, g, k, key) -> tuple | None:
+    """``(mean, per-resample means, n points)`` of ``key`` for group ``g``.
+
+    ``k`` = day-bin index (``None`` = every in-window point). ``mean`` averages
+    the per-band values (same bootstrap weights, so its CI is consistent) and
+    needs every band present in the study to have >= ``MIN_BIN_POINTS`` points;
+    otherwise ``None``.
+    """
+    in_bin = e["idx"] >= 0 if k is None else e["idx"] == k
+    val = e["sc"][key]
+    if g != "mean":
+        m = group_mask(e["df"], g) & in_bin
+        if m.sum() < MIN_BIN_POINTS:
+            return None
+        return (*e["boot"].boot_means(m, val), int(m.sum()))
+    parts = [group_boot(e, b, k, key) for b in e["bands"]]
+    if any(p is None for p in parts):
+        return None
+    return (float(np.mean([p[0] for p in parts])),
+            np.mean([p[1] for p in parts], axis=0), sum(p[2] for p in parts))
+
+
 def by_day(e, edges) -> tuple:
     """Per group and metric: per-bin rows and the all-days mean.
 
@@ -106,27 +137,28 @@ def by_day(e, edges) -> tuple:
     """
     res, overall = {}, {}
     for g in GROUPS:
-        gm = group_mask(e["df"], g)
         for metric, (key, _, _, _) in METRICS.items():
-            val = e["sc"][key]
             rows = []
             for k in range(len(edges) - 1):
-                m = gm & (e["idx"] == k)
-                if m.sum() < MIN_BIN_POINTS:
+                r = group_boot(e, g, k, key)
+                if r is None:
                     continue
-                rows.append((0.5 * (edges[k] + edges[k + 1]),
-                             *e["boot"].mean_ci(m, val), int(m.sum())))
+                boot = r[1][np.isfinite(r[1])]
+                rows.append((0.5 * (edges[k] + edges[k + 1]), r[0],
+                             *np.percentile(boot, [5, 95]), r[2]))
             res[(g, metric)] = np.array(rows).reshape(-1, 5)
-            inwin = gm & (e["idx"] >= 0)
-            overall[(g, metric)] = (float(val[inwin].mean()) if inwin.any()
-                                    else np.nan)
+            r = group_boot(e, g, None, key)
+            overall[(g, metric)] = np.nan if r is None else r[0]
     return res, overall
 
 
 def _grid(title: str, sharey: bool):
-    fig, axes = plt.subplots(2, 5, figsize=(17, 7.4), sharex=True, sharey=sharey)
+    fig, axes = plt.subplots(3, 4, figsize=(15, 10), sharex=True, sharey=sharey)
     fig.suptitle(title)
-    return fig, axes.ravel()
+    axes = axes.ravel()
+    for ax in axes[len(GROUPS):]:
+        ax.set_visible(False)
+    return fig, axes[:len(GROUPS)]
 
 
 def plot_metric(entries, metric, truth, xlabel, path) -> None:
@@ -143,15 +175,17 @@ def plot_metric(entries, metric, truth, xlabel, path) -> None:
             if len(entries) > 1:
                 color = e["color"]
             else:
-                color = "k" if g == "all" else BAND_COLORS[i]
+                color = "k" if g in GROUP_TITLES else BAND_COLORS[i]
             _plot_series(ax, e["res"][(g, metric)], color, "-", e["label"],
                          marker="o")
         if ref is None:
             ax.set_ylim(bottom=0.0)
-        ax.set_title("all bands (pooled)" if g == "all" else g)
-    for ax in axes[5:]:
-        ax.set_xlabel(xlabel)
-    for ax in axes[::5]:
+        ax.set_title(GROUP_TITLES.get(g, g))
+        # Bottom visible panel of each column gets the x label.
+        if i + 4 >= len(GROUPS):
+            ax.set_xlabel(xlabel)
+            ax.xaxis.set_tick_params(labelbottom=True)
+    for ax in axes[::4]:
         ax.set_ylabel(ylabel)
     if len(entries) > 1:
         axes[0].legend(loc="best", fontsize=8)
@@ -162,7 +196,7 @@ def plot_overview(e, truth, xlabel, path) -> None:
     """One study: the three metrics side by side, one line per band + pooled."""
     fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
     fig.suptitle(f"Study {e['label']} by day ({truth} truth); black = all "
-                 "bands pooled, dashed = ZTF")
+                 "bands pooled, black dotted = filter average, dashed = ZTF")
     for ax, (metric, (_, ylabel, ref, _)) in zip(axes, METRICS.items()):
         if ref is not None:
             ax.axhline(ref, color="0.4", lw=0.8)
@@ -170,12 +204,38 @@ def plot_overview(e, truth, xlabel, path) -> None:
             pts = e["res"][(g, metric)]
             if pts.size == 0:
                 continue
-            pooled = g == "all"
+            pooled = g in GROUP_TITLES
             # ZTF dashed: ztfg/ztfr share near-identical hues with g/r.
+            ls = ":" if g == "mean" else "--" if g.startswith("ztf") else "-"
             ax.plot(pts[:, 0], pts[:, 1], marker="o", ms=3,
-                    color="k" if pooled else BAND_COLORS[i],
-                    ls="--" if g.startswith("ztf") else "-",
-                    lw=2.4 if pooled else 1.3, label="all" if pooled else g)
+                    color="k" if pooled else BAND_COLORS[i], ls=ls,
+                    lw=2.4 if pooled else 1.3,
+                    label={"all": "all (pooled)", "mean": "filter avg"}.get(g, g))
+        if ref is None:
+            ax.set_ylim(bottom=0.0)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+    axes[-1].legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    _save(fig, path)
+
+
+def plot_filter_avg(entries, truth, xlabel, path) -> None:
+    """The three metrics averaged over filters; solid = equal weight, dashed = pooled."""
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
+    fig.suptitle(f"Average over all filters by day ({truth} truth); solid = "
+                 "equal-weight filter average, dashed = all points pooled; "
+                 "shading = object-bootstrap 90% CI")
+    for ax, (metric, (_, ylabel, ref, _)) in zip(axes, METRICS.items()):
+        if ref is not None:
+            ax.axhline(ref, color="0.4", lw=0.8)
+        for e in entries:
+            color = e["color"] if len(entries) > 1 else "k"
+            _plot_series(ax, e["res"][("mean", metric)], color, "-",
+                         f"{e['label']} filter avg", lw=2.0, marker="o")
+            pts = e["res"][("all", metric)]
+            if pts.size:
+                ax.plot(pts[:, 0], pts[:, 1], color=color, ls="--", lw=1.2,
+                        label=f"{e['label']} pooled")
         if ref is None:
             ax.set_ylim(bottom=0.0)
         ax.set_xlabel(xlabel)
@@ -207,32 +267,34 @@ def print_tables(entries, truth, edges) -> None:
                 print(line + " " + fmt.format(e["overall"][(g, metric)]))
             if metric == "mse":
                 print(f"  (sqrt of the all / all-days MSE = RMSE "
-                      f"{np.sqrt(e['overall'][('all', 'mse')]):.4f})")
+                      f"{np.sqrt(e['overall'][('all', 'mse')]):.4f}; "
+                      f"equal-weight filter average: "
+                      f"{np.sqrt(e['overall'][('mean', 'mse')]):.4f})")
 
 
 def print_deltas(entries, truth, edges) -> None:
-    """Pooled (all-bands) delta vs the first study per day bin, paired CI."""
+    """Pooled and filter-average delta vs the first study per day bin, paired CI."""
     base = entries[0]
     centers = 0.5 * (edges[:-1] + edges[1:])
-    for metric, (key, ylabel, _, _) in METRICS.items():
-        print(f"\n[{truth}] all bands pooled, {_plain(ylabel)}: study - "
-              f"{base['label']} per day bin (* = paired 90% CI excludes 0)")
-        print(f"  {'study':<8}" + "".join(f"{c:>9.1f}" for c in centers))
-        for e in entries[1:]:
-            line = f"  {e['label']:<8}"
-            for k in range(len(edges) - 1):
-                m0 = base["idx"] == k
-                m = e["idx"] == k
-                if m0.sum() < MIN_BIN_POINTS or m.sum() < MIN_BIN_POINTS:
-                    line += f"{'-':>9}"
-                    continue
-                r0, b0 = base["boot"].boot_means(m0, base["sc"][key])
-                r, bt = e["boot"].boot_means(m, e["sc"][key])
-                d = (bt - b0)[np.isfinite(bt - b0)]
-                lo, hi = np.percentile(d, [5, 95])
-                star = "*" if lo > 0 or hi < 0 else " "
-                line += f"{r - r0:>+8.3f}{star}"
-            print(line)
+    for g in GROUP_TITLES:
+        for metric, (key, ylabel, _, _) in METRICS.items():
+            print(f"\n[{truth}] {GROUP_TITLES[g]}, {_plain(ylabel)}: study - "
+                  f"{base['label']} per day bin (* = paired 90% CI excludes 0)")
+            print(f"  {'study':<8}" + "".join(f"{c:>9.1f}" for c in centers)
+                  + f"{'all d':>9}")
+            for e in entries[1:]:
+                line = f"  {e['label']:<8}"
+                for k in list(range(len(edges) - 1)) + [None]:
+                    r0 = group_boot(base, g, k, key)
+                    r = group_boot(e, g, k, key)
+                    if r0 is None or r is None:
+                        line += f"{'-':>9}"
+                        continue
+                    d = r[1] - r0[1]
+                    lo, hi = np.percentile(d[np.isfinite(d)], [5, 95])
+                    star = "*" if lo > 0 or hi < 0 else " "
+                    line += f"{r[0] - r0[0]:>+8.3f}{star}"
+                print(line)
 
 
 def main() -> None:
@@ -298,10 +360,13 @@ def main() -> None:
         for e in entries:
             e["boot"] = ObjectBootstrap(e["df"]["stem"].to_numpy(), args.n_boot,
                                         args.seed, universe)
+            e["bands"] = [b for b in BAND_NAMES if (e["df"]["band"] == b).any()]
             e["res"], e["overall"] = by_day(e, edges)
         for metric in METRICS:
             plot_metric(entries, metric, truth, xlabel, os.path.join(
                 outdir, f"{prefix}{metric}_by_{args.x}_{truth}.png"))
+        plot_filter_avg(entries, truth, xlabel, os.path.join(
+            outdir, f"{prefix}filter_avg_by_{args.x}_{truth}.png"))
         for e in entries:
             own = f"study{e['label']}_" if args.studies else ""
             plot_overview(e, truth, xlabel, os.path.join(

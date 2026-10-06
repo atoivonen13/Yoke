@@ -15,6 +15,8 @@ model / GPU / torch) and plots, per band, raw vs calibrated:
      so F(low) = 0.05, F(med) = 0.5, F(high) = 0.95 exactly; between them the
      curve depends on that Gaussian assumption. Calibration multiplies s_lo /
      s_hi by the per-band k_lo / k_hi, which is exactly the calibrated band.
+     ``*_pp_all_*``: the same for every band's points pooled (thin lines = per
+     band), with a second panel of empirical - nominal so small deviations show.
   2. PIT histogram -- F(true) in 20 bins (flat = calibrated). The first and last
      bins ([0, 0.05], [0.95, 1]) are the exact miss fractions; a U-shape means
      the interval is too narrow, a hump too wide, a tilt a median bias.
@@ -51,8 +53,8 @@ Magnitudes: larger = fainter, so "truth <= q_tau" means truth brighter than q.
     # or point at an eval dir directly
     python plot_interval_coverage.py \\
         --eval_dir runs/study_141/dense_latetime_eval_9band
-    # overlay up to 6 studies (calibrated band; coverage / IS vs lead,
-    # spread-skill, coverage vs depth) + side-by-side tables
+    # overlay up to 6 studies (calibrated band; pooled PP, coverage / IS vs
+    # lead, spread-skill, coverage vs depth) + side-by-side tables
     python plot_interval_coverage.py --studies 138 140 141
     # -> runs/interval_compare/study138_140_141_compare_*.png
 
@@ -209,7 +211,6 @@ def _save(fig, path: str) -> None:
 
 def plot_pp(df, variants, boot, truth, out_path) -> list:
     """PP plot per band; returns rows of the exact-quantile table."""
-    taus = np.linspace(0.0, 1.0, 101)
     rows = []
     fig, axes = _band_grid(f"PP plot ({truth} truth): exact at 0.05 / 0.5 / 0.95; "
                            "curve = split-Gaussian interpolation")
@@ -224,15 +225,9 @@ def plot_pp(df, variants, boot, truth, out_path) -> list:
         for v in variants:
             style = dict(color=BAND_COLORS[b]) if v == "cal" else dict(
                 color="0.5", ls="--")
-            p = np.sort(pit(sub, v))
-            ax.plot(taus, np.searchsorted(p, taus, side="right") / p.size,
-                    lw=1.4, label=v, **style)
-            lo, hi = band_bounds(sub, v)
+            ax.plot(PP_TAUS, _pp_curve(sub, v), lw=1.4, label=v, **style)
             row = {"truth": truth, "band": name, "variant": v, "n": int(m.sum())}
-            for tau, q in ((Q_LO, lo), (Q_MED, sub["med"].to_numpy()), (Q_HI, hi)):
-                hit = np.zeros(len(df), dtype=bool)
-                hit[m] = sub["true"].to_numpy() <= q
-                r, c_lo, c_hi = boot.mean_ci(m, hit)
+            for tau, r, c_lo, c_hi in _exact_pp(df, m, v, boot):
                 ax.errorbar(tau, r, yerr=[[r - c_lo], [c_hi - r]], fmt="o",
                             ms=4, capsize=2, **style)
                 row[f"F({tau})"] = r
@@ -246,6 +241,110 @@ def plot_pp(df, variants, boot, truth, out_path) -> list:
     axes[0].legend(loc="upper left", fontsize=8)
     _save(fig, out_path)
     return rows
+
+
+PP_TAUS = np.linspace(0.0, 1.0, 101)
+
+
+def _pp_curve(sub, v) -> np.ndarray:
+    """Empirical F at ``PP_TAUS`` under the split Gaussian of ``v``."""
+    p = np.sort(pit(sub, v))
+    return np.searchsorted(p, PP_TAUS, side="right") / p.size
+
+
+def _exact_pp(df, m, v, boot) -> list:
+    """``(tau, rate, ci_lo, ci_hi)`` at the three learned quantiles."""
+    sub = df[m]
+    lo, hi = band_bounds(sub, v)
+    out = []
+    for tau, q in ((Q_LO, lo), (Q_MED, sub["med"].to_numpy()), (Q_HI, hi)):
+        hit = np.zeros(len(df), dtype=bool)
+        hit[m] = sub["true"].to_numpy() <= q
+        out.append((tau, *boot.mean_ci(m, hit)))
+    return out
+
+
+def _pp_axes(title: str):
+    """Left: PP plot; right: the same curves minus the diagonal.
+
+    Deviations of a few hundredths are invisible on the full-range PP axes.
+    """
+    fig, (ax, ax_d) = plt.subplots(1, 2, figsize=(13, 6))
+    fig.suptitle(title)
+    ax.plot([0, 1], [0, 1], color="k", lw=0.8)
+    ax_d.axhline(0.0, color="k", lw=0.8)
+    for tau in (Q_LO, Q_MED, Q_HI):
+        ax_d.axvline(tau, color="0.85", lw=0.8, zorder=0)
+    ax.set_aspect("equal")
+    ax.set_xlabel("nominal quantile level")
+    ax.set_ylabel("fraction truth <= predicted quantile")
+    ax_d.set_xlabel("nominal quantile level")
+    ax_d.set_ylabel("empirical - nominal  (> 0: truth brighter than predicted)")
+    return fig, ax, ax_d
+
+
+def _pp_draw(ax, ax_d, curve, exact, label, lw=1.5, errorbars=True, **style):
+    ax.plot(PP_TAUS, curve, lw=lw, label=label, **style)
+    ax_d.plot(PP_TAUS, curve - PP_TAUS, lw=lw, label=label, **style)
+    if not errorbars:
+        return
+    for tau, r, c_lo, c_hi in exact:
+        for a, off in ((ax, 0.0), (ax_d, tau)):
+            a.errorbar(tau, r - off, yerr=[[r - c_lo], [c_hi - r]], fmt="o",
+                       ms=5, capsize=3, **style)
+
+
+def plot_pp_combined(df, variants, boot, truth, out_path) -> dict:
+    """One PP plot for all bands pooled (raw and calibrated), bands faint behind.
+
+    Pooled = every point weighted equally, like the eval's overall RMSE, so
+    bands with more points weigh more.
+
+    Returns:
+        dict: variant -> exact ``(tau, rate, ci_lo, ci_hi)`` rows, pooled.
+    """
+    v_last = variants[-1]
+    fig, ax, ax_d = _pp_axes(
+        f"PP plot, all bands pooled ({truth} truth, n={len(df)}): exact at "
+        f"0.05 / 0.5 / 0.95 (object-bootstrap 90% CI); thin = per band ({v_last})")
+    for b, name in enumerate(BAND_NAMES):
+        sub = df[df["band"] == name]
+        if sub.empty:
+            continue
+        # ZTF dashed: ztfg/ztfr share near-identical hues with g/r.
+        _pp_draw(ax, ax_d, _pp_curve(sub, v_last), None, name, lw=0.9,
+                 errorbars=False, color=BAND_COLORS[b], alpha=0.7,
+                 ls="--" if name.startswith("ztf") else "-")
+    m = np.ones(len(df), dtype=bool)
+    exact = {}
+    for v in variants:
+        exact[v] = _exact_pp(df, m, v, boot)
+        style = dict(color="k") if v == v_last else dict(color="0.45", ls=":")
+        _pp_draw(ax, ax_d, _pp_curve(df, v), exact[v], f"all bands ({v})",
+                 lw=2.4, **style)
+    ax_d.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    _save(fig, out_path)
+    return exact
+
+
+def plot_pp_combined_compare(entries, truth, out_path) -> None:
+    """Pooled PP plot, one line per study (its final variant), + its table."""
+    fig, ax, ax_d = _pp_axes(
+        f"PP plot, all bands pooled ({truth} truth): exact at 0.05 / 0.5 / 0.95 "
+        "(object-bootstrap 90% CI)")
+    print(f"\n[{truth}] All bands pooled, exact PP points (targets 0.05 / 0.50 "
+          "/ 0.95), object-bootstrap 90% CI")
+    print(f"  {'study':<12}{'n':>9}" + "".join(
+        f"{f'F({t:g})':>8}{'90% CI':>16}" for t in (Q_LO, Q_MED, Q_HI)))
+    for e in entries:
+        m = np.ones(len(e["df"]), dtype=bool)
+        exact = _exact_pp(e["df"], m, e["v"], e["boot"])
+        _pp_draw(ax, ax_d, _pp_curve(e["df"], e["v"]), exact, e["label"], lw=1.8,
+                 color=e["color"])
+        print(f"  {e['label']:<12}{m.sum():>9d}" + "".join(
+            f"{r:>8.3f}{f'[{lo:.3f}, {hi:.3f}]':>16}" for _, r, lo, hi in exact))
+    ax_d.legend(loc="best", fontsize=8)
+    _save(fig, out_path)
 
 
 def plot_pit(df, variants, truth, out_path) -> None:
@@ -639,6 +738,10 @@ def run_truth(df, truth, variants, boot, outdir, prefix, depths=None) -> None:
         return os.path.join(outdir, f"{prefix}interval_{kind}_{truth}.png")
 
     pp_rows = plot_pp(df, variants, boot, truth, path("pp"))
+    pooled = plot_pp_combined(df, variants, boot, truth, path("pp_all"))
+    pp_rows += [{"truth": truth, "band": "all", "variant": v, "n": len(df),
+                 **{f"F({tau})": r for tau, r, _, _ in rows}}
+                for v, rows in pooled.items()]
     plot_pit(df, variants, truth, path("pit"))
     sc = point_scores(df, variants)
     lead_res = plot_coverage_vs(df, variants, boot, truth, "lead", LEAD_EDGES,
@@ -766,6 +869,7 @@ def run_compare(studies, data, truth, outdir, prefix, n_boot, seed,
         return os.path.join(outdir, f"{prefix}{kind}_{truth}.png")
 
     ci = "shading = object-bootstrap 90% CI"
+    plot_pp_combined_compare(entries, truth, path("pp_all"))
     _compare_grid(entries, f"90% coverage vs lead ({truth} truth); {ci}",
                   path("cov_lead"), "coverage", "lead time (d)",
                   lambda e: _binned_one(e, "lead", LEAD_EDGES, "covered"),
