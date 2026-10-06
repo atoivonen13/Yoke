@@ -410,7 +410,9 @@ def main(args, rank, world_size, local_rank, device):
     # per-epoch LR sawtooth and the old training task. Waist stays 8
     # (BYPASS_CHANNELS=None) to match 138, so the backbone is the only change;
     # BACKBONE_TAIL_LR_MULT -> 0.0 below (bypass has nothing to unfreeze).
-    BYPASS_BACKBONE = True
+    # 141 RESULT: uniform 1.3452 vs 138's 1.2365 (+0.109), every band worse ->
+    # the backbone earns its place. Restored to FALSE (the 138 value).
+    BYPASS_BACKBONE = False
 
     # Study 086 (spatial render). ROOT CAUSE of the 080-tie: the non-bypass path
     # tiled the conditioner's [B, 8] vector into a spatially-CONSTANT image and
@@ -560,8 +562,9 @@ def main(args, rank, world_size, local_rank, device):
     # variable vs the champion; 108's 0.03 @1000 is still pending, so we do NOT
     # stack the unproven LR change under the EMA test.
     # Study 141: 0.0 -- BYPASS_BACKBONE=True, so the backbone never runs and
-    # build_finetune_optimizer raises on a nonzero mult.
-    BACKBONE_TAIL_LR_MULT = 0.0
+    # build_finetune_optimizer raises on a nonzero mult. Restored to 0.1 (the 138
+    # value) with the backbone back on.
+    BACKBONE_TAIL_LR_MULT = 0.1
 
     # Study 084 (fine-tune scope). When BACKBONE_TAIL_LR_MULT > 0, this selects
     # which backbone modules the second (low-LR) optimizer group unfreezes:
@@ -606,6 +609,9 @@ def main(args, rank, world_size, local_rank, device):
     # with the run-long anneal. Encoder trains at the same 0.1x mult as the decoder.
     # Study 141: back to "decoder" (the 138 value). Inert under bypass
     # (BACKBONE_TAIL_LR_MULT=0.0); 140 keeps its own "full" copy of this script.
+    # 140 RESULT: "full" 1.2758 vs "decoder" 1.2365 (+0.039, inside seed noise,
+    # mixed per band, no over-fade flip) -> keep "decoder" (cheaper, shared
+    # encoder). Scope ladder closed.
     BACKBONE_FINETUNE_SCOPE = "decoder"
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and

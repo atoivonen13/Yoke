@@ -284,6 +284,7 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 # Study 140: 138 config (MAX_ANCHOR_PHASE_DAYS=2.0 restored) + BACKBONE_FINETUNE_SCOPE decoder->full (sole change vs 138):
 # the shared encoder also trains, at the same 0.1x mult. Re-tests 107 (lost +0.010 under the per-epoch LR sawtooth). 100 epochs, row identical to 138.
 140,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+# RESULT 140: uniform 1.2758 (vs 138 1.2365, +0.039, within seed noise), dense 1.2496 -- mixed per band (g/r/i better, u/y/ztf worse), no over-fade flip. Full scope ~ decoder; keep "decoder".
 # Study 141: 138 config + BYPASS_BACKBONE=True (sole change vs 138; BACKBONE_TAIL_LR_MULT 0.1->0.0, scope back to "decoder",
 # both inert under bypass). Waist stays 8 (BYPASS_CHANNELS=None). Runs in parallel with 140: is the backbone still worth it on the
 # 138 recipe? 100 epochs, row identical to 138. Launch AFTER 140's study dir has its own copy of the script.
