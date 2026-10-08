@@ -29,6 +29,7 @@ Only the observed band is fed back into the context and scored against truth.
 
 import argparse
 import csv
+import glob
 import os
 
 import matplotlib
@@ -44,7 +45,10 @@ from yoke.datasets.kilonova_dataset import (
     EPS,
     NINE_BAND_KEYS,
     Kilonova_lc_scalar_context_DataSet_9band,
+    default_kn_glob,
+    detect_band_keys,
     load_or_compute_band_normalization,
+    resolve_norm_stats_path,
 )
 from yoke.utils.context_selection import window_select_positions
 from yoke.utils.ema import ParamEMA
@@ -56,7 +60,6 @@ plt.rc("font", family="serif")
 plt.rcParams["figure.figsize"] = (7, 5)
 
 
-BAND_KEYS = NINE_BAND_KEYS
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
 BAND_COLORS = (
     "#2A9D8F",  # ztfg
@@ -71,7 +74,7 @@ BAND_COLORS = (
 )
 VALUE_COL = 1
 ERROR_COL = 2
-N_BANDS = len(BAND_KEYS)
+N_BANDS = len(BAND_NAMES)
 
 # Match training: drop upper-limit (non-detection) observations, flagged by a
 # non-finite uncertainty in ERROR_COL.
@@ -145,18 +148,18 @@ def get_args():
     parser.add_argument(
         "--norm_stats_path",
         type=str,
-        default="kilonova_9band_norm_stats_trainonly.npz",
+        default=None,
         help="Train-only normalization stats the model was trained with. Must "
-        "match training so plots use the exact encoding the model saw.",
+        "match training so plots use the exact encoding the model saw. Default: "
+        "the checkpoint's norm_stats_path (see resolve_norm_stats_path).",
     )
     parser.add_argument(
         "--data_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-        ),
-        help="Glob for the realistic light-curve files to diagnose.",
+        default=None,
+        help="Glob for the realistic light-curve files to diagnose. Default: the "
+        "realistic set of the checkpoint's band keys (rubin_ztf_* for the "
+        "PS1-era models, rubin_lsst_ztf_* for LSST).",
     )
     parser.add_argument(
         "--test_filelist",
@@ -281,7 +284,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("context_window_days:", context_window_days)
     print("max_context_len:", max_context_len)
     print("n_bands:", n_bands)
-    print("band_keys:", ckpt.get("band_keys", list(BAND_KEYS)))
+    band_keys = tuple(ckpt.get("band_keys", NINE_BAND_KEYS))
+    print("band_keys:", list(band_keys))
     print("backbone_channels:", backbone_channels)
     print("hidden:", hidden)
     print("dt_fourier_bands:", dt_fourier_bands)
@@ -378,6 +382,14 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     default_levels = [0.1, 0.5, 0.9] if n_quantiles == 3 else None
     model.quantile_levels = ckpt.get("quantile_levels", default_levels)
 
+    # The filter set the model was trained on and its train-only normalization
+    # cache (checkpoints that predate the keys are PS1-era).
+    model.band_keys = band_keys
+    model.norm_stats_path = resolve_norm_stats_path(
+        ckpt_path, ckpt.get("norm_stats_path"), band_keys
+    )
+    print("norm_stats_path:", model.norm_stats_path)
+
     model.eval()
 
     return model, context_len, n_bands, context_window_days, max_context_len
@@ -389,10 +401,13 @@ def make_eval_dataset(
     context_window_days=None,
     max_context_len=None,
     append_redshift=False,
+    band_keys=NINE_BAND_KEYS,
 ):
+    # Normalization is the model's (its training filter set); the dataset reads
+    # whichever filter set the files carry (same band order in both).
     band_means, band_stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
-        band_keys=BAND_KEYS,
+        band_keys=band_keys,
         value_col=VALUE_COL,
         error_col=ERROR_COL,
         drop_upper_limits=DROP_UPPER_LIMITS,
@@ -410,10 +425,18 @@ def make_eval_dataset(
             object_ids = {line.strip() for line in fh if line.strip()}
         print(f"Restricting diagnostics to {len(object_ids)} test-split objects.")
 
+    data_files = sorted(glob.glob(args.data_glob))
+    if not data_files:
+        raise FileNotFoundError(f"--data_glob {args.data_glob!r} matched no files.")
+    data_keys = detect_band_keys(data_files[0])
+    if data_keys != tuple(band_keys):
+        print(f"NOTE: data band keys {list(data_keys)} differ from the model's "
+              f"{list(band_keys)}.")
+
     dataset = Kilonova_lc_scalar_context_DataSet_9band(
         N_imgs=args.N_imgs,
         context_len=context_len,
-        band_keys=BAND_KEYS,
+        band_keys=data_keys,
         value_col=VALUE_COL,
         error_col=ERROR_COL,
         drop_upper_limits=DROP_UPPER_LIMITS,
@@ -421,7 +444,7 @@ def make_eval_dataset(
         stds=band_stds,
         context_window_days=context_window_days,
         max_context_len=max_context_len,
-        data_glob=getattr(args, "data_glob", None),
+        data_glob=args.data_glob,
         object_ids=object_ids,
         append_redshift=append_redshift,
     )
@@ -1197,6 +1220,10 @@ def main():
 
     window_mode = context_window_days is not None
     seed_len = max_context_len if window_mode else context_len
+    if args.norm_stats_path is None:
+        args.norm_stats_path = model.norm_stats_path
+    if args.data_glob is None:
+        args.data_glob = default_kn_glob(model.band_keys)
 
     eval_dataset, means, stds = make_eval_dataset(
         args=args,
@@ -1207,6 +1234,7 @@ def main():
             getattr(model, "redshift_fourier_bands", 0) > 0
             or getattr(model, "redshift_pivot_direct", False)
         ),
+        band_keys=model.band_keys,
     )
 
     print("Dataset files with events:", len(eval_dataset.events_per_file))

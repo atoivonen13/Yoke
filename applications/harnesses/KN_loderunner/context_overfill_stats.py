@@ -79,14 +79,14 @@ def main() -> None:
         "--realistic_glob",
         default=(
             "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
+            "rubin_lsst_ztf_10000_dataset_same_seed/lc_*.npz"
         ),
     )
     p.add_argument(
         "--dense_glob",
         default=(
             "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
+            "rubin_lsst_ztf_dense_10000_dataset_same_seed/lc_*.npz"
         ),
     )
     p.add_argument("--test_filelist", default=None,

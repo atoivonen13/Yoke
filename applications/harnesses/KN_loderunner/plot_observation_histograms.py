@@ -1,7 +1,9 @@
 """Plot observation-count histograms for the 9-band kilonova light-curve data.
 
 Each ``lc_*.npz`` file holds one light curve as a set of per-band arrays keyed by
-``NINE_BAND_KEYS`` (``arr_ztfg`` ... ``arr_ps1__y``). Every row of a band array is
+``NINE_BAND_KEYS`` (``arr_ztfg`` ... ``arr_ps1__y``) or, in the
+``rubin_lsst_ztf_*`` sets, ``LSST_NINE_BAND_KEYS`` (``arr_lsstu`` ...); the
+set is detected from the first file. Every row of a band array is
 one observation with columns ``[MJD, value, error, ...]``. Matching the 9-band
 dataset (``Kilonova_lc_scalar_context_DataSet_9band`` with
 ``drop_upper_limits=True``), a row is counted as a real **detection** when its
@@ -45,7 +47,7 @@ import matplotlib.pyplot as plt
 
 # Reuse the canonical band ordering / keys and column conventions from the
 # dataset so "observation" here means exactly what the model trains on.
-from yoke.datasets.kilonova_dataset import NINE_BAND_KEYS
+from yoke.datasets.kilonova_dataset import detect_band_keys
 
 
 # Default to the same data the 9-band pipeline trains and computes norm stats on
@@ -56,8 +58,9 @@ DEFAULT_DATA_GLOB = (
 )
 DEFAULT_ERROR_COL = 2
 
-# Short display labels for the bands, in NINE_BAND_KEYS order.
-BAND_LABELS = tuple(k.replace("arr_", "") for k in NINE_BAND_KEYS)
+# Short display labels for the bands, in the 9-band key order (same for the
+# PS1/SDSS and LSST filter sets).
+BAND_LABELS = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
 
 
 def collect_counts(files, band_keys, error_col):
@@ -669,7 +672,9 @@ def main():
 
     print(f"Matched {len(files)} files for glob: {args.data_glob}")
 
-    counts = collect_counts(files, NINE_BAND_KEYS, args.error_col)
+    band_keys = detect_band_keys(files[0])
+    print(f"Band keys: {list(band_keys)}")
+    counts = collect_counts(files, band_keys, args.error_col)
     print_summary(counts, args.include_upper_limits)
     print_sweep(counts["total_det_per_curve"], args.sweep_max)
 
