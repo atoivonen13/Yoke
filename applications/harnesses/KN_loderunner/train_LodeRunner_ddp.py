@@ -46,6 +46,34 @@ def _read_stem_list(path: str) -> set:
         return {line.strip() for line in fh if line.strip()}
 
 
+def _check_dataset(data_glob: str, band_keys: tuple, stems: set) -> str:
+    """Sanity-check a light-curve set before building datasets from it.
+
+    The dataset silently skips a missing band key, and the cross-stream parts
+    silently skip objects with no file in the target set, so a set written with
+    different band names or object stems would quietly change the training.
+    Raises if the first file lacks any of ``band_keys`` or no file matches
+    ``stems``.
+
+    Returns:
+        str: A one-line summary of how many of ``stems`` the set covers.
+    """
+    files = sorted(glob.glob(data_glob))
+    if not files:
+        return f"{data_glob!r}: no files"
+    with np.load(files[0], allow_pickle=True) as data:
+        missing = [k for k in band_keys if k not in data.files]
+    if missing:
+        raise KeyError(
+            f"{files[0]} (from {data_glob!r}) lacks band keys {missing}; "
+            f"expected {list(band_keys)}."
+        )
+    n_hit = len(stems & {os.path.splitext(os.path.basename(f))[0] for f in files})
+    if n_hit == 0:
+        raise ValueError(f"No train object stem has a file in {data_glob!r}.")
+    return f"{data_glob!r}: {len(files)} files, {n_hit}/{len(stems)} train objects"
+
+
 #############################################
 # Inputs
 #############################################
@@ -132,6 +160,8 @@ parser.add_argument(
 # objects, denser cadence, no limiting-mag cut) is optional and concatenated onto
 # the realistic training data when present. Both are filtered to the object-level
 # split (see --train_filelist / --validation_filelist below).
+# Studies 142-144: dense + uniform switched to the rubin_lsst_ztf_* sets (the
+# realistic context set is unchanged); through 141 they were rubin_ztf_*.
 parser.add_argument(
     "--kn_realistic_glob",
     type=str,
@@ -146,7 +176,7 @@ parser.add_argument(
     type=str,
     default=(
         "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-        "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
+        "rubin_lsst_ztf_dense_10000_dataset_same_seed/lc_*.npz"
     ),
     help="Optional glob for the dense light-curve files. When set (and it "
     "matches files), the dense TRAIN objects are concatenated onto the "
@@ -158,7 +188,7 @@ parser.add_argument(
     type=str,
     default=(
         "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-        "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
+        "rubin_lsst_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
     ),
     help="Glob for the uniform-grid light-curve files (same objects, noise-free, "
     "no limiting magnitude: the true light curve). Used as the cross-stream "
@@ -613,6 +643,23 @@ def main(args, rank, world_size, local_rank, device):
     # mixed per band, no over-fade flip) -> keep "decoder" (cheaper, shared
     # encoder). Scope ladder closed.
     BACKBONE_FINETUNE_SCOPE = "decoder"
+
+    # Studies 142-144: 138 / 140 / 141 re-run on the rubin_lsst_ztf dense +
+    # uniform sets (--kn_dense_glob / --kn_uniform_glob defaults). All three
+    # launch from this one script, so the 140 / 141 variant is picked by study
+    # number instead of by editing the knobs above between launches.
+    if studyIDX == 143:  # = 140: shared encoder fine-tuned too
+        BACKBONE_FINETUNE_SCOPE = "full"
+    elif studyIDX == 144:  # = 141: backbone bypassed (nothing to unfreeze)
+        BYPASS_BACKBONE = True
+        BACKBONE_TAIL_LR_MULT = 0.0
+    if rank == 0:
+        print(
+            f"Study {studyIDX}: BYPASS_BACKBONE={BYPASS_BACKBONE}, "
+            f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
+            f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}",
+            flush=True,
+        )
 
     # Fourier lead-time conditioning. When > 0, the trainable conditioner and
     # output head receive a 2*DT_FOURIER_BANDS sinusoidal encoding of the lead
@@ -1502,6 +1549,13 @@ def main(args, rank, world_size, local_rank, device):
         # densely -- concatenated to supervise late-time behavior. Validation stays
         # realistic-only (matches the deployment metric).
         train_parts = []
+        for data_glob in (
+            args.kn_realistic_glob, args.kn_dense_glob, args.kn_uniform_glob
+        ):
+            if data_glob:
+                summary = _check_dataset(data_glob, BAND_KEYS, train_stems)
+                if rank == 0:
+                    print(f"Data set {summary}", flush=True)
         if REALISTIC_TARGET_CONCAT:
             train_real = _make_9band(
                 args.kn_realistic_glob,
