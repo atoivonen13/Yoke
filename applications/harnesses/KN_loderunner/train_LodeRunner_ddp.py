@@ -167,7 +167,7 @@ parser.add_argument(
     type=str,
     default=(
         "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-        "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
+        "rubin_lsst_ztf_10000_dataset_same_seed/lc_*.npz"
     ),
     help="Glob for the realistic light-curve files (primary training data).",
 )
