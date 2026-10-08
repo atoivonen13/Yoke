@@ -125,175 +125,26 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 #119,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #120,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #121,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 122: LONGER RUN of study 116 (color-anchored SED-bottleneck head). Same
-# launch regime as the whole champion family (batch 5, TERMINAL_STEPS=50/WARMUP=20
-# cyclic schedule) with the SOLE change total_epochs 40->100 in
-# training_START.input. Config set in train_LodeRunner_ddp.py: COLOR_ANCHORED_HEAD
-# =True, COLOR_SED_RANK=2, COLOR_SED_DT_INDEPENDENT=False (the 116/117 Dt-dependent
-# code, NOT the 118 Dt-independent variant). This 116 run evaluated 1.3891 overall
-# (tied 111's 1.3800 inside seed ±0.02) WITH ztfg improved to RMSE 1.68 / bias
-# -0.48 -> the mechanism fired; longer training tests whether extra epochs firm up
-# the SED coupling and pull ztfg further without giving up overall parity. Schedule
-# stays cyclic (LR bounded [0.5,1.0]x anchor, full cosine cycle ~every 1.2 ep), NOT
-# the study-109 single-anneal terminal_steps trap, so adding epochs is safe.
-# Study 123 (ran as runs/study_123): the LONGER RUN of study 116 above (100 epochs,
-# color-anchored SED head, NO redshift). RESULT: NEW CHAMPION, 1.2521 @1000 (-0.13
-# vs 116 1.3891 and 111 1.3800) -> the extra epochs firmed the SED coupling AND
-# pulled the whole curve down. Now the baseline redshift (124) must beat.
+#122,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
 #123,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 124: REDSHIFT as a conditioning scalar (the PRIMARY remaining lever;
-# memory kn-redshift-feature-idea). Built ON the study-123 recipe: 116 color-
-# anchored SED head (COLOR_ANCHORED_HEAD=True, COLOR_SED_RANK=2,
-# COLOR_SED_DT_INDEPENDENT=False) at 100 epochs, adding REDSHIFT_FOURIER_BANDS=8
-# (REDSHIFT_MEAN=0.01424, STD=0.00365) so the distance-modulus LEVEL knob reaches
-# the pivot through the conditioner. Redshift is ALWAYS-ON here (train + forecast);
-# optional-at-forecast via train-time dropout is a deferred follow-up. Same launch
-# regime as the champion family (batch 5, TERMINAL_STEPS=50/WARMUP=20 cyclic) with
-# total_epochs=100 in training_START.input (match study 123). Read @1000 (seed
-# ±0.02) vs the study-123 CHAMPION (1.2521 overall, ztfg RMSE 1.81 / bias -0.73).
-# Fresh train (new conditioner first-layer width can't load 123 head weights;
-# backbone still loads). Read criteria: (1) overall late RMSE beats 1.2521; (2) ztfg
-# bias -0.73 toward 0 (the level residual redshift should fix); (3) the now-uniform
-# negative under-fade bias across bands (u -0.64, i -0.33, z -0.34, ztfi -0.30)
-# lifts toward 0 -- the distance-modulus level is exactly this shared offset.
-# Redshift IS passed at forecast (eval reads it per-object from injection_parameters),
-# so the @1000 eval directly measures the always-on ceiling.
-124,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 125: PIVOT-DIRECT redshift (pre-registered escalation after 124 died).
-# Fourier conditioner path OFF (REDSHIFT_FOURIER_BANDS=0); instead REDSHIFT_PIVOT_DIRECT
-# =True feeds standardized z straight into the color head's pivot as an additive,
-# band-uniform level term m_ref <- m_ref + w_z*z_std (w_z a single learned scalar,
-# init 0 -> == champion 123 at init). Distance modulus is a pure shared-level offset,
-# exactly what m_ref represents, so this is the structurally-forced delivery the
-# pooled conditioner (124) could not provide. Built on the 123 champion recipe, 100 ep.
-# READ @1000: (1) overall < 123's 1.2521? (2) does the UNIFORM negative bias
-# (ztfg -0.73, u -0.64, ...) move toward 0 -- the mechanism target? (3) good bands
-# not regressed. This is the LAST redshift wiring; if the shared bias still won't move,
-# the level residual is not redshift-addressable via this architecture -> close thread.
-125,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 126: ztf-twin SED-slope tie. Sole change vs 125 (COLOR_ZTF_TIE_TWINS=True):
-# alias W_band[ztfg/r/i] := W_band[ps1_g/r/i] so each ztf band fades like its
-# near-identical Rubin twin, offset by a free per-band zero point. Targets the
-# ztfg/r/i late-time plateau seen in the 125 dense plots (twin Rubin band tracks
-# the fade; ztf band stalls 2-8 mag bright because ZTF's ~21 floor drops its
-# faint detections so training never supervises the ztf tail). Read @1000: ztfg
-# RMSE 1.78 -> toward g's ~1.6/pivot? overall < 125's 1.2628? good bands intact?
-126,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 127: CROSS-STREAM training samples (realistic context -> dense late-faint
-# target of the SAME object). Sole change vs 125: ADD_CROSSSTREAM=True in
-# train_LodeRunner_ddp.py. Adds a THIRD ConcatDataset part (keeps the realistic and
-# dense-dense parts) via new target_data_glob arg on the 9band dataset: context from
-# the realistic (floor-limited) stream, target from the dense stream, both on a
-# shared per-object clock (t0 = first realistic detection), normalized with shared
-# realistic stats; anchors on realistic events reaching a dense target; lead~U(0,8d);
-# Dt = dense_target_t - realistic_anchor_t. Window x built by a shared _flatten_window
-# helper so model input is byte-identical to single-stream. Motivation: horizon-exact
-# diagnostic (diagnose_ztf_horizon_exact.py) showed the faint-late ztfg plateau is a
-# CONTEXT-CONTENT gap, not a lead-coverage gap -- 72.6% of ztfg-late training weight is
-# at lead>=2d but 78.3% pairs the faint target with a recent BRIGHT ztfg context point,
-# while at eval the realistic context is empty/ztfg-free 51.7% of the time. This study
-# supplies the missing (sparse-realistic-context -> dense-faint-target) mapping. DATA
-# lever, not cross-band sharing (117/118/126). Read @1000: (1) overall < 125's 1.2628
-# (ideally < 123's 1.2521)? (2) ztfg late RMSE down with bias->0? (3) good bands
-# (u/g/r/i/z/y) NOT regressed? (4) ztfg plateau eases in dense plots under realistic
-# sparse context. Fresh train.
-127,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 128: DROP the dense-dense concat part (DENSE_DENSE_CONCAT=False), isolating
-# the cross-stream ztfg win from 127's global over-fade. Built on 127 (125 recipe +
-# ADD_CROSSSTREAM=True). Sole change: omit the dense-context/dense-target concat part
-# so the train set = realistic + cross-stream ONLY (cross-stream = realistic context ->
-# dense faint-late target = the SOLE dense-target supply, vs 127's dense-dense + cross
-# double supply). 127 broke the ztfg plateau (RMSE 1.81->1.591, bias -0.73->+0.00) but
-# doubled dense-target supervision over-taught the fade -> all bands flipped to positive
-# over-fade (g +0.80, RMSE 1.53->1.74), netting a champion tie (1.2549 vs 123's 1.2521).
-# Read @1000: (1) ztfg win retained (~1.59, bias~0)? (2) Rubin biases pull back toward 0?
-# (3) overall < 123's 1.2521 (net-champion test)? (4) mean|bias| < 127's 0.345? Fresh train.
-# RESULT: 1.2663, FALSIFIED -- ztfg back to 1.78/bias -0.89; biases back to 125-like
-# under-fade. Bias level tracks the dense-target FRACTION of the mix. Reverted to True.
-128,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 129: ALL-DENSE TARGETS. Built on 127 (ADD_CROSSSTREAM=True, DENSE_DENSE_CONCAT=
-# True). Sole change REALISTIC_TARGET_CONCAT=False: drop the realistic-target part, train
-# on dense-dense + cross-stream only (every target dense = scoring distribution; cross
-# keeps realistic context). Tests whether floor-truncated realistic targets cause the
-# mix-fraction-dependent bias seen in 125/127/128. Read @1000: all biases near 0 at once?
-# overall < 1.2521? ztfg spread <= 1.59? Caveats: fewer samples/epoch; val is still
-# realistic-target -> also eval with --exact_epoch at the final epoch.
-129,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 130: PRINCIPLED BAND LOSS WEIGHTS on the study-123 champion. All post-123 knobs
-# at their no-op (redshift off, cross-stream off, dense-dense + realistic on, ztf tie
-# off). Sole change BAND_WEIGHTS_MODE="std": per-band weight = train-only norm std
-# (mean-1), replacing the never-tested manual 2/2/2/3/2/1/1/1/1. Makes the pinball loss
-# exactly magnitude-units (matches the mag-RMSE metric). Read @1000 vs 123's 1.2521: a
-# tie is a win (untuned knob removed); watch the shared negative bias. 100 ep.
-130,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# RESULTS: 129 = 1.2220, NEW CHAMPION (all-dense targets centered every band but ztfg;
-# gain is bias, spread flat). 130 = 1.3450, REGRESSED +0.093 (spread up in every band);
-# reverted to BAND_WEIGHTS_MODE="manual". Script flags now = the 129 champion config.
-
-
-
-# Study 131: 90% INTERVAL HEAD on the study-129 champion. 129 config exactly (all-dense
-# targets, pivot-direct redshift, manual band weights). Sole change QUANTILE_LEVELS
-# (0.1,0.5,0.9) -> (0.05,0.5,0.95). Pinball loss not comparable to prior studies; read
-# late RMSE @1000 vs 129's 1.2220 (tie = keep), plus quantile_coverage.py --interval 0.9.
-131,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# RESULT 131: 1.2377 (MAE 0.8865), +0.016 vs 129 -- seed-level TIE, keep 0.05/0.95 per the
-# pre-registered rule. ztfg bias -0.69 -> -0.51; r/i/z/y biases moved negative (medians shifted).
-
-# Study 132: CONTEXT CAP 12 -> 24 on the study-129 champion (window stays 2 d). 129 config
-# exactly, QUANTILE_LEVELS restored to (0.1,0.5,0.9). Eval context over-fills 12 for 57% of
-# test objects (13.7% of events dropped, oldest first) vs 11-17% of training anchors; 24
-# covers 99.9%. Read late RMSE @1000 vs 129's 1.2220.
-132,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# RESULT 132: 1.3431 (MAE 1.0149), REGRESSED +0.121 vs 129 -- every band, uniformly too bright
-# (mean|bias| 0.19 -> 0.41) and more spread (bias-free 1.202 -> 1.267). Reverted MAX_CONTEXT_LEN to 12.
-
-# Study 133: 131 config again (0.05/0.5/0.95, cap 12) -- train script differs from 131 only
-# in comments, so this is a RE-SEED of 131.
-133,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# RESULT 133: 1.2924 (MAE 0.9332), +0.055 vs 131 with no config change -- seed spread is ~0.05,
-# not 0.02. Same biases as 131; all spread (bias-free 1.216 -> 1.270).
-# Study 134: 133 config + UNIFORM_CROSSSTREAM_TARGET=True -- cross-stream targets from the uniform
-# (true-curve, no limiting mag) set instead of dense. Headline = uniform-truth RMSE (133: 1.9872).
-134,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# Study 135: 134 config relaunched from 572b08a so the uniform cross-stream targets actually ran.
-135,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# RESULT 135: uniform 1.5584 (vs 1.99), dense 1.3059 -- gain ~all ztfg.
-# Study 136: 135 + UNIFORM_DENSEDENSE_TARGET=True -- dense-dense part targets from the uniform set too.
-136,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
-# RESULT 136: uniform 1.4070 (vs 135 1.5584), dense 1.3882 -- ZTF beyond-depth bias toward 0; ztfg/ztfr within-depth too faint; i/z brighter.
-# Study 137: 136 config at 200 epochs with a RUN-LONG LR schedule (LR_GLOBAL_STEP=True). Through 136
-# the scheduler was rebuilt each epoch and replayed from step 1 (20-step warmup + 30-step cosine to
-# 0.5x, every epoch, never annealed). Now the steps count over the whole run: 200 ep x 50 batches =
-# 10000 steps; warmup 250 (5 ep), single cosine to 0.1x anchor on the last step. total_epochs 200 in
-# training_input.tmpl + training_START.input. Headline = uniform RMSE vs 136's 1.4070.
-137,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# RESULT 137 @epoch 100 of 200: uniform 1.3313 (vs 136 1.4070), dense 1.3356 -- every band better, ~3/4 of it spread; i/z brightening gone. Confounded (epochs + anneal), single seed.
-# RESULT 137 (all 200 epochs done): best realistic-val checkpoint is still epoch 90 -> the 1.3313 is the epoch-90 model.
-# Study 138: 137 config + train on the eval's task, 100 epochs (total_epochs 200->100) with the CSV row unchanged from 137, so
-# the LR follows 137's exact trajectory to epoch 100 (ends at ~0.56x anchor; 137's best epoch was 90 on it). Changes: TARGET_HORIZON_DAYS 8->10 (eval leads reach ~9.7 d;
-# 6.6% of scored targets were beyond 8 d), MAX_ANCHOR_PHASE_DAYS=2.0 (training anchors only at phase <= 2 d, as the eval),
-# VAL_UNIFORM_TARGET=True (val = realistic ctx <= 2 d -> uniform target in (2,10], 4 fixed seeded draws/object, so the
-# best-val epoch tracks the uniform headline). NVAL_BATCH stays 20: 400 val samples/epoch = 1 fixed draw for 400 objects.
-138,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# RESULT 138 (best-val epoch 95): uniform 1.2365 (vs 137 1.3313, -0.095), dense 1.2060 -- every band better, nearly all spread; ztfr/ztfi beyond-depth bias -0.56/-0.72. Confounded (horizon + anchor cap + val), single seed.
-# Study 139: 138 with MAX_ANCHOR_PHASE_DAYS=None (sole change) -- horizon 10 + uniform-target val kept, anchor-phase cap
-# off. Splits 138's gain: horizon vs cap. 100 epochs, row identical to 137/138. Headline = uniform vs 138's 1.2365.
-139,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# RESULT 139 (best-val epoch 85): uniform 1.3006 (vs 138 1.2365, +0.064), dense 1.2988 -- every band worse than 138; ztfr beyond-depth back to -0.18. The anchor-phase cap carries 138's gain; horizon 8->10 alone ~ 137 (within noise).
-# Study 140: 138 config (MAX_ANCHOR_PHASE_DAYS=2.0 restored) + BACKBONE_FINETUNE_SCOPE decoder->full (sole change vs 138):
-# the shared encoder also trains, at the same 0.1x mult. Re-tests 107 (lost +0.010 under the per-epoch LR sawtooth). 100 epochs, row identical to 138.
-140,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# RESULT 140: uniform 1.2758 (vs 138 1.2365, +0.039, within seed noise), dense 1.2496 -- mixed per band (g/r/i better, u/y/ztf worse), no over-fade flip. Full scope ~ decoder; keep "decoder".
-# Study 141: 138 config + BYPASS_BACKBONE=True (sole change vs 138; BACKBONE_TAIL_LR_MULT 0.1->0.0, scope back to "decoder",
-# both inert under bypass). Waist stays 8 (BYPASS_CHANNELS=None). Runs in parallel with 140: is the backbone still worth it on the
-# 138 recipe? 100 epochs, row identical to 138. Launch AFTER 140's study dir has its own copy of the script.
-141,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# RESULT 141 (best-val epoch 85): uniform 1.3452 (vs 138 1.2365, +0.109), dense 1.3180 -- every band worse, u worst (1.592 -> 1.918). The fine-tuned backbone earns its place on the 138 recipe; bypass stays off.
-# Studies 142-144: 138 / 140 / 141 re-run with the dense + uniform sets switched to rubin_lsst_ztf_dense_10000_dataset_same_seed /
-# rubin_lsst_ztf_uniform_10000_dataset_same_seed (--kn_dense_glob / --kn_uniform_glob defaults; realistic context set and split lists
-# unchanged). One script for all three: the 140 / 141 knobs are set by studyIDX in train_LodeRunner_ddp.py (143 = full scope,
-# 144 = bypass). 100 epochs, rows identical to 138.
+#124,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#125,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#126,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#127,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#128,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#129,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#130,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#131,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#132,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#133,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#134,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#135,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#136,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.5,50,20,0.0,train_LodeRunner_ddp.py
+#137,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+#138,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+#139,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+#140,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+#141,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 142,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-143,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-144,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+
+
