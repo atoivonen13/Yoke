@@ -63,7 +63,7 @@ import numpy as np
 import torch
 
 from yoke.datasets.kilonova_dataset import (
-    NINE_BAND_KEYS,
+    default_kn_glob,
     load_or_compute_band_normalization,
 )
 
@@ -89,8 +89,6 @@ matplotlib.rcParams["pdf.fonttype"] = 42
 matplotlib.rcParams["ps.fonttype"] = 42
 plt.rc("font", family="serif")
 plt.rcParams["figure.figsize"] = (7, 5)
-
-BAND_KEYS = NINE_BAND_KEYS
 
 
 def _trigger_time_from_npz(
@@ -191,19 +189,14 @@ def get_args():
     p.add_argument(
         "--realistic_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-        ),
-        help="Glob for the realistic light-curve files (observing context).",
+        default=None,
+        help="Glob for the realistic light-curve files (observing context). "
+        "Default (all three globs): the sets of the checkpoint's band keys.",
     )
     p.add_argument(
         "--dense_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
-        ),
+        default=None,
         help="Glob for the dense light-curve files (late-time truth).",
     )
     p.add_argument(
@@ -223,10 +216,7 @@ def get_args():
     p.add_argument(
         "--uniform_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
-        ),
+        default=None,
         help="Glob for the UNIFORM-grid companion set. Only used as a FALLBACK "
         "phase-zero proxy (with --allow_uniform_proxy) for objects whose files "
         "lack a sim-truth trigger. Ignored when the true trigger is available.",
@@ -247,8 +237,9 @@ def get_args():
     p.add_argument(
         "--norm_stats_path",
         type=str,
-        default="kilonova_9band_norm_stats_trainonly.npz",
-        help="Train-only normalization stats the model was trained with.",
+        default=None,
+        help="Train-only normalization stats the model was trained with. "
+        "Default: the checkpoint's norm_stats_path.",
     )
     p.add_argument(
         "--late_time_cutoff_days",
@@ -314,9 +305,16 @@ def main():
             "(context_window_days set); the loaded checkpoint is fixed-count."
         )
 
+    # Data sets and stats follow the checkpoint's filter set unless given.
+    for kind in ("realistic", "dense", "uniform"):
+        if getattr(args, f"{kind}_glob") is None:
+            setattr(args, f"{kind}_glob", default_kn_glob(model.band_keys, kind))
+    if args.norm_stats_path is None:
+        args.norm_stats_path = model.norm_stats_path
+
     means, stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
-        band_keys=BAND_KEYS,
+        band_keys=model.band_keys,
         value_col=VALUE_COL,
         error_col=ERROR_COL,
         drop_upper_limits=DROP_UPPER_LIMITS,

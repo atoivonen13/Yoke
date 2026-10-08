@@ -45,7 +45,7 @@ import torch
 
 from yoke.datasets.kilonova_dataset import (
     EPS,
-    NINE_BAND_KEYS,
+    default_kn_glob,
     load_or_compute_band_normalization,
 )
 
@@ -62,11 +62,10 @@ from eval_dense_latetime_9band import (  # noqa: E402
     study_tag,
 )
 
-BAND_KEYS = NINE_BAND_KEYS
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
 VALUE_COL = 1
 ERROR_COL = 2
-N_BANDS = len(BAND_KEYS)
+N_BANDS = len(BAND_NAMES)
 
 
 def audit_object(
@@ -166,16 +165,13 @@ def get_args():
     p.add_argument(
         "--realistic_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-        ),
+        default=None,
     )
     p.add_argument("--test_filelist", type=str, default=None)
     p.add_argument(
         "--norm_stats_path",
         type=str,
-        default="kilonova_9band_norm_stats_trainonly.npz",
+        default=None,
     )
     p.add_argument("--late_time_cutoff_days", type=float, default=2.0)
     p.add_argument("--late_time_max_days", type=float, default=10.0)
@@ -208,9 +204,15 @@ def main():
     if context_window_days is None:
         raise ValueError("Audit requires a time-window checkpoint.")
 
+    # Data sets and stats follow the checkpoint's filter set unless given.
+    if args.realistic_glob is None:
+        args.realistic_glob = default_kn_glob(model.band_keys)
+    if args.norm_stats_path is None:
+        args.norm_stats_path = model.norm_stats_path
+
     means, stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
-        band_keys=BAND_KEYS,
+        band_keys=model.band_keys,
         value_col=VALUE_COL,
         error_col=ERROR_COL,
         drop_upper_limits=True,

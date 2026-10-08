@@ -49,8 +49,9 @@ import torch
 
 from yoke.datasets.kilonova_dataset import (
     EPS,
-    NINE_BAND_KEYS,
+    default_kn_glob,
     load_or_compute_band_normalization,
+    match_band_keys,
 )
 from yoke.utils.checkpointing import _epoch_median_val_losses
 
@@ -71,7 +72,6 @@ plt.rc("font", family="serif")
 plt.rcParams["figure.figsize"] = (7, 5)
 
 
-BAND_KEYS = NINE_BAND_KEYS
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
 BAND_COLORS = (
     "#2A9D8F", "#E63946", "#F4A261", "#457B9D", "#1B9E77",
@@ -79,7 +79,7 @@ BAND_COLORS = (
 )
 VALUE_COL = 1
 ERROR_COL = 2
-N_BANDS = len(BAND_KEYS)
+N_BANDS = len(BAND_NAMES)
 DROP_UPPER_LIMITS = True  # matches training for the realistic (context) stream
 FILELIST_DIR = "/net/sescratch1/exempt/artimis/atoivonen/filelists"
 # npz reader threads and how many objects they may read ahead of the model.
@@ -162,6 +162,9 @@ def read_merged_stream(
             KEPT and flagged in the returned ``is_ul`` array (for models trained
             with ``upper_limit_channel``).
 
+    The file's filter set (PS1/SDSS or LSST keys) is matched from its members;
+    both map to the same band indices.
+
     Returns:
         (times, values, bands, is_ul, redshift): absolute MJD, raw magnitude,
         band index, upper-limit flag (1.0 for a non-detection); each [N] and
@@ -178,7 +181,7 @@ def read_merged_stream(
         except (ValueError, KeyError, TypeError):
             redshift = np.nan
     times, values, bands, is_ul = [], [], [], []
-    for band_idx, key in enumerate(BAND_KEYS):
+    for band_idx, key in enumerate(match_band_keys(data.files)):
         if key not in data.files:
             continue
         arr = data[key]
@@ -943,31 +946,25 @@ def get_args():
     p.add_argument(
         "--realistic_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-        ),
-        help="Glob for the realistic light-curve files (observing context).",
+        default=None,
+        help="Glob for the realistic light-curve files (observing context). "
+        "Default: the realistic set of the checkpoint's band keys (rubin_ztf_* "
+        "for the PS1-era models, rubin_lsst_ztf_* for LSST); likewise for "
+        "--dense_glob and --uniform_glob.",
     )
     p.add_argument(
         "--dense_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_dense_10000_dataset_same_seed/lc_*.npz"
-        ),
+        default=None,
         help="Glob for the dense light-curve files (late-time truth). Defaults to "
-        "the same dense set the model was trained on "
-        "(rubin_ztf_dense_10000_dataset_same_seed), whose Rubin bands reach "
-        "~11-12 d median so the 2->10 d scored region is well covered.",
+        "the dense set of the checkpoint's band keys (rubin_ztf_dense_* / "
+        "rubin_lsst_ztf_dense_*), whose Rubin bands reach ~11-12 d median so "
+        "the 2->10 d scored region is well covered.",
     )
     p.add_argument(
         "--uniform_glob",
         type=str,
-        default=(
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_uniform_10000_dataset_same_seed/lc_*.npz"
-        ),
+        default=None,
         help="Optional glob for a UNIFORM-grid, noise-free, no-limiting-mag "
         "companion set (same objects/seed, sampled on a dense regular phase "
         "grid). When it matches files, each per-object plot overlays this as a "
@@ -989,8 +986,9 @@ def get_args():
     p.add_argument(
         "--norm_stats_path",
         type=str,
-        default="kilonova_9band_norm_stats_trainonly.npz",
-        help="Train-only normalization stats the model was trained with.",
+        default=None,
+        help="Train-only normalization stats the model was trained with. "
+        "Default: the checkpoint's norm_stats_path (see resolve_norm_stats_path).",
     )
     p.add_argument(
         "--late_time_cutoff_days",
@@ -1766,11 +1764,20 @@ def main():
             "set); the loaded checkpoint is fixed-count."
         )
 
+    # Data sets and stats follow the checkpoint's filter set unless given.
+    for kind in ("realistic", "dense", "uniform"):
+        if getattr(args, f"{kind}_glob") is None:
+            setattr(args, f"{kind}_glob", default_kn_glob(model.band_keys, kind))
+    if args.norm_stats_path is None:
+        args.norm_stats_path = model.norm_stats_path
+    print(f"Globs: realistic {args.realistic_glob}; dense {args.dense_glob}; "
+          f"uniform {args.uniform_glob}")
+
     # Load the TRAIN-ONLY stats the model was trained with (loaded if present;
     # no eval-set recomputation).
     means, stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
-        band_keys=BAND_KEYS,
+        band_keys=model.band_keys,
         value_col=VALUE_COL,
         error_col=ERROR_COL,
         drop_upper_limits=DROP_UPPER_LIMITS,

@@ -17,7 +17,9 @@ from yoke.models.vit.swin.bomberman import (
 )
 from yoke.datasets.kilonova_dataset import (
     Kilonova_lc_scalar_context_DataSet_9band,
-    NINE_BAND_KEYS,
+    band_set_name,
+    default_norm_stats_path,
+    detect_band_keys,
     load_or_compute_band_normalization,
 )
 from yoke.utils.training.epoch.loderunner import (
@@ -160,8 +162,9 @@ parser.add_argument(
 # objects, denser cadence, no limiting-mag cut) is optional and concatenated onto
 # the realistic training data when present. Both are filtered to the object-level
 # split (see --train_filelist / --validation_filelist below).
-# Studies 142-144: dense + uniform switched to the rubin_lsst_ztf_* sets (the
-# realistic context set is unchanged); through 141 they were rubin_ztf_*.
+# Studies 142-144: all three switched to the rubin_lsst_ztf_* sets (true LSST
+# ugrizy filters; the band keys are detected from the files); through 141 they
+# were rubin_ztf_* (SDSS u + PanSTARRS grizy stand-ins).
 parser.add_argument(
     "--kn_realistic_glob",
     type=str,
@@ -1049,8 +1052,16 @@ def main(args, rank, world_size, local_rank, device):
     tf_ramp_epochs = max(1, args.tf_ramp_epochs)
     tf_ramp_start_epoch = args.tf_ramp_start_epoch
 
-    # Nine-band merged event-stream setup (3 ZTF + 6 Rubin/LSST bands).
-    BAND_KEYS = NINE_BAND_KEYS
+    # Nine-band merged event-stream setup (3 ZTF + 6 Rubin/LSST bands). The key
+    # set (PS1/SDSS stand-ins through study 141, true LSST ugrizy from 142) is
+    # read off the realistic set; _check_dataset below makes the dense and
+    # uniform sets match it.
+    realistic_files = sorted(glob.glob(args.kn_realistic_glob))
+    if not realistic_files:
+        raise FileNotFoundError(
+            f"--kn_realistic_glob {args.kn_realistic_glob!r} matched no files."
+        )
+    BAND_KEYS = detect_band_keys(realistic_files[0])
     VALUE_COL = 1
     ERROR_COL = 2
     N_BANDS = len(BAND_KEYS)
@@ -1070,7 +1081,7 @@ def main(args, rank, world_size, local_rank, device):
     # rollout they lag because ZTF is realistically sampled near peak/early with
     # little late-time context to re-anchor, so they get the least gradient
     # pressure exactly where they fail. Order matches BAND_KEYS =
-    # (ztfg, ztfr, ztfi, sdssu, ps1_g, ps1_r, ps1_i, ps1_z, ps1_y). Set to None
+    # (ztfg, ztfr, ztfi, u, g, r, i, z, y). Set to None
     # to recover the exact equal-weight objective.
     #
     # Study 130: BAND_WEIGHTS_MODE selects how the per-band weights are set.
@@ -1099,12 +1110,12 @@ def main(args, rank, world_size, local_rank, device):
             2.0,  # ztfg -- ZTF bands lag in rollout; up-weight from 1->2
             2.0,  # ztfr -- ZTF bands lag in rollout; up-weight from 1->2
             2.0,  # ztfi -- ZTF bands lag in rollout; up-weight from 1->2
-            3.0,  # sdssu (u) -- worst under-fade, largest up-weight
-            2.0,  # ps1__g (g)
-            1.0,  # ps1__r (r)
-            1.0,  # ps1__i (i)
-            1.0,  # ps1__z (z)
-            1.0,  # ps1__y (y)
+            3.0,  # u (sdssu / lsstu) -- worst under-fade, largest up-weight
+            2.0,  # g (ps1__g / lsstg)
+            1.0,  # r
+            1.0,  # i
+            1.0,  # z
+            1.0,  # y
         ],
         dtype=torch.float32,
     )
@@ -1412,13 +1423,20 @@ def main(args, rank, world_size, local_rank, device):
 
     # Normalization statistics are computed over the TRAIN objects only (of the
     # realistic set) to avoid val/test leakage. The stats path is distinct from
-    # the old all-files cache so a stale/leaky cache can't be silently reused.
-    norm_stats_path = "kilonova_9band_norm_stats_trainonly.npz"
+    # the old all-files cache so a stale/leaky cache can't be silently reused,
+    # and per band key set so the LSST run never loads the PS1 stats.
+    norm_stats_path = default_norm_stats_path(BAND_KEYS)
     train_norm_files = sorted(
         f
-        for f in glob.glob(args.kn_realistic_glob)
+        for f in realistic_files
         if os.path.splitext(os.path.basename(f))[0] in train_stems
     )
+    if rank == 0:
+        print(
+            f"Band keys ({band_set_name(BAND_KEYS)}): {list(BAND_KEYS)}; "
+            f"norm stats: {norm_stats_path}",
+            flush=True,
+        )
 
     if rank == 0:
         band_means, band_stds = load_or_compute_band_normalization(

@@ -39,6 +39,116 @@ NINE_BAND_KEYS = (
     "arr_ps1__y",
 )
 
+# The same nine bands in the rubin_lsst_ztf_* sets, which carry the true LSST
+# ugrizy filters instead of the SDSS/PanSTARRS stand-ins. Same order, so band
+# index b means the same band in both sets.
+LSST_NINE_BAND_KEYS = (
+    "arr_ztfg",
+    "arr_ztfr",
+    "arr_ztfi",
+    "arr_lsstu",
+    "arr_lsstg",
+    "arr_lsstr",
+    "arr_lssti",
+    "arr_lsstz",
+    "arr_lssty",
+)
+
+BAND_KEY_SETS = {"ps1": NINE_BAND_KEYS, "lsst": LSST_NINE_BAND_KEYS}
+
+
+def match_band_keys(names) -> tuple[str, ...]:
+    """Return the ``BAND_KEY_SETS`` entry whose non-ZTF bands appear in ``names``.
+
+    Args:
+        names (iterable[str]): Member names of a light-curve npz (``data.files``).
+
+    Returns:
+        tuple[str, ...]: The matching nine-band key tuple. A file with only ZTF
+        bands reads identically under either set and gets ``NINE_BAND_KEYS``.
+    """
+    names = set(names)
+    for keys in BAND_KEY_SETS.values():
+        if names & set(keys[3:]):
+            return keys
+    return NINE_BAND_KEYS
+
+
+def detect_band_keys(npz_path: str) -> tuple[str, ...]:
+    """Return the nine-band key tuple used by one light-curve npz file."""
+    with np.load(npz_path, allow_pickle=True) as data:
+        return match_band_keys(data.files)
+
+
+def band_set_name(band_keys) -> str:
+    """Return the ``BAND_KEY_SETS`` name (``"ps1"`` / ``"lsst"``) of ``band_keys``."""
+    for name, keys in BAND_KEY_SETS.items():
+        if tuple(band_keys) == keys:
+            return name
+    raise ValueError(f"Unknown band key set: {list(band_keys)}")
+
+
+# Cluster location of the paired light-curve sets (same objects and seed).
+KN_DATA_DIR = "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves"
+KN_DATA_SET_PREFIX = {"ps1": "rubin_ztf", "lsst": "rubin_lsst_ztf"}
+
+
+def default_kn_glob(band_keys=NINE_BAND_KEYS, kind: str = "realistic") -> str:
+    """Cluster glob of one paired light-curve set for a band key set.
+
+    Args:
+        band_keys (tuple[str, ...]): Selects the PS1-era ``rubin_ztf_*`` or the
+            ``rubin_lsst_ztf_*`` sets.
+        kind (str): ``"realistic"``, ``"dense"`` or ``"uniform"``.
+
+    Returns:
+        str: e.g. ``<KN_DATA_DIR>/rubin_lsst_ztf_dense_10000_dataset_same_seed/
+        lc_*.npz``.
+    """
+    if kind not in ("realistic", "dense", "uniform"):
+        raise ValueError(f"Unknown light-curve set kind: {kind!r}")
+    prefix = KN_DATA_SET_PREFIX[band_set_name(band_keys)]
+    infix = "" if kind == "realistic" else f"_{kind}"
+    return f"{KN_DATA_DIR}/{prefix}{infix}_10000_dataset_same_seed/lc_*.npz"
+
+
+def default_norm_stats_path(band_keys) -> str:
+    """Train-only 9-band normalization cache name for a band key set.
+
+    The PS1 name is the one every pre-LSST study used, so their checkpoints
+    and evals keep resolving to the same file.
+    """
+    if band_set_name(band_keys) == "ps1":
+        return "kilonova_9band_norm_stats_trainonly.npz"
+    return f"kilonova_9band_{band_set_name(band_keys)}_norm_stats_trainonly.npz"
+
+
+def resolve_norm_stats_path(
+    ckpt_path: str, saved_path: str = None, band_keys=NINE_BAND_KEYS
+) -> str:
+    """Locate the normalization cache a 9-band checkpoint was trained with.
+
+    Training writes the cache into its run directory under the name it saved
+    as ``norm_stats_path`` (``default_norm_stats_path`` for checkpoints that
+    predate the key). The name relative to the working directory wins when it
+    exists, so the pre-LSST evals keep reading the file they always read; else
+    the copy next to the checkpoint.
+
+    Args:
+        ckpt_path (str): Path of the checkpoint.
+        saved_path (str): The checkpoint's ``norm_stats_path`` entry, if any.
+        band_keys (tuple[str, ...]): The checkpoint's band keys.
+
+    Returns:
+        str: The first existing candidate, else the working-directory name
+        (which ``load_or_compute_band_normalization`` then computes).
+    """
+    name = saved_path or default_norm_stats_path(band_keys)
+    beside_ckpt = os.path.join(os.path.dirname(ckpt_path), os.path.basename(name))
+    if not os.path.exists(name) and os.path.exists(beside_ckpt):
+        return beside_ckpt
+    return name
+
 
 def _stem(path: str) -> str:
     """Return the object identifier (filename without directory or extension).
@@ -155,18 +265,26 @@ def load_or_compute_band_normalization(
         # FIXME: hardcoded scratch path fallback. Prefer passing an explicit
         # (train-only) file_prefix_list so this library function does not depend
         # on a user-specific filesystem location and does not leak val/test data.
-        file_prefix_list = sorted(
-            glob.glob(
-                "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-                "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-            )
-        )
+        file_prefix_list = sorted(glob.glob(default_kn_glob(band_keys)))
 
     if os.path.exists(stats_path):
         stats = np.load(stats_path, allow_pickle=True)
         means = stats["means"].astype(np.float32)
         stds = stats["stds"].astype(np.float32)
+        cached_keys = (
+            tuple(str(k) for k in stats["band_keys"])
+            if "band_keys" in stats.files
+            else None
+        )
         stats.close()
+
+        # A cache written for another filter set (e.g. PS1 stats reused on the
+        # LSST data) has the right shape, so it would load silently.
+        if cached_keys is not None and cached_keys != tuple(band_keys):
+            raise ValueError(
+                f"Normalization stats {stats_path} were computed for band keys "
+                f"{list(cached_keys)}, not the requested {list(band_keys)}."
+            )
 
         print("Loaded normalization stats:", stats_path)
         print("means:", means)
@@ -478,7 +596,8 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
                 target. Ignored in fixed-count mode.
             data_glob (str): Glob pattern selecting the light-curve files (i.e.
                 which dataset directory). If None (default) the legacy hardcoded
-                rubin_ztf_10000 scratch glob is used, preserving prior behavior.
+                scratch glob of ``band_keys`` is used (``default_kn_glob``:
+                rubin_ztf_10000 for the PS1 keys), preserving prior behavior.
                 Used to point at either the realistic or the dense directory.
             object_ids (set): If given, only files whose stem (filename without
                 directory or ``.npz``) is in this set are loaded. Used to apply a
@@ -553,10 +672,7 @@ class Kilonova_lc_scalar_context_DataSet_9band(Dataset):
         # stats were computed over Rubin+ZTF -- a silent train/stats mismatch.
         if data_glob is None:
             # Legacy hardcoded scratch fallback (backward compatibility).
-            data_glob = (
-                "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-                "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-            )
+            data_glob = default_kn_glob(band_keys)
         file_prefix_list = sorted(glob.glob(data_glob))
 
         # Restrict to an object-level split (shared across the realistic and

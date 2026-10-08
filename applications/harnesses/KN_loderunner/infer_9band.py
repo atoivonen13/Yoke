@@ -32,7 +32,10 @@ from yoke.models.vit.swin.bomberman import (
 from yoke.datasets.kilonova_dataset import (
     EPS,
     NINE_BAND_KEYS,
+    default_kn_glob,
     load_or_compute_band_normalization,
+    match_band_keys,
+    resolve_norm_stats_path,
 )
 from yoke.utils.context_selection import window_select_positions
 from yoke.utils.ema import ParamEMA
@@ -44,7 +47,6 @@ plt.rc("font", family="serif")
 plt.rcParams["figure.figsize"] = (7, 5)
 
 
-BAND_KEYS = NINE_BAND_KEYS
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
 BAND_COLORS = (
     "#2A9D8F",  # ztfg
@@ -59,7 +61,7 @@ BAND_COLORS = (
 )
 VALUE_COL = 1
 ERROR_COL = 2
-N_BANDS = len(BAND_KEYS)
+N_BANDS = len(BAND_NAMES)
 
 # Match training: drop upper-limit (non-detection) observations, flagged by a
 # non-finite uncertainty in ERROR_COL, from the context fed to the model.
@@ -95,7 +97,7 @@ def get_args():
         type=str,
         default=None,
         help="Glob for light-curve npz files to forecast. If omitted, uses the "
-        "training data glob path.",
+        "realistic set of the checkpoint's band keys.",
     )
     parser.add_argument(
         "--n_curves",
@@ -122,9 +124,10 @@ def get_args():
     parser.add_argument(
         "--norm_stats_path",
         type=str,
-        default="kilonova_9band_norm_stats_trainonly.npz",
+        default=None,
         help="Train-only normalization stats the model was trained with. Must "
-        "match training so forecasts use the exact encoding the model saw.",
+        "match training so forecasts use the exact encoding the model saw. "
+        "Default: the checkpoint's norm_stats_path.",
     )
     parser.add_argument(
         "--test_filelist",
@@ -148,12 +151,6 @@ def resolve_paths(args):
 
     if args.outdir is None:
         args.outdir = f"runs/study_{tag}/forecast_9band"
-
-    if args.data_glob is None:
-        args.data_glob = (
-            "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves/"
-            "rubin_ztf_10000_dataset_same_seed/lc_*.npz"
-        )
 
     return tag
 
@@ -245,6 +242,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("context_window_days:", context_window_days)
     print("max_context_len:", max_context_len)
     print("n_bands:", n_bands)
+    band_keys = tuple(ckpt.get("band_keys", NINE_BAND_KEYS))
+    print("band_keys:", list(band_keys))
     print("dt_fourier_bands:", dt_fourier_bands)
     print("predict_delta:", predict_delta)
     print("trend_decay_anchor:", trend_decay_anchor)
@@ -329,6 +328,14 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     else:
         print("Using raw (non-EMA) weights.")
 
+    # The filter set the model was trained on and its train-only normalization
+    # cache (checkpoints that predate the keys are PS1-era).
+    model.band_keys = band_keys
+    model.norm_stats_path = resolve_norm_stats_path(
+        ckpt_path, ckpt.get("norm_stats_path"), band_keys
+    )
+    print("norm_stats_path:", model.norm_stats_path)
+
     model.eval()
 
     return model, context_len, n_bands, context_window_days, max_context_len
@@ -371,7 +378,8 @@ def load_event_stream(fn, means, stds, keep_upper_limits=False):
     is_ul = []
     raw = {}
 
-    for band_idx, key in enumerate(BAND_KEYS):
+    # PS1/SDSS or LSST filter keys, whichever the file carries (same band order).
+    for band_idx, key in enumerate(match_band_keys(data.files)):
         if key not in data.files:
             continue
 
@@ -703,9 +711,15 @@ def main():
     # flagged context (Study 113); normalization stays detections-only below.
     keep_uls = getattr(model, "upper_limit_channel", False)
 
+    # Data and stats follow the checkpoint's filter set unless given.
+    if args.data_glob is None:
+        args.data_glob = default_kn_glob(model.band_keys)
+    if args.norm_stats_path is None:
+        args.norm_stats_path = model.norm_stats_path
+
     means, stds = load_or_compute_band_normalization(
         stats_path=args.norm_stats_path,
-        band_keys=BAND_KEYS,
+        band_keys=model.band_keys,
         value_col=VALUE_COL,
         error_col=ERROR_COL,
         drop_upper_limits=DROP_UPPER_LIMITS,
