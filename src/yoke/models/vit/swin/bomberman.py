@@ -19,6 +19,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 from lightning.pytorch import LightningModule
 
 from yoke.models.vit.swin.unet import SwinUnetBackbone
+from yoke.models.vit.plain_vit import PlainViTBackbone
 from yoke.models.vit.patch_embed import ParallelVarPatchEmbed
 from yoke.models.vit.patch_manipulation import Unpatchify
 from yoke.models.vit.aggregate_variables import AggVars
@@ -205,6 +206,316 @@ class LodeRunner(nn.Module):
 
         # Select only entries corresponding to out_vars for loss
         # out_var_ids = self.var_embed_layer.get_var_ids(tuple(out_vars), x.device)
+        preds = x[:, out_vars]
+
+        return preds
+
+
+class LodeRunnerViT(nn.Module):
+    """LodeRunner neural network with a plain-ViT backbone.
+
+    Variant of :class:`LodeRunner` that replaces the SWIN-V2 U-Net backbone
+    with an isotropic plain Vision-Transformer backbone
+    (:class:`~yoke.models.vit.plain_vit.PlainViTBackbone`). The architecture of
+    the transformer backbone follows the UMich WAMRViT regular-grid plain-ViT
+    path: continuous 2-D rotary positional encoding from patch centers, per-head
+    QK RMSNorm, global attention, and parallel SwiGLU-MLP blocks.
+
+    The input/output interface and the ``forward`` signature are identical to
+    :class:`LodeRunner`, so this model is a drop-in replacement in training and
+    rollout loops.
+
+    The remaining LodeRunner-specific machinery is reused unchanged:
+
+    - :class:`ParallelVarPatchEmbed` for per-variable patch embedding,
+    - :class:`VarEmbed` for learnable variable tags,
+    - :class:`AggVars` for attention-based variable aggregation,
+    - :class:`TimeEmbed` for lead-time encoding,
+    - a linear head + :class:`Unpatchify` for image reconstruction.
+
+    .. note::
+        The additive 2-D sincos ``PosEmbed`` used by :class:`LodeRunner` is
+        intentionally omitted here: spatial position is instead injected inside
+        attention through RoPE built from the patch centers.
+
+    .. note::
+        The backbone embedding dimension is fixed by ``num_attention_heads *
+        attention_head_dim``; this product must equal ``embed_dim``.
+
+    .. note::
+        **Scaling.** Because the backbone is isotropic (constant token count and
+        embedding dimension through all blocks), scaling is simpler than the
+        SWIN-V2 U-Net. Grow *depth* by increasing ``num_layers`` (each unit adds
+        one transformer block) and grow *width* by increasing ``embed_dim``,
+        keeping ``embed_dim == num_attention_heads * attention_head_dim``.
+        Parameter count is roughly linear in ``num_layers`` and quadratic in
+        ``embed_dim``. This approximately mirrors SWIN-V2 LodeRunner scaling,
+        where ``block_structure`` played the role of ``num_layers`` (per-stage
+        depth) and ``embed_dim``/``emb_factor`` played the role of ``embed_dim``
+        (width); the ViT path collapses the per-stage structure into a single
+        uniform depth so there are no stage counts or merge scales to balance.
+
+    Args:
+        default_vars (list[str]): List of default variables to be used for training.
+        image_size (tuple[int, int]): Height and width, in pixels, of input image.
+        patch_size (tuple[int, int]): Height and width pixel dimensions of patch in
+                                      initial embedding.
+        embed_dim (int): Token embedding dimension. Must equal
+                         ``num_attention_heads * attention_head_dim``.
+        num_heads (int): Number of heads used in variable aggregation.
+        num_attention_heads (int): Number of attention heads in each ViT block.
+        attention_head_dim (int): Feature dimension per ViT attention head.
+        num_layers (int): Number of transformer blocks in the backbone.
+        mlp_ratio (float): MLP hidden width as a multiple of the embedding dim.
+        rope_theta (float): Base period for the rotary frequency progression.
+        rope_scale (tuple[float, float]): Per-axis coordinate scaling for the
+                                          ``(x, y)`` patch centers.
+        concat_mlp (bool): Concatenate-then-project (True) or sum (False) fusion
+                           of the attention and MLP branches.
+        eps (float): Epsilon for the backbone LayerNorm and QK RMSNorm layers.
+                     The ArtIMich ViT (finest) reference uses ``1e-7``; the Yoke
+                     default of ``1e-6`` is preserved for backward compatibility.
+        bias (bool): Whether the backbone attention Q/K/V and output projections
+                     use a bias. The reference uses ``True``; the Yoke default of
+                     ``False`` (bias-free) is preserved for backward
+                     compatibility.
+        num_input_frames (int): Number of consecutive input frames consumed per
+                     sample. ``1`` (default) reproduces the original single-frame
+                     behavior exactly. ``2`` enables the 2-timestep-in /
+                     1-timestep-out path (Strategy A: per-frame embed +
+                     per-frame temporal tag, concat-along-D then linear
+                     ``2D -> D`` fusion).
+        noise_scale (float): Relative magnitude of input noise injection.
+        verbose (bool): When TRUE, backbone dimensions are printed during
+                        initialization.
+
+    """
+
+    def __init__(
+        self,
+        default_vars: list[str],
+        image_size: Iterable[int, int] = (1120, 800),
+        patch_size: Iterable[int, int] = (10, 10),
+        embed_dim: int = 128,
+        num_heads: int = 8,
+        num_attention_heads: int = 8,
+        attention_head_dim: int = 16,
+        num_layers: int = 6,
+        mlp_ratio: float = 4.0,
+        rope_theta: float = 10000.0,
+        rope_scale: Iterable[float, float] = (1.0, 1.0),
+        concat_mlp: bool = True,
+        eps: float = 1e-6,
+        bias: bool = False,
+        num_input_frames: int = 1,
+        noise_scale: float = 0.0,
+        verbose: bool = False,
+    ) -> None:
+        """Initialization for class."""
+        super().__init__()
+
+        assert num_input_frames in (1, 2), (
+            "num_input_frames must be 1 (single-frame) or 2 (2-in/1-out); "
+            f"got {num_input_frames}."
+        )
+
+        self.default_vars = default_vars
+        self.max_vars = len(self.default_vars)
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_attention_heads = num_attention_heads
+        self.attention_head_dim = attention_head_dim
+        self.num_layers = num_layers
+        self.mlp_ratio = mlp_ratio
+        self.eps = eps
+        self.bias = bias
+        self.num_input_frames = num_input_frames
+        self.noise_scale = noise_scale
+
+        # The isotropic backbone fixes the embedding dimension.
+        assert embed_dim == num_attention_heads * attention_head_dim, (
+            "embed_dim must equal num_attention_heads * attention_head_dim for "
+            f"the isotropic ViT backbone; got embed_dim={embed_dim}, "
+            f"num_attention_heads={num_attention_heads}, "
+            f"attention_head_dim={attention_head_dim}."
+        )
+
+        # First embed the image as a sequence of tokenized patches. Each
+        # channel is embedded independently.
+        self.parallel_embed = ParallelVarPatchEmbed(
+            max_vars=self.max_vars,
+            img_size=self.image_size,
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            norm_layer=None,
+        )
+
+        # Encode tokens corresponding to each variable with a learnable tag.
+        self.var_embed_layer = VarEmbed(self.default_vars, self.embed_dim)
+
+        # Aggregate variable tokenizations using an attention mechanism.
+        self.agg_vars = AggVars(self.embed_dim, self.num_heads)
+
+        # NOTE: No additive PosEmbed here. Spatial position is injected inside
+        # the ViT attention via RoPE built from the patch centers.
+
+        # Encode temporal-offset information using a linear mapping.
+        self.temporal_encoding = TimeEmbed(self.embed_dim)
+
+        # Pass encoded patch tokens through the plain-ViT backbone.
+        self.backbone = PlainViTBackbone(
+            patch_grid_size=self.parallel_embed.grid_size,
+            num_attention_heads=self.num_attention_heads,
+            attention_head_dim=self.attention_head_dim,
+            num_layers=self.num_layers,
+            mlp_ratio=self.mlp_ratio,
+            rope_theta=rope_theta,
+            rope_scale=rope_scale,
+            concat_mlp=concat_mlp,
+            eps=self.eps,
+            bias=self.bias,
+            verbose=verbose,
+        )
+
+        # Temporal fusion for the 2-in/1-out path (Strategy A). When
+        # `num_input_frames == 2`, the two per-frame token grids are
+        # concatenated along the embedding axis -> (B, N, 2D) and projected
+        # back to (B, N, D). Guarded so the single-frame path is untouched.
+        if self.num_input_frames == 2:
+            self.temporal_fusion = nn.Linear(2 * self.embed_dim, self.embed_dim)
+        else:
+            self.temporal_fusion = None
+
+        # Linear embed the last dimension into V*p_h*p_w.
+        self.linear4unpatch = nn.Linear(
+            self.embed_dim, self.max_vars * self.patch_size[0] * self.patch_size[1]
+        )
+
+        # Unmap the tokenized embeddings to variables and images.
+        self.unpatch = Unpatchify(
+            total_num_vars=self.max_vars,
+            patch_grid_size=self.parallel_embed.grid_size,
+            patch_size=self.patch_size,
+        )
+
+    def _embed_frame(
+        self,
+        x: torch.Tensor,
+        in_vars: torch.Tensor,
+        lead_times: torch.Tensor,
+    ) -> torch.Tensor:
+        """Embed a single frame into post-temporal tokens ``(B, N, D)``.
+
+        Runs one frame through the LodeRunner front-end
+        (``parallel_embed -> var_embed_layer -> agg_vars -> temporal_encoding``)
+        including per-frame noise injection. Shared by the single-frame and
+        2-in/1-out forward paths.
+
+        Args:
+            x (torch.Tensor): Single frame of shape ``(B, C, H, W)``.
+            in_vars (torch.Tensor): Integer indices of the input variables.
+            lead_times (torch.Tensor): Per-sample lead-time-to-output for this
+                frame, shape ``(B,)``.
+
+        Returns:
+            torch.Tensor: Post-temporal tokens of shape ``(B, N, D)``.
+
+        """
+        # Noise injection (applied per frame, matching single-frame behavior).
+        l2_norm = torch.sqrt((x * x).sum(dim=(1, 2, 3), keepdim=True))
+        noise = torch.randn_like(x)
+        x = x + self.noise_scale * l2_norm * noise
+
+        # Embed input.
+        x = self.parallel_embed(x, in_vars)
+
+        # Encode variables.
+        x = self.var_embed_layer(x, in_vars)
+
+        # Aggregate variables.
+        x = self.agg_vars(x)
+
+        # Encode temporal information.
+        x = self.temporal_encoding(x, lead_times)
+
+        return x
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        in_vars: torch.Tensor,
+        out_vars: torch.Tensor,
+        lead_times: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward method for LodeRunnerViT.
+
+        Supports two input modes selected by ``num_input_frames``:
+
+        - **Single-frame (default, ``num_input_frames == 1``).** ``x`` has shape
+          ``(B, C, H, W)`` and ``lead_times`` is ``(B,)`` (steps from the input
+          frame to the output frame). Reproduces the original behavior exactly.
+        - **2-in/1-out (``num_input_frames == 2``).** ``x`` has shape
+          ``(B, 2, C, H, W)`` with frame order ``[x_{t-1}, x_t]`` and
+          ``lead_times`` is ``(B, 2) = (dt_in, dt_out)`` where ``dt_in`` is the
+          ``x_{t-1} -> x_t`` timestep and ``dt_out`` is the ``x_t -> x_{t+1}``
+          timestep. Each frame is embedded independently and tagged with its own
+          timestep-to-output (frame ``t`` -> ``dt_out``, frame ``t-1`` ->
+          ``dt_in + dt_out``), then the two token grids are fused by
+          concat-along-``D`` + linear ``2D -> D``.
+
+        Args:
+            x (torch.Tensor): Input frame(s); ``(B, C, H, W)`` for single-frame
+                or ``(B, 2, C, H, W)`` for the 2-in/1-out path.
+            in_vars (torch.Tensor): Integer indices of the input variables.
+            out_vars (torch.Tensor): Integer indices of the output variables.
+            lead_times (torch.Tensor): ``(B,)`` for single-frame or
+                ``(B, 2) = (dt_in, dt_out)`` for the 2-in/1-out path.
+
+        Returns:
+            torch.Tensor: Predicted frame of shape ``(B, len(out_vars), H, W)``.
+
+        """
+        if self.num_input_frames == 1:
+            # Single-frame path (original behavior).
+            tokens = self._embed_frame(x, in_vars, lead_times)
+        else:
+            # 2-in/1-out path (Strategy A). Frame order is [x_{t-1}, x_t].
+            assert x.dim() == 5 and x.shape[1] == 2, (
+                "num_input_frames == 2 expects x of shape (B, 2, C, H, W); "
+                f"got {tuple(x.shape)}."
+            )
+            assert lead_times.dim() == 2 and lead_times.shape[1] == 2, (
+                "num_input_frames == 2 expects lead_times of shape "
+                f"(B, 2) = (dt_in, dt_out); got {tuple(lead_times.shape)}."
+            )
+
+            dt_in = lead_times[:, 0]
+            dt_out = lead_times[:, 1]
+
+            # Per-frame timestep-to-output:
+            #   frame t-1 -> dt_in + dt_out, frame t -> dt_out.
+            lt_prev = dt_in + dt_out
+            lt_curr = dt_out
+
+            tok_prev = self._embed_frame(x[:, 0], in_vars, lt_prev)  # (B, N, D)
+            tok_curr = self._embed_frame(x[:, 1], in_vars, lt_curr)  # (B, N, D)
+
+            # Concat-along-D then linear 2D -> D.
+            fused = torch.cat([tok_prev, tok_curr], dim=-1)  # (B, N, 2D)
+            tokens = self.temporal_fusion(fused)  # (B, N, D)
+
+        # Pass through the plain-ViT backbone (position via RoPE inside attn).
+        x = self.backbone(tokens)
+
+        # Use linear map to remap to correct variable and patchsize dimension.
+        x = self.linear4unpatch(x)
+
+        # Unpatchify back to original shape.
+        x = self.unpatch(x)
+
+        # Select only entries corresponding to out_vars for loss.
         preds = x[:, out_vars]
 
         return preds
@@ -511,6 +822,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         redshift_mean: float = 0.0142,
         redshift_std: float = 0.00365,
         redshift_pivot_direct: bool = False,
+        backbone_dt_in: float = 0.25,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -679,6 +991,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 ``(10, 5)`` patch embed). The single most important render detail.
             gather_rows_k (int): Half-height (pixels) of the vertical neighbourhood
                 pooled around the target row ``row(Dt)`` at readout.
+            backbone_dt_in (float): Only used when the backbone is a 2-in/1-out
+                :class:`LodeRunnerViT` (``num_input_frames == 2``). There is no
+                previous frame here, so the backbone image is fed twice as
+                ``[x_{t-1}, x_t]`` with ``lead_times = (backbone_dt_in, Dt)``.
+                Default 0.25 matches the pretraining ``dt_in``. Adds no parameters.
         """
         super().__init__()
 
@@ -755,6 +1072,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             )
 
         self.backbone = backbone
+        self.backbone_dt_in = backbone_dt_in
         self.context_len = context_len
         self.n_bands = n_bands
         self.image_size = image_size
@@ -1064,6 +1382,30 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     nn.GELU(),
                     nn.Linear(hidden, n_bands * n_quantiles),
                 )
+
+    def _run_backbone(self, img: torch.Tensor, Dt: torch.Tensor) -> torch.Tensor:
+        """Run the backbone on a [B, C, H, W] image with lead time ``Dt``.
+
+        Single-frame backbones (Swin ``LodeRunner``, 1-frame ``LodeRunnerViT``)
+        take ``(img, Dt)`` directly. A 2-in/1-out ``LodeRunnerViT`` gets the same
+        image as both frames with ``lead_times = (backbone_dt_in, Dt)``.
+
+        Args:
+            img (torch.Tensor): Backbone input image, [B, backbone_channels, H, W].
+            Dt (torch.Tensor): Lead time, [B].
+
+        Returns:
+            torch.Tensor: Backbone output, [B, backbone_channels, H, W].
+        """
+        backbone_in_vars = torch.arange(self.backbone_channels, device=img.device)
+        backbone_out_vars = torch.arange(self.backbone_channels, device=img.device)
+
+        if getattr(self.backbone, "num_input_frames", 1) == 2:
+            img = torch.stack([img, img], dim=1)  # [B, 2, C, H, W]
+            Dt = Dt.reshape(-1)
+            Dt = torch.stack([torch.full_like(Dt, self.backbone_dt_in), Dt], dim=1)
+
+        return self.backbone(img, backbone_in_vars, backbone_out_vars, Dt)
 
     def _encode_dt(self, Dt: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Fourier-encode the lead time for the trainable path.
@@ -1490,11 +1832,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # the Fourier Dt encoding) -> n_quantiles, applied per band.
             field = self._render_field(x_events)  # [B, C, H, W]
 
-            backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
-            backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
-            pred_img = self.backbone(
-                field, backbone_in_vars, backbone_out_vars, Dt
-            )  # [B, C, H, W]
+            pred_img = self._run_backbone(field, Dt)  # [B, C, H, W]
 
             band_summary = self._gather_bands(pred_img, Dt)  # [B, n_bands, C]
 
@@ -1560,14 +1898,8 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 W,
             )
 
-            backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
-            backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
-
-            pred_img = self.backbone(
-                pseudo_img,
-                backbone_in_vars,
-                backbone_out_vars,
-                Dt,
+            pred_img = self._run_backbone(
+                pseudo_img, Dt
             )  # [B, backbone_channels, H, W]
 
             # Collapse spatial dimensions to per-channel summaries. The mean alone

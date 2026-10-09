@@ -17,6 +17,7 @@ import h5py
 
 from yoke.models.vit.swin.bomberman import (
     LodeRunner,
+    LodeRunnerViT,
     ScalarTemporalConditionedLodeRunner_gri,
     ScalarTemporalConditionedLodeRunner_9band,
 )
@@ -123,6 +124,55 @@ def backbone_full_modules(model: torch.nn.Module) -> list:
     return encoder_mods + backbone_decoder_modules(model)
 
 
+# Number of output-proximal transformer blocks the ViT "decoder" scope unfreezes.
+# The plain ViT is isotropic (no encoder/decoder split), so "decoder" is defined
+# as the last few blocks; 2 of 6 mirrors the Swin decoder's share of the depth.
+VIT_DECODER_BLOCKS = 2
+
+
+def vit_backbone_scope_modules(model: torch.nn.Module, scope: str) -> list:
+    """Fine-tune module set for a wrapped :class:`LodeRunnerViT` backbone.
+
+    The ViT counterpart of the Swin ``backbone_{tail,decoder,full}_modules``:
+      - ``"tail"``: ``linear4unpatch`` only.
+      - ``"decoder"``: the last ``VIT_DECODER_BLOCKS`` transformer blocks +
+        ``linear4unpatch``.
+      - ``"full"``: every parameter-bearing module -- the embedding stack
+        (``parallel_embed``, ``var_embed_layer``, ``agg_vars``,
+        ``temporal_encoding``, ``temporal_fusion`` when 2-frame), all transformer
+        blocks, and ``linear4unpatch``. ``backbone.norm_out`` is non-affine and the
+        RoPE holds only buffers, so this covers the whole pretrained backbone.
+
+    Args:
+        model (torch.nn.Module): A ScalarTemporalConditionedLodeRunner_9band whose
+            ``.backbone`` is a LodeRunnerViT.
+        scope (str): ``"tail"``, ``"decoder"``, or ``"full"``.
+
+    Returns:
+        list: The submodules constituting the scope.
+    """
+    vit = model.backbone
+    blocks = list(vit.backbone.transformer_blocks)
+    if scope == "tail":
+        return [vit.linear4unpatch]
+    if scope == "decoder":
+        return [*blocks[-VIT_DECODER_BLOCKS:], vit.linear4unpatch]
+    if scope == "full":
+        embed_mods = [
+            vit.parallel_embed,
+            vit.var_embed_layer,
+            vit.agg_vars,
+            vit.temporal_encoding,
+        ]
+        if vit.temporal_fusion is not None:
+            embed_mods.append(vit.temporal_fusion)
+        return [*embed_mods, *blocks, vit.linear4unpatch]
+    raise ValueError(
+        "backbone_finetune_scope must be 'tail', 'decoder', or 'full', "
+        f"got {scope!r}."
+    )
+
+
 def build_finetune_optimizer(
     model: torch.nn.Module,
     optimizer_kwargs: dict,
@@ -212,7 +262,9 @@ def build_finetune_optimizer(
                 "bypass path never runs the backbone, so unfreezing its tail has "
                 "no effect and breaks DDP (unused parameters)."
             )
-        if backbone_finetune_scope == "tail":
+        if isinstance(model.backbone, LodeRunnerViT):
+            finetune_mods = vit_backbone_scope_modules(model, backbone_finetune_scope)
+        elif backbone_finetune_scope == "tail":
             finetune_mods = backbone_tail_modules(model)
         elif backbone_finetune_scope == "decoder":
             finetune_mods = backbone_decoder_modules(model)
@@ -843,7 +895,11 @@ def load_direct_loderunner_checkpoint_9band(
         # In window mode the padded context width drives input_dim.
         context_len = checkpoint_data.get("max_context_len", context_len)
 
-    backbone = LodeRunner(**saved_model_args).to(device)
+    # "LodeRunner" (Swin U-Net) for every pre-145 checkpoint; "LodeRunnerViT"
+    # (plain ViT + RoPE, Study 145+) rebuilds the ViT backbone from model_args.
+    backbone_class = checkpoint_data.get("backbone_class", "LodeRunner")
+    backbone_cls = LodeRunnerViT if backbone_class == "LodeRunnerViT" else LodeRunner
+    backbone = backbone_cls(**saved_model_args).to(device)
 
     model = ScalarTemporalConditionedLodeRunner_9band(
         backbone=backbone,
@@ -919,6 +975,8 @@ def load_direct_loderunner_checkpoint_9band(
         # checkpoints both strict-load, but forward() only ties when True, so it
         # MUST match the training config to reproduce the trained head.
         color_ztf_tie_twins=checkpoint_data.get("color_ztf_tie_twins", False),
+        # Only read by a 2-frame LodeRunnerViT backbone; adds no params.
+        backbone_dt_in=checkpoint_data.get("backbone_dt_in", 0.25),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]

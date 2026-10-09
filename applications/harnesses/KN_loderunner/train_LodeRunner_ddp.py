@@ -13,6 +13,7 @@ from torch.utils.data import ConcatDataset
 
 from yoke.models.vit.swin.bomberman import (
     LodeRunner,
+    LodeRunnerViT,
     ScalarTemporalConditionedLodeRunner_9band,
 )
 from yoke.datasets.kilonova_dataset import (
@@ -269,7 +270,8 @@ def main(args, rank, world_size, local_rank, device):
     #############################################
     # Dictionary of available models.
     available_models = {
-        "LodeRunner": LodeRunner
+        "LodeRunner": LodeRunner,
+        "LodeRunnerViT": LodeRunnerViT,
     }
 
     # Model arguments for LodeRunner.
@@ -294,6 +296,53 @@ def main(args, rank, world_size, local_rank, device):
         "patch_merge_scales": [(2, 2), (2, 2), (2, 2)],
         #"noise_scale": noise_scale,
     }
+
+    # Study 145+: backbone architecture. "swin" = the Swin U-Net LodeRunner
+    # pretrained as ddp_ldr_prod_250721/study005 (every study through 144).
+    # "vit" = Kyle's LodeRunnerViT (plain ViT, 2-D RoPE, parallel attn + SwiGLU,
+    # 2-in/1-out), loaded from the ch_ldrViT study002 epoch-100 EMA weights. The
+    # ViT config below is fixed by that checkpoint (320.5M params; strict load),
+    # so do not edit it without a matching checkpoint. --embed_dim and
+    # --block_structure are Swin-only and ignored under "vit".
+    # 142-144 stay "swin" so their rows in ddp_production.csv still reproduce.
+    BACKBONE_ARCH = "swin" if studyIDX <= 144 else "vit"
+
+    # Plain state_dict written by yoke.utils.ema.save_ema_checkpoint. Override
+    # with $KN_VIT_PRETRAINED; the default is a placeholder cluster location.
+    VIT_PRETRAINED_CHECKPOINT = os.environ.get(
+        "KN_VIT_PRETRAINED",
+        "/usr/projects/artimis/mpmm/pretrained_models/ldrViT/"
+        "study002_modelState_epoch0100_ema_weights.pth",
+    )
+
+    # The 2-frame ViT wants (x_{t-1}, x_t) and (dt_in, dt_out). The wrapper has a
+    # single pseudo-image, so it is fed as both frames with dt_in fixed to this
+    # value (0.25 = the pretraining dt_in: 0.25 * gap with MAX_TIME_OFFSET=1).
+    BACKBONE_DT_IN = 0.25
+
+    if BACKBONE_ARCH == "vit":
+        model_args = {
+            "default_vars": model_args["default_vars"],
+            "image_size": (1120, 400),
+            "patch_size": (10, 5),
+            "embed_dim": 2304,
+            "num_heads": 8,
+            "num_attention_heads": 12,
+            "attention_head_dim": 192,
+            "num_layers": 6,
+            "rope_theta": 10000,
+            "rope_scale": (80, 224),
+            "mlp_ratio": 1.0,
+            "concat_mlp": True,
+            "verbose": False,
+            "num_input_frames": 2,
+            "eps": 1e-7,
+            "bias": True,
+        }
+    elif BACKBONE_ARCH != "swin":
+        raise ValueError(
+            f"BACKBONE_ARCH must be 'swin' or 'vit', got {BACKBONE_ARCH!r}."
+        )
 
 
     CONTEXT_LEN = 5 #3
@@ -656,7 +705,11 @@ def main(args, rank, world_size, local_rank, device):
     elif studyIDX == 144:  # = 141: backbone bypassed (nothing to unfreeze)
         BYPASS_BACKBONE = True
         BACKBONE_TAIL_LR_MULT = 0.0
+    # Study 145: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
+    # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
+    # see vit_backbone_scope_modules in checkpointing.py.
     if rank == 0:
+        print(f"Study {studyIDX}: BACKBONE_ARCH={BACKBONE_ARCH!r}", flush=True)
         print(
             f"Study {studyIDX}: BYPASS_BACKBONE={BYPASS_BACKBONE}, "
             f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
@@ -1188,26 +1241,54 @@ def main(args, rank, world_size, local_rank, device):
     else:
         starting_epoch = 0
 
-        model = LodeRunner(**model_args)
-        model.to(device)
+        if BACKBONE_ARCH == "vit":
+            model = LodeRunnerViT(**model_args)
+            model.to(device)
 
-        manual_checkpoint = "/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth"
+            # The EMA export is a bare state_dict; also accept a wrapped
+            # {"model_state_dict": ...} checkpoint of the same model.
+            checkpoint_data = torch.load(
+                VIT_PRETRAINED_CHECKPOINT,
+                map_location=device,
+                weights_only=True,
+            )
+            state_dict = checkpoint_data.get("model_state_dict", checkpoint_data)
 
-        checkpoint_data = torch.load(
-            manual_checkpoint,
-            map_location=device,
-            weights_only=False,
-        )
+            if all(k.startswith("module.") for k in state_dict.keys()):
+                state_dict = {
+                    k.replace("module.", "", 1): v for k, v in state_dict.items()
+                }
 
-        state_dict = checkpoint_data["model_state_dict"]
+            # Strict: the ViT config is fixed by this checkpoint, so a mismatch
+            # is a config error and must not silently leave layers at random
+            # init. (The RoPE centers/scale are non-persistent buffers.)
+            missing_keys, unexpected_keys = model.load_state_dict(
+                state_dict,
+                strict=True,
+            )
+            if rank == 0:
+                print(f"Loaded LodeRunnerViT weights: {VIT_PRETRAINED_CHECKPOINT}")
+        else:
+            model = LodeRunner(**model_args)
+            model.to(device)
 
-        if all(k.startswith("module.") for k in state_dict.keys()):
-            state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+            manual_checkpoint = "/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth"
 
-        missing_keys, unexpected_keys = model.load_state_dict(
-            state_dict,
-            strict=False,
-        )
+            checkpoint_data = torch.load(
+                manual_checkpoint,
+                map_location=device,
+                weights_only=False,
+            )
+
+            state_dict = checkpoint_data["model_state_dict"]
+
+            if all(k.startswith("module.") for k in state_dict.keys()):
+                state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+
+            missing_keys, unexpected_keys = model.load_state_dict(
+                state_dict,
+                strict=False,
+            )
 
         if rank == 0:
             print("Loaded pretrained backbone weights.")
@@ -1254,6 +1335,7 @@ def main(args, rank, world_size, local_rank, device):
             redshift_mean=REDSHIFT_MEAN,
             redshift_std=REDSHIFT_STD,
             redshift_pivot_direct=REDSHIFT_PIVOT_DIRECT,
+            backbone_dt_in=BACKBONE_DT_IN,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1905,7 +1987,10 @@ def main(args, rank, world_size, local_rank, device):
                 {
                     "epoch": epochIDX,
                     "model_class": "ScalarTemporalConditionedLodeRunner_9band",
-                    "backbone_class": "LodeRunner",
+                    "backbone_class": (
+                        "LodeRunnerViT" if BACKBONE_ARCH == "vit" else "LodeRunner"
+                    ),
+                    "backbone_dt_in": BACKBONE_DT_IN,
                     "model_args": model_args,
                     "model_state_dict": model.module.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
