@@ -62,4 +62,4 @@ kn_rubin_ztf_val.txt
 --TRAIN_PER_VAL
 5
 --pretrained_model
-/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth
+/users/atoivonen/data/kyle_vit/study002_modelState_epoch0100_ema_weights.pth
