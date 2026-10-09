@@ -707,9 +707,12 @@ def main(args, rank, world_size, local_rank, device):
     elif studyIDX == 144:  # = 141: backbone bypassed (nothing to unfreeze)
         BYPASS_BACKBONE = True
         BACKBONE_TAIL_LR_MULT = 0.0
-    # Study 145: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
+    elif studyIDX == 201:  # = 200 with the whole ViT fine-tuned (as 143 vs 142)
+        BACKBONE_FINETUNE_SCOPE = "full"
+    # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
-    # see vit_backbone_scope_modules in checkpointing.py.
+    # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
+    # linear4unpatch; see vit_backbone_scope_modules in checkpointing.py.
     if rank == 0:
         print(f"Study {studyIDX}: BACKBONE_ARCH={BACKBONE_ARCH!r}", flush=True)
         print(
