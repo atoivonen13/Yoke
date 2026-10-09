@@ -709,6 +709,9 @@ def main(args, rank, world_size, local_rank, device):
         BACKBONE_TAIL_LR_MULT = 0.0
     elif studyIDX == 201:  # = 200 with the whole ViT fine-tuned (as 143 vs 142)
         BACKBONE_FINETUNE_SCOPE = "full"
+    elif studyIDX == 202:  # = 200 with the ViT bypassed (as 144 vs 142)
+        BYPASS_BACKBONE = True
+        BACKBONE_TAIL_LR_MULT = 0.0
     # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
     # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
