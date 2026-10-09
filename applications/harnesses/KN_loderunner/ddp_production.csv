@@ -146,12 +146,8 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 #140,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 #141,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 #142,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# Study 143: = 140 on the rubin_lsst_ztf sets (BACKBONE_FINETUNE_SCOPE="full", set by studyIDX in the script).
 #143,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# Study 144: = 141 on the rubin_lsst_ztf sets (BYPASS_BACKBONE=True, BACKBONE_TAIL_LR_MULT=0.0, set by studyIDX in the script).
 #144,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-# Study 145: = 142 with the LodeRunnerViT backbone (BACKBONE_ARCH="vit" for studyIDX > 144; EMBED_DIM/B0-B3 unused).
-# Batch 4 (Kyle's ViT batch) instead of 5 for VRAM; LR scales with sqrt(batch) -> 0.89x of 142's.
-145,yoke311,1,4,128,1,1,9,1,2,4,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+200,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 
 
