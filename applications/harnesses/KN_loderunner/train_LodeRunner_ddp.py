@@ -647,8 +647,8 @@ def main(args, rank, world_size, local_rank, device):
     # encoder). Scope ladder closed.
     BACKBONE_FINETUNE_SCOPE = "decoder"
 
-    # Studies 142-144: 138 / 140 / 141 re-run on the rubin_lsst_ztf dense +
-    # uniform sets (--kn_dense_glob / --kn_uniform_glob defaults). All three
+    # Studies 142-144: 138 / 140 / 141 re-run on the rubin_lsst_ztf realistic,
+    # dense and uniform sets (the --kn_*_glob defaults). All three
     # launch from this one script, so the 140 / 141 variant is picked by study
     # number instead of by editing the knobs above between launches.
     if studyIDX == 143:  # = 140: shared encoder fine-tuned too
