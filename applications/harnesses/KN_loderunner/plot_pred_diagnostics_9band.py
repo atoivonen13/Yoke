@@ -39,6 +39,7 @@ import torch
 
 from yoke.models.vit.swin.bomberman import (
     LodeRunner,
+    LodeRunnerViT,
     ScalarTemporalConditionedLodeRunner_9band,
 )
 from yoke.datasets.kilonova_dataset import (
@@ -306,7 +307,13 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("color_sed_dt_independent:", color_sed_dt_independent)
     print("color_ztf_tie_twins:", color_ztf_tie_twins)
 
-    backbone = LodeRunner(**model_args).to(device)
+    # "LodeRunnerViT" for Study 145+ checkpoints; "LodeRunner" (Swin) otherwise.
+    backbone_cls = (
+        LodeRunnerViT
+        if ckpt.get("backbone_class", "LodeRunner") == "LodeRunnerViT"
+        else LodeRunner
+    )
+    backbone = backbone_cls(**model_args).to(device)
     backbone.noise_scale = noise_scale
 
     model = ScalarTemporalConditionedLodeRunner_9band(
@@ -341,6 +348,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         color_sed_rank=color_sed_rank,
         color_sed_dt_independent=color_sed_dt_independent,
         color_ztf_tie_twins=color_ztf_tie_twins,
+        backbone_dt_in=ckpt.get("backbone_dt_in", 0.25),
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

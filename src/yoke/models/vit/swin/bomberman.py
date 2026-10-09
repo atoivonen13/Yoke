@@ -822,6 +822,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         redshift_mean: float = 0.0142,
         redshift_std: float = 0.00365,
         redshift_pivot_direct: bool = False,
+        backbone_dt_in: float = 0.25,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -990,6 +991,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 ``(10, 5)`` patch embed). The single most important render detail.
             gather_rows_k (int): Half-height (pixels) of the vertical neighbourhood
                 pooled around the target row ``row(Dt)`` at readout.
+            backbone_dt_in (float): Only used when the backbone is a 2-in/1-out
+                :class:`LodeRunnerViT` (``num_input_frames == 2``). There is no
+                previous frame here, so the backbone image is fed twice as
+                ``[x_{t-1}, x_t]`` with ``lead_times = (backbone_dt_in, Dt)``.
+                Default 0.25 matches the pretraining ``dt_in``. Adds no parameters.
         """
         super().__init__()
 
@@ -1066,6 +1072,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             )
 
         self.backbone = backbone
+        self.backbone_dt_in = backbone_dt_in
         self.context_len = context_len
         self.n_bands = n_bands
         self.image_size = image_size
@@ -1375,6 +1382,30 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     nn.GELU(),
                     nn.Linear(hidden, n_bands * n_quantiles),
                 )
+
+    def _run_backbone(self, img: torch.Tensor, Dt: torch.Tensor) -> torch.Tensor:
+        """Run the backbone on a [B, C, H, W] image with lead time ``Dt``.
+
+        Single-frame backbones (Swin ``LodeRunner``, 1-frame ``LodeRunnerViT``)
+        take ``(img, Dt)`` directly. A 2-in/1-out ``LodeRunnerViT`` gets the same
+        image as both frames with ``lead_times = (backbone_dt_in, Dt)``.
+
+        Args:
+            img (torch.Tensor): Backbone input image, [B, backbone_channels, H, W].
+            Dt (torch.Tensor): Lead time, [B].
+
+        Returns:
+            torch.Tensor: Backbone output, [B, backbone_channels, H, W].
+        """
+        backbone_in_vars = torch.arange(self.backbone_channels, device=img.device)
+        backbone_out_vars = torch.arange(self.backbone_channels, device=img.device)
+
+        if getattr(self.backbone, "num_input_frames", 1) == 2:
+            img = torch.stack([img, img], dim=1)  # [B, 2, C, H, W]
+            Dt = Dt.reshape(-1)
+            Dt = torch.stack([torch.full_like(Dt, self.backbone_dt_in), Dt], dim=1)
+
+        return self.backbone(img, backbone_in_vars, backbone_out_vars, Dt)
 
     def _encode_dt(self, Dt: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Fourier-encode the lead time for the trainable path.
@@ -1801,11 +1832,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # the Fourier Dt encoding) -> n_quantiles, applied per band.
             field = self._render_field(x_events)  # [B, C, H, W]
 
-            backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
-            backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
-            pred_img = self.backbone(
-                field, backbone_in_vars, backbone_out_vars, Dt
-            )  # [B, C, H, W]
+            pred_img = self._run_backbone(field, Dt)  # [B, C, H, W]
 
             band_summary = self._gather_bands(pred_img, Dt)  # [B, n_bands, C]
 
@@ -1871,14 +1898,8 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 W,
             )
 
-            backbone_in_vars = torch.arange(self.backbone_channels, device=x.device)
-            backbone_out_vars = torch.arange(self.backbone_channels, device=x.device)
-
-            pred_img = self.backbone(
-                pseudo_img,
-                backbone_in_vars,
-                backbone_out_vars,
-                Dt,
+            pred_img = self._run_backbone(
+                pseudo_img, Dt
             )  # [B, backbone_channels, H, W]
 
             # Collapse spatial dimensions to per-channel summaries. The mean alone
