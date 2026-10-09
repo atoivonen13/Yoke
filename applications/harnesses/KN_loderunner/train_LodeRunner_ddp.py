@@ -311,8 +311,10 @@ def main(args, rank, world_size, local_rank, device):
     # with $KN_VIT_PRETRAINED; the default is a placeholder cluster location.
     VIT_PRETRAINED_CHECKPOINT = os.environ.get(
         "KN_VIT_PRETRAINED",
-        "/usr/projects/artimis/mpmm/pretrained_models/ldrViT/"
+        "/users/atoivonen/data/kyle_vit/"
         "study002_modelState_epoch0100_ema_weights.pth",
+        #"/usr/projects/artimis/mpmm/pretrained_models/ldrViT/"
+        #"study002_modelState_epoch0100_ema_weights.pth",
     )
 
     # The 2-frame ViT wants (x_{t-1}, x_t) and (dt_in, dt_out). The wrapper has a
@@ -1272,7 +1274,7 @@ def main(args, rank, world_size, local_rank, device):
             model = LodeRunner(**model_args)
             model.to(device)
 
-            manual_checkpoint = "/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth"
+            manual_checkpoint = "/users/atoivonen/data/kyle_vit/study002_modelState_epoch0100_ema_weights.pth" #"/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth"
 
             checkpoint_data = torch.load(
                 manual_checkpoint,
