@@ -19,6 +19,10 @@ from yoke.utils.checkpointing import (
 
 N_BANDS = 9
 CONTEXT_LEN = 5
+# Time-window context, as in training (CONTEXT_WINDOW_DAYS=2.0): each event is
+# [value, rel_t, valid, one_hot_band].
+CONTEXT_WINDOW_DAYS = 2.0
+EVENT_WIDTH = 3 + N_BANDS
 IMAGE_SIZE = (20, 10)  # (10, 5) patches -> 2 x 2 token grid
 
 
@@ -44,13 +48,14 @@ def _make_wrapper(num_input_frames: int) -> ScalarTemporalConditionedLodeRunner_
         image_size=IMAGE_SIZE,
         backbone_channels=8,
         hidden=16,
+        context_window_days=CONTEXT_WINDOW_DAYS,
         pool_mode="meanstdmax",
         backbone_dt_in=0.25,
     )
 
 
 def _inputs(batch: int = 3) -> tuple:
-    x = torch.randn(batch, CONTEXT_LEN * (2 + N_BANDS))
+    x = torch.randn(batch, CONTEXT_LEN * EVENT_WIDTH)
     in_vars = torch.arange(8)
     Dt = torch.rand(batch) * 5.0
     return x, in_vars, Dt

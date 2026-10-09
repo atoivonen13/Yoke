@@ -77,10 +77,11 @@ def main(path: str) -> None:
         n_bands=9,
         image_size=VIT_MODEL_ARGS["image_size"],
         backbone_channels=8,
+        context_window_days=2.0,
         pool_mode="meanstdmax",
         backbone_dt_in=0.25,
     ).eval()
-    x = torch.randn(1, 12 * (2 + 9))
+    x = torch.randn(1, 12 * (3 + 9))  # time-window layout: [value, rel_t, valid, one-hot]
     with torch.no_grad():
         out = wrapper(x, torch.arange(8), torch.arange(8), torch.tensor([3.0]))
     print("wrapper forward:", tuple(out.shape), "finite:", bool(torch.isfinite(out).all()))
