@@ -726,12 +726,19 @@ def main(args, rank, world_size, local_rank, device):
     # the backbone can only add a residual. Decoder scope = last 2 blocks.
     # Study 204: = 203 with all 6 blocks fine-tuned (as 201 vs 200). On the token
     # path "full" = the transformer blocks only (the image embeds never run).
+    # Study 206: = 203 re-seeded (torch init is unseeded) and run to 150 epochs
+    # instead of the input file's 100, since 203's best val was its last epoch.
+    # TERMINAL_STEPS stays 10000 (= 200 epochs x 50 batches), so epochs 1-100 get
+    # the same LR as 203: the epoch-100 checkpoint is a pure re-seed, and epochs
+    # 101-150 continue the same anneal (LR 0.57x anchor at epoch 100 -> 0.24x).
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
-    if studyIDX in (203, 204):
+    if studyIDX in (203, 204, 206):
         EVENT_TOKENS = True
     if studyIDX == 204:
         BACKBONE_FINETUNE_SCOPE = "full"
+    if studyIDX == 206:
+        total_epochs = 150
     # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
     # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
@@ -742,7 +749,7 @@ def main(args, rank, world_size, local_rank, device):
             f"Study {studyIDX}: BYPASS_BACKBONE={BYPASS_BACKBONE}, "
             f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
             f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}, "
-            f"EVENT_TOKENS={EVENT_TOKENS}",
+            f"EVENT_TOKENS={EVENT_TOKENS}, total_epochs={total_epochs}",
             flush=True,
         )
 
