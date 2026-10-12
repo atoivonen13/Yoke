@@ -94,13 +94,18 @@ class RopeAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward method for RopeAttention.
 
         Args:
             hidden_states (torch.Tensor): Tokens of shape ``(B, N, D)``.
             image_rotary_emb (tuple[torch.Tensor, torch.Tensor] | None):
-                ``(cos, sin)`` rotary tensors each of shape ``(N, dim_head)``.
+                ``(cos, sin)`` rotary tensors each of shape ``(N, dim_head)``,
+                or ``(B, N, dim_head)`` for per-sample token positions.
+            attention_mask (torch.Tensor | None): Optional SDPA ``attn_mask``
+                broadcastable to ``(B, heads, N, N)``; boolean ``True`` marks the
+                keys a query may attend to. ``None`` (default) attends to all.
 
         Returns:
             torch.Tensor: Attention output of shape ``(B, N, D)``.
@@ -129,6 +134,7 @@ class RopeAttention(nn.Module):
             query,
             key,
             value,
+            attn_mask=attention_mask,
             dropout_p=self.dropout if self.training else 0.0,
         )  # (B, H, N, D_head)
 
@@ -214,13 +220,17 @@ class BasicTransformerBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward method for BasicTransformerBlock.
 
         Args:
             hidden_states (torch.Tensor): Tokens of shape ``(B, N, D)``.
             image_rotary_emb (tuple[torch.Tensor, torch.Tensor] | None):
-                ``(cos, sin)`` rotary tensors each of shape ``(N, head_dim)``.
+                ``(cos, sin)`` rotary tensors each of shape ``(N, head_dim)``,
+                or ``(B, N, head_dim)`` for per-sample token positions.
+            attention_mask (torch.Tensor | None): Optional attention mask passed
+                to :class:`RopeAttention`. ``None`` (default) attends to all.
 
         Returns:
             torch.Tensor: Block output of shape ``(B, N, D)``.
@@ -236,6 +246,7 @@ class BasicTransformerBlock(nn.Module):
         attn_output = self.attn(
             norm_hidden_states,
             image_rotary_emb=image_rotary_emb,
+            attention_mask=attention_mask,
         )  # (B, N, D)
 
         if self.concat:

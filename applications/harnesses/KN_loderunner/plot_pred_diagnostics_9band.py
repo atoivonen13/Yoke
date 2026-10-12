@@ -302,6 +302,7 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
     print("redshift_fourier_bands:", redshift_fourier_bands)
     print("redshift_pivot_direct:", redshift_pivot_direct)
     print("spatial_render:", spatial_render)
+    print("event_tokens:", ckpt.get("event_tokens", False))
     print("color_anchored_head:", color_anchored_head)
     print("color_sed_rank:", color_sed_rank)
     print("color_sed_dt_independent:", color_sed_dt_independent)
@@ -349,6 +350,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         color_sed_dt_independent=color_sed_dt_independent,
         color_ztf_tie_twins=color_ztf_tie_twins,
         backbone_dt_in=ckpt.get("backbone_dt_in", 0.25),
+        event_tokens=ckpt.get("event_tokens", False),
+        event_token_readout=ckpt.get("event_token_readout", 8),
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

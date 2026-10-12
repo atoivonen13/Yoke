@@ -712,6 +712,19 @@ def main(args, rank, world_size, local_rank, device):
     elif studyIDX == 202:  # = 200 with the ViT bypassed (as 144 vs 142)
         BYPASS_BACKBONE = True
         BACKBONE_TAIL_LR_MULT = 0.0
+
+    # Study 203: event tokens. 200-202 tied because the constant pseudo-image
+    # makes every ViT token identical, so attention mixes nothing. EVENT_TOKENS
+    # runs the pretrained ViT blocks on a token SET instead: one token per valid
+    # context event and one query per band at the target Dt. RoPE positions are
+    # (band column, time row) in the render layout. The 9 query outputs are read
+    # out to EVENT_TOKEN_READOUT channels each and appended to the bypass head
+    # input. The readout is zero-init, so the model starts as exactly 202 and
+    # the backbone can only add a residual. Decoder scope = last 2 blocks.
+    EVENT_TOKENS = False
+    EVENT_TOKEN_READOUT = 8
+    if studyIDX == 203:
+        EVENT_TOKENS = True
     # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
     # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
@@ -721,7 +734,8 @@ def main(args, rank, world_size, local_rank, device):
         print(
             f"Study {studyIDX}: BYPASS_BACKBONE={BYPASS_BACKBONE}, "
             f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
-            f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}",
+            f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}, "
+            f"EVENT_TOKENS={EVENT_TOKENS}",
             flush=True,
         )
 
@@ -1344,6 +1358,8 @@ def main(args, rank, world_size, local_rank, device):
             redshift_std=REDSHIFT_STD,
             redshift_pivot_direct=REDSHIFT_PIVOT_DIRECT,
             backbone_dt_in=BACKBONE_DT_IN,
+            event_tokens=EVENT_TOKENS,
+            event_token_readout=EVENT_TOKEN_READOUT,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -1999,6 +2015,8 @@ def main(args, rank, world_size, local_rank, device):
                         "LodeRunnerViT" if BACKBONE_ARCH == "vit" else "LodeRunner"
                     ),
                     "backbone_dt_in": BACKBONE_DT_IN,
+                    "event_tokens": EVENT_TOKENS,
+                    "event_token_readout": EVENT_TOKEN_READOUT,
                     "model_args": model_args,
                     "model_state_dict": model.module.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),

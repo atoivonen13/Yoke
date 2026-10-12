@@ -132,7 +132,8 @@ def apply_rotary_emb(
     Args:
         x (torch.Tensor): Query/key tensor of shape ``(B, N, H, D_head)``.
         freqs_cis (tuple[torch.Tensor, torch.Tensor]): ``(cos, sin)`` tensors
-            each of shape ``(N, D_head)``.
+            each of shape ``(N, D_head)``, or ``(B, N, D_head)`` when every
+            sample has its own token positions.
         sequence_dim (int): Axis of ``x`` corresponding to the sequence/token
             dimension ``N``. Default 1.
 
@@ -140,10 +141,19 @@ def apply_rotary_emb(
         torch.Tensor: Rotated tensor with the same shape as ``x``.
 
     """
-    cos, sin = freqs_cis  # each (N, D_head)
+    cos, sin = freqs_cis  # each (N, D_head) or (B, N, D_head)
 
     # Reshape cos/sin to broadcast against (B, N, H, D_head).
-    if sequence_dim == 1:
+    if cos.dim() == 3:
+        # Per-sample positions: (B, N, D) -> (B, N, 1, D) or (B, 1, N, D).
+        if sequence_dim not in (1, 2):
+            raise ValueError(
+                f"Unsupported sequence_dim={sequence_dim}, expected 1 or 2."
+            )
+        head_axis = 2 if sequence_dim == 1 else 1
+        cos = cos.unsqueeze(head_axis)
+        sin = sin.unsqueeze(head_axis)
+    elif sequence_dim == 1:
         # (N, D) -> (1, N, 1, D)
         cos = cos[None, :, None, :]
         sin = sin[None, :, None, :]

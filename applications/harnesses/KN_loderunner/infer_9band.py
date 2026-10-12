@@ -303,6 +303,8 @@ def load_9band_model(ckpt_path, device, use_ema: bool = False):
         color_sed_dt_independent=color_sed_dt_independent,
         color_ztf_tie_twins=color_ztf_tie_twins,
         backbone_dt_in=ckpt.get("backbone_dt_in", 0.25),
+        event_tokens=ckpt.get("event_tokens", False),
+        event_token_readout=ckpt.get("event_token_readout", 8),
     ).to(device)
 
     state_dict = strip_ddp_prefix(ckpt["model_state_dict"])

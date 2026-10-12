@@ -8,6 +8,7 @@ times), the single-frame ViT path, and the ViT fine-tune scopes built by
 import pytest
 import torch
 
+from yoke.models.vit.rope import apply_rotary_emb
 from yoke.models.vit.swin.bomberman import (
     LodeRunnerViT,
     ScalarTemporalConditionedLodeRunner_9band,
@@ -26,7 +27,9 @@ EVENT_WIDTH = 3 + N_BANDS
 IMAGE_SIZE = (20, 10)  # (10, 5) patches -> 2 x 2 token grid
 
 
-def _make_wrapper(num_input_frames: int) -> ScalarTemporalConditionedLodeRunner_9band:
+def _make_wrapper(
+    num_input_frames: int, **wrapper_kwargs: object
+) -> ScalarTemporalConditionedLodeRunner_9band:
     """Tiny ViT backbone inside the 9-band wrapper."""
     backbone = LodeRunnerViT(
         default_vars=[f"v{i}" for i in range(8)],
@@ -51,6 +54,7 @@ def _make_wrapper(num_input_frames: int) -> ScalarTemporalConditionedLodeRunner_
         context_window_days=CONTEXT_WINDOW_DAYS,
         pool_mode="meanstdmax",
         backbone_dt_in=0.25,
+        **wrapper_kwargs,
     )
 
 
@@ -161,6 +165,144 @@ def test_vit_finetune_scopes(scope: str) -> None:
     for name, p in vit.named_parameters():
         if p.requires_grad:
             assert p.grad is not None, name
+
+
+def _window_inputs(batch: int = 3, n_valid: int = 3) -> tuple:
+    """Window-mode x: the first ``n_valid`` events valid, the rest zero padding."""
+    ev = torch.zeros(batch, CONTEXT_LEN, EVENT_WIDTH)
+    ev[:, :n_valid, 0] = torch.randn(batch, n_valid)
+    ev[:, :n_valid, 1] = torch.rand(batch, n_valid).sort(dim=1).values * 2.0
+    ev[:, :n_valid, 2] = 1.0
+    bands = torch.randint(0, N_BANDS, (batch, n_valid))
+    ev[:, :n_valid, 3:] = torch.nn.functional.one_hot(bands, N_BANDS).float()
+    Dt = torch.rand(batch) * 5.0
+    return ev.flatten(1), torch.arange(8), Dt
+
+
+def _make_event_token_wrapper(
+    **kwargs: object,
+) -> ScalarTemporalConditionedLodeRunner_9band:
+    """Event-token wrapper (Study 203) with a Fourier Dt query conditioner."""
+    return _make_wrapper(2, event_tokens=True, dt_fourier_bands=4, **kwargs)
+
+
+def test_rope_per_sample_positions_match_loop() -> None:
+    """(B, N, D) rotary tables equal applying each sample's (N, D) table."""
+    B, N, H, D = 2, 5, 3, 8
+    q = torch.randn(B, N, H, D)
+    cos, sin = torch.randn(B, N, D), torch.randn(B, N, D)
+    out = apply_rotary_emb(q, (cos, sin))
+    for b in range(B):
+        ref = apply_rotary_emb(q[b : b + 1], (cos[b], sin[b]))
+        assert torch.allclose(out[b : b + 1], ref)
+
+
+def test_event_tokens_init_equals_bypass() -> None:
+    """The zero-init readout makes the event-token model exactly the bypass model."""
+    torch.manual_seed(0)
+    model = _make_event_token_wrapper()
+    bypass = _make_wrapper(2, bypass_backbone=True, dt_fourier_bands=4)
+    bypass.conditioner.load_state_dict(model.conditioner.state_dict())
+    head_sd = model.output_head.state_dict()
+    # Head input is [pooled (3 * 8), token readout (9 * 8), dt_feat (9)].
+    w = head_sd["0.weight"]
+    head_sd["0.weight"] = torch.cat([w[:, :24], w[:, 24 + N_BANDS * 8 :]], dim=1)
+    bypass.output_head.load_state_dict(head_sd)
+
+    x, in_vars, Dt = _window_inputs()
+    out = model(x, in_vars, in_vars, Dt)
+    assert torch.allclose(out, bypass(x, in_vars, in_vars, Dt))
+
+
+def test_event_tokens_skip_image_path() -> None:
+    """The token path never runs the ViT image forward (embed / unpatchify)."""
+    model = _make_event_token_wrapper()
+    calls = []
+    model.backbone.register_forward_pre_hook(lambda *_: calls.append(1))
+    x, in_vars, Dt = _window_inputs()
+    out = model(x, in_vars, in_vars, Dt)
+    assert calls == []
+    assert out.shape == (3, N_BANDS)
+
+
+def test_event_tokens_ignore_padding_and_order() -> None:
+    """The readout is a set function of the valid events: padding and order are inert."""
+    torch.manual_seed(0)
+    model = _make_event_token_wrapper().double()
+    torch.nn.init.normal_(model.event_token_io["readout"].weight)
+    x, _, Dt = _window_inputs(n_valid=3)
+    x, Dt = x.double(), Dt.double()
+    g = torch.randn(3, 9, dtype=torch.float64)
+    ref = model._event_token_readout(x, Dt, g)
+
+    ev = x.view(3, CONTEXT_LEN, EVENT_WIDTH).clone()
+    ev[:, 3:, 0] = 7.0  # junk in the padded (valid = 0) rows
+    ev[:, 3:, 1] = -3.0
+    ev[:, 3:, 3] = 1.0
+    assert torch.allclose(model._event_token_readout(ev.flatten(1), Dt, g), ref)
+
+    perm = torch.tensor([2, 0, 4, 1, 3])
+    assert torch.allclose(model._event_token_readout(ev[:, perm].flatten(1), Dt, g), ref)
+
+
+def test_event_tokens_empty_window_is_finite() -> None:
+    """With no valid event the band queries still attend (to each other)."""
+    model = _make_event_token_wrapper()
+    x, in_vars, Dt = _window_inputs(n_valid=0)
+    assert torch.isfinite(model(x, in_vars, in_vars, Dt)).all()
+
+
+def test_event_tokens_mix_events() -> None:
+    """Attention mixes tokens: a valid event's value changes the band readout."""
+    torch.manual_seed(0)
+    model = _make_event_token_wrapper()
+    torch.nn.init.normal_(model.event_token_io["readout"].weight)
+    x, _, Dt = _window_inputs(n_valid=3)
+    g = torch.randn(3, 9)
+    ref = model._event_token_readout(x, Dt, g)
+    ev = x.view(3, CONTEXT_LEN, EVENT_WIDTH).clone()
+    ev[:, 0, 0] += 1.0
+    assert not torch.allclose(model._event_token_readout(ev.flatten(1), Dt, g), ref)
+
+
+@pytest.mark.parametrize("scope", ["decoder", "full"])
+def test_event_tokens_finetune_scopes(scope: str) -> None:
+    """Only modules that run are unfrozen, and every trainable param gets a grad."""
+    model = _make_event_token_wrapper()
+    blocks = list(model.backbone.backbone.transformer_blocks)
+    build_finetune_optimizer(
+        model,
+        {"lr": 1e-3},
+        backbone_tail_lr_mult=0.1,
+        backbone_finetune_scope=scope,
+    )
+    expected = blocks[-VIT_DECODER_BLOCKS:] if scope == "decoder" else blocks
+    n_trainable = sum(
+        p.numel() for p in model.backbone.parameters() if p.requires_grad
+    )
+    assert n_trainable == sum(p.numel() for m in expected for p in m.parameters())
+    assert all(p.requires_grad for p in model.event_token_io.parameters())
+
+    # Past step 0 the readout is nonzero; then every trainable param must get a
+    # gradient (DDP runs with find_unused_parameters=False).
+    torch.nn.init.normal_(model.event_token_io["readout"].weight)
+    x, in_vars, Dt = _window_inputs()
+    model(x, in_vars, in_vars, Dt).sum().backward()
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None and p.grad.abs().sum() > 0, name
+
+
+def test_event_tokens_tail_scope_raises() -> None:
+    """linear4unpatch does not run on the token path, so 'tail' is rejected."""
+    model = _make_event_token_wrapper()
+    with pytest.raises(ValueError):
+        build_finetune_optimizer(
+            model,
+            {"lr": 1e-3},
+            backbone_tail_lr_mult=0.1,
+            backbone_finetune_scope="tail",
+        )
 
 
 def test_vit_bad_scope_raises() -> None:

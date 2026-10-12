@@ -824,6 +824,8 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         redshift_pivot_direct: bool = False,
         backbone_dt_in: float = 0.25,
         vit_constant_shortcut: bool = True,
+        event_tokens: bool = False,
+        event_token_readout: int = 8,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -1004,6 +1006,27 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 (see :meth:`_vit_constant_pool`). The full computation gives the
                 same result, so this changes speed and memory only. Not used by
                 the spatial-render path. Adds no parameters.
+            event_tokens (bool): When True (default False), the pretrained
+                :class:`LodeRunnerViT` transformer blocks run on a SET of tokens
+                instead of the pseudo-image (Study 203; see
+                :meth:`_event_token_readout`). Each valid context event is one
+                token, and each band gets one query token placed at the target
+                time ``Dt``. The 2-D RoPE positions are (band column, time row),
+                using the spatial-render layout, so attention sees the relative
+                time and band of every event pair. The padded events are masked
+                out of attention. The query outputs are read out to
+                ``event_token_readout`` channels per band. That readout is
+                concatenated onto the bypass head input (the conditioner's
+                constant-image statistics), so the backbone adds a residual to
+                the bypass model instead of replacing it. The readout is
+                zero-initialized, so at init the model equals the bypass model.
+                The ViT patch embed, var/time embeds, temporal fusion and
+                ``linear4unpatch`` are unused on this path. Requires a ViT
+                backbone, window mode, ``bypass_backbone=False`` and
+                ``spatial_render=False``. Adds the token embed/readout params, so
+                start a FRESH study; round-trips via the loaders.
+            event_token_readout (int): Channels read out per band query token
+                when ``event_tokens`` is on. Default 8 (= the waist width).
         """
         super().__init__()
 
@@ -1029,6 +1052,24 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 "(context_window_days set); the anchor phase (days since first "
                 "detection) is derived from the window-mode absolute-time layout."
             )
+
+        if event_tokens:
+            if not isinstance(backbone, LodeRunnerViT):
+                raise ValueError(
+                    "event_tokens=True requires a LodeRunnerViT backbone; the "
+                    "token path runs its global-attention RoPE blocks directly."
+                )
+            if context_window_days is None:
+                raise ValueError(
+                    "event_tokens=True requires time-window mode "
+                    "(context_window_days set); padded events are masked by the "
+                    "'valid' column."
+                )
+            if bypass_backbone or spatial_render:
+                raise ValueError(
+                    "event_tokens=True is its own backbone path; it cannot be "
+                    "combined with bypass_backbone or spatial_render."
+                )
 
         if spatial_render:
             if bypass_backbone:
@@ -1152,6 +1193,10 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # changes no shapes, so checkpoints load strict=True either way.
         self.bypass_backbone = bypass_backbone
 
+        # Event-token backbone path (Study 203); see _event_token_readout.
+        self.event_tokens = event_tokens
+        self.event_token_readout = event_token_readout
+
         # Waist width: the number of channels the conditioner emits and pooling
         # summarizes. When bypass_channels is set it DECOUPLES this from the frozen
         # backbone's fixed backbone_channels -- valid only under bypass, where the
@@ -1175,6 +1220,10 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         self.pool_mode = pool_mode
         # Number of pooled statistics per waist channel fed to the output head.
         pool_channels = self.waist * (3 if pool_mode == "meanstdmax" else 1)
+        # The event-token readout (one vector per band) is appended to the pooled
+        # summary, so the heads see it wherever they see the pooled channels.
+        if event_tokens:
+            pool_channels += n_bands * event_token_readout
 
         # Dataset x layout, flattened per event. Fixed-count mode:
         #   [value, rel_t, one_hot_band(n_bands)] * context_len   -> 2 + n_bands
@@ -1325,6 +1374,29 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 nn.GELU(),
                 nn.Linear(hidden, self.waist),
             )
+
+            if event_tokens:
+                # Token I/O around the pretrained ViT blocks (Study 203); see
+                # _event_token_readout. Event tokens embed [value, tau, one-hot
+                # band]; band queries are a learned vector per band plus the
+                # global scalars. The readout is zero-init, so the model starts
+                # as the bypass model and the backbone adds a learned residual.
+                embed_dim = backbone.embed_dim
+                global_extra = dt_extra + phase_extra + redshift_extra
+                io = {
+                    "embed": nn.Sequential(
+                        nn.Linear(2 + n_bands, hidden),
+                        nn.GELU(),
+                        nn.Linear(hidden, embed_dim),
+                    ),
+                    "band_query": nn.Embedding(n_bands, embed_dim),
+                    "readout": nn.Linear(embed_dim, event_token_readout),
+                }
+                if global_extra > 0:
+                    io["query_cond"] = nn.Linear(global_extra, embed_dim)
+                nn.init.zeros_(io["readout"].weight)
+                nn.init.zeros_(io["readout"].bias)
+                self.event_token_io = nn.ModuleDict(io)
 
             if self.color_anchored_head:
                 # Color-anchored SED head (Study 116). Every band is a shared
@@ -1727,6 +1799,133 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         frac = (tau + self.render_context_days) / self._render_t_span
         return frac * (H - 1)
 
+    def _split_events(self, x_events: torch.Tensor) -> tuple:
+        """Unpack window-mode events, with time re-referenced to the anchor.
+
+        Args:
+            x_events (torch.Tensor): Window-mode per-event block, shape
+                [B, context_len * (3 + n_bands)], laid out per event as
+                [value, rel_t, valid, one_hot_band(n_bands)].
+
+        Returns:
+            tuple: ``(value, tau, valid, band_idx)``, each [B, context_len].
+            ``tau`` is the event time minus the anchor time (the largest
+            ``rel_t`` over valid events, i.e. the most-recent observation), so
+            the anchor sits at ``tau = 0``. A window with no valid event uses an
+            anchor of 0.
+        """
+        B = x_events.shape[0]
+        ev = x_events.view(B, self.context_len, 3 + self.n_bands)
+        value = ev[..., 0]  # [B, L]
+        rel_t = ev[..., 1]  # [B, L]
+        valid = ev[..., 2] > 0.5  # [B, L] bool
+        band_idx = ev[..., 3:].argmax(dim=-1)  # [B, L]
+
+        neg_inf = torch.finfo(rel_t.dtype).min
+        anchor_rel_t = torch.where(
+            valid, rel_t, torch.full_like(rel_t, neg_inf)
+        ).amax(dim=1)  # [B]
+        anchor_rel_t = torch.where(
+            valid.any(dim=1), anchor_rel_t, torch.zeros_like(anchor_rel_t)
+        )
+        tau = rel_t - anchor_rel_t.unsqueeze(1)  # [B, L]
+        return value, tau, valid, band_idx
+
+    def _token_centers(
+        self, tau: torch.Tensor, band_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """Normalized ``[x, y]`` RoPE centers for (time, band) tokens.
+
+        Uses the spatial-render layout (rows = anchor-relative time via
+        :meth:`_row_of_tau`, column block per band), in the ``[0, 1]`` center
+        convention of :func:`~yoke.models.vit.rope.make_regular_centers`, so the
+        backbone's ``rope_scale`` sees the same geometry as an image of the
+        light curve.
+
+        Args:
+            tau (torch.Tensor): Anchor-relative time (days), [B, N].
+            band_idx (torch.Tensor): Band index, [B, N].
+
+        Returns:
+            torch.Tensor: Centers [B, N, 2], columns ``[x, y]``.
+        """
+        H, W = self.image_size
+        band_width = W // self.n_bands
+        x = (band_idx.to(tau.dtype) + 0.5) * band_width / W
+        y = (self._row_of_tau(tau) + 0.5) / H
+        return torch.stack([x, y], dim=-1)
+
+    def _event_token_readout(
+        self,
+        x_events: torch.Tensor,
+        Dt: torch.Tensor,
+        global_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the ViT blocks on event + band-query tokens (Study 203).
+
+        The pseudo-image path gives the ViT identical tokens, so its attention
+        cannot mix anything (see :meth:`_vit_constant_pool`). Here every valid
+        context event becomes its own token, embedded from
+        ``[value, tau, one_hot_band]``. Each band adds one query token at the
+        target time ``Dt``, embedded from a learned band vector plus the global
+        scalars (Fourier Dt / phase / redshift). Each token's 2-D RoPE position is
+        its (band column, time row) in the render layout, so the pretrained
+        attention sees the relative time and band offset of every token pair.
+        Padded events are masked out as keys. The pretrained blocks and
+        ``norm_out`` run on this set, which has ``context_len + n_bands`` tokens
+        (cheap), and the band-query outputs are read out to
+        ``event_token_readout`` channels each.
+
+        Args:
+            x_events (torch.Tensor): Window-mode per-event block,
+                [B, context_len * (3 + n_bands)].
+            Dt (torch.Tensor): Lead time (days) from the anchor to the target, [B].
+            global_feat (torch.Tensor): Per-sample global features
+                (``[dt_feat, phase_feat, redshift_feat]``), [B, F]; F may be 0.
+
+        Returns:
+            torch.Tensor: Band-query readout, [B, n_bands * event_token_readout].
+        """
+        io = self.event_token_io
+        plain = self.backbone.backbone
+        B = x_events.shape[0]
+        nb = self.n_bands
+        device = x_events.device
+
+        value, tau, valid, band_idx = self._split_events(x_events)
+        band_oh = nn.functional.one_hot(band_idx, nb).to(value.dtype)
+        ev_tok = io["embed"](
+            torch.cat([value.unsqueeze(-1), tau.unsqueeze(-1), band_oh], dim=-1)
+        )  # [B, L, D]
+
+        bands = torch.arange(nb, device=device)
+        q_tok = io["band_query"](bands).unsqueeze(0).expand(B, nb, -1)  # [B, nb, D]
+        if "query_cond" in io:
+            q_tok = q_tok + io["query_cond"](global_feat).unsqueeze(1)
+        tokens = torch.cat([ev_tok, q_tok], dim=1)  # [B, L + nb, D]
+
+        q_tau = Dt.reshape(B, 1).to(tau.dtype).expand(B, nb)
+        centers = self._token_centers(
+            torch.cat([tau, q_tau], dim=1),
+            torch.cat([band_idx, bands.unsqueeze(0).expand(B, nb)], dim=1),
+        )  # [B, L + nb, 2]
+        N = centers.shape[1]
+        with torch.autocast(tokens.device.type, enabled=False):
+            cos, sin = plain.rope(centers)  # each [B * N, head_dim]
+        rotary_emb = (cos.view(B, N, -1), sin.view(B, N, -1))
+
+        # Keys: valid events and every band query (so no query row is empty).
+        key_ok = torch.cat([valid, valid.new_ones(B, nb)], dim=1)  # [B, N]
+        attn_mask = key_ok.view(B, 1, 1, N)
+
+        for block in plain.transformer_blocks:
+            tokens = block(
+                tokens, image_rotary_emb=rotary_emb, attention_mask=attn_mask
+            )
+        tokens = plain.norm_out(tokens)
+
+        return io["readout"](tokens[:, -nb:]).flatten(1)  # [B, nb * r]
+
     def _render_field(self, x_events: torch.Tensor) -> torch.Tensor:
         """Render the light-curve context into a structured [B, C, H, W] field.
 
@@ -1754,23 +1953,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         H, W = self.image_size
         device = x_events.device
 
-        ev = x_events.view(B, L, 3 + nb)
-        value = ev[..., 0]  # [B, L]
-        rel_t = ev[..., 1]  # [B, L]
-        valid = ev[..., 2] > 0.5  # [B, L] bool
-        band_idx = ev[..., 3:].argmax(dim=-1)  # [B, L]
-
-        # Anchor rel_t = largest rel_t over valid events (most-recent obs). No
-        # valid event -> 0 (an all-zero field, the normalized mean). tau re-refs
-        # time so the anchor sits at tau=0 (its fixed reference row).
-        neg_inf = torch.finfo(rel_t.dtype).min
-        anchor_rel_t = torch.where(
-            valid, rel_t, torch.full_like(rel_t, neg_inf)
-        ).amax(dim=1)  # [B]
-        anchor_rel_t = torch.where(
-            valid.any(dim=1), anchor_rel_t, torch.zeros_like(anchor_rel_t)
-        )
-        tau = rel_t - anchor_rel_t.unsqueeze(1)  # [B, L]
+        value, tau, valid, band_idx = self._split_events(x_events)
 
         row_f = self._row_of_tau(tau)  # [B, L] float rows
         row_c = row_f.round().long()  # [B, L]
@@ -1955,8 +2138,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             torch.cat([x_events, dt_feat, phase_feat, redshift_feat], dim=1)
         )  # [B, self.waist]
 
-        if self.bypass_backbone:
-            # Skip the frozen backbone entirely. The pseudo-image is spatially
+        if self.bypass_backbone or self.event_tokens:
+            # Skip the backbone's pseudo-image pass (the event-token path runs
+            # only its transformer blocks, below). The pseudo-image is spatially
             # constant, so its pooled statistics are analytic: mean = channel_vals,
             # std = 0, max = channel_vals. Computing them directly avoids
             # materializing the [B, waist, H, W] constant image (H*W = 448000),
@@ -1968,6 +2152,15 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 )  # [B, 3 * waist]
             else:
                 pred_channel_vals = channel_vals  # [B, waist]
+            if self.event_tokens:
+                # Study 203: the bypass summary plus the ViT's per-band readout
+                # over the event tokens (zero at init -> exactly bypass).
+                token_feat = self._event_token_readout(
+                    x_events,
+                    Dt,
+                    torch.cat([dt_feat, phase_feat, redshift_feat], dim=1),
+                )
+                pred_channel_vals = torch.cat([pred_channel_vals, token_feat], dim=1)
         elif self._use_vit_constant_pool():
             # Same pooled summary as the branch below, without materializing the
             # 8960-token ViT pass (see _vit_constant_pool).
