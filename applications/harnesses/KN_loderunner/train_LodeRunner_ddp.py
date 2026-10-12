@@ -721,10 +721,14 @@ def main(args, rank, world_size, local_rank, device):
     # out to EVENT_TOKEN_READOUT channels each and appended to the bypass head
     # input. The readout is zero-init, so the model starts as exactly 202 and
     # the backbone can only add a residual. Decoder scope = last 2 blocks.
+    # Study 204: = 203 with all 6 blocks fine-tuned (as 201 vs 200). On the token
+    # path "full" = the transformer blocks only (the image embeds never run).
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
-    if studyIDX == 203:
+    if studyIDX in (203, 204):
         EVENT_TOKENS = True
+    if studyIDX == 204:
+        BACKBONE_FINETUNE_SCOPE = "full"
     # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
     # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
