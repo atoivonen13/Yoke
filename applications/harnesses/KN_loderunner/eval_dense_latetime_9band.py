@@ -264,8 +264,9 @@ def _batched_forward(
     lead_times = np.asarray(lead_times, dtype=np.float32)
     median_idx = getattr(model, "median_idx", 0)
     # The backbone runs on a large pseudo-image per row, so a full chunk can
-    # overflow the conv's 32-bit indexing. Halve the chunk until it fits and
-    # remember the size that worked for later calls.
+    # overflow the conv's 32-bit indexing (Swin) or GPU memory (the ViT patch
+    # embed alone is ~0.5 GiB per row: each channel -> 8960 x 2304 tokens). Halve
+    # the chunk until it fits and remember the size that worked for later calls.
     max_batch = min(max_batch, _FORWARD_BATCH_LIMIT[0])
     chunks = []
     with torch.inference_mode():
@@ -274,13 +275,22 @@ def _batched_forward(
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
             Dt = torch.tensor(chunk, dtype=torch.float32, device=device)
+            oom = False
             try:
                 pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
             except RuntimeError as err:
-                if "canUse32BitIndexMath" not in str(err) or chunk.shape[0] == 1:
+                oom = isinstance(err, torch.OutOfMemoryError)
+                if not (oom or "canUse32BitIndexMath" in str(err)):
+                    raise
+                if chunk.shape[0] == 1:
                     raise
                 max_batch = max(1, chunk.shape[0] // 2)
                 _FORWARD_BATCH_LIMIT[0] = max_batch
+            if max_batch < chunk.shape[0]:
+                # Release the failed attempt's activations (freed once the
+                # exception is cleared) before retrying the smaller chunk.
+                if oom and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
             start += chunk.shape[0]
             # Quantile head returns [B, n_quantiles, N_BANDS]; point head returns

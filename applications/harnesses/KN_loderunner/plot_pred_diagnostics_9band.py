@@ -580,6 +580,10 @@ def build_context_input(
     ).unsqueeze(0)
 
 
+# Largest forward batch known to fit on the GPU (lowered by _batched_forward on OOM).
+_FORWARD_BATCH_LIMIT = [256]
+
+
 def _batched_forward(model, x, lead_times, n_bands, device, max_batch=256):
     """Predict all bands for many lead times in one (chunked) forward pass.
 
@@ -603,12 +607,25 @@ def _batched_forward(model, x, lead_times, n_bands, device, max_batch=256):
     lead_times = np.asarray(lead_times, dtype=np.float32)
     out = np.zeros((lead_times.shape[0], n_bands), dtype=np.float32)
     median_idx = getattr(model, "median_idx", 0)
+    # A ViT backbone (~0.5 GiB of patch tokens per row) can run out of GPU memory
+    # at the full chunk; halve until it fits and remember the size for later calls.
+    max_batch = min(max_batch, _FORWARD_BATCH_LIMIT[0])
     with torch.no_grad():
-        for start in range(0, lead_times.shape[0], max_batch):
+        start = 0
+        while start < lead_times.shape[0]:
             chunk = lead_times[start : start + max_batch]
             x_batch = x.expand(chunk.shape[0], -1)
             Dt = torch.tensor(chunk, dtype=torch.float32, device=device)
-            pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
+            try:
+                pred = model(x_batch, in_vars=None, out_vars=None, Dt=Dt)
+            except torch.OutOfMemoryError:
+                if chunk.shape[0] == 1:
+                    raise
+                max_batch = max(1, chunk.shape[0] // 2)
+                _FORWARD_BATCH_LIMIT[0] = max_batch
+            if max_batch < chunk.shape[0]:
+                torch.cuda.empty_cache()
+                continue
             # Quantile head returns [B, n_quantiles, n_bands]; take the median as
             # the point forecast. Point head returns [B, n_bands] (no-op).
             if pred.dim() == 3:
@@ -616,6 +633,7 @@ def _batched_forward(model, x, lead_times, n_bands, device, max_batch=256):
             out[start : start + chunk.shape[0]] = (
                 pred.reshape(chunk.shape[0], n_bands).detach().cpu().numpy()
             )
+            start += chunk.shape[0]
     return out
 
 
