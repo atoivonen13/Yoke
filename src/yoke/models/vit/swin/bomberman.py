@@ -823,6 +823,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         redshift_std: float = 0.00365,
         redshift_pivot_direct: bool = False,
         backbone_dt_in: float = 0.25,
+        vit_constant_shortcut: bool = True,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -996,6 +997,13 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 previous frame here, so the backbone image is fed twice as
                 ``[x_{t-1}, x_t]`` with ``lead_times = (backbone_dt_in, Dt)``.
                 Default 0.25 matches the pretraining ``dt_in``. Adds no parameters.
+            vit_constant_shortcut (bool): When True (default) and the backbone is a
+                :class:`LodeRunnerViT` with ``noise_scale == 0``, the conditioner
+                pseudo-image path runs the ViT on 2 tokens instead of all
+                ``H*W / (p_h*p_w)`` and computes the pooled statistics analytically
+                (see :meth:`_vit_constant_pool`). The full computation gives the
+                same result, so this changes speed and memory only. Not used by
+                the spatial-render path. Adds no parameters.
         """
         super().__init__()
 
@@ -1073,6 +1081,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
 
         self.backbone = backbone
         self.backbone_dt_in = backbone_dt_in
+        self.vit_constant_shortcut = vit_constant_shortcut
         self.context_len = context_len
         self.n_bands = n_bands
         self.image_size = image_size
@@ -1406,6 +1415,80 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             Dt = torch.stack([torch.full_like(Dt, self.backbone_dt_in), Dt], dim=1)
 
         return self.backbone(img, backbone_in_vars, backbone_out_vars, Dt)
+
+    def _use_vit_constant_pool(self) -> bool:
+        """Whether the pseudo-image path may take :meth:`_vit_constant_pool`."""
+        return (
+            self.vit_constant_shortcut
+            and isinstance(self.backbone, LodeRunnerViT)
+            # Noise injection makes the image non-constant.
+            and getattr(self.backbone, "noise_scale", 0.0) == 0.0
+        )
+
+    def _vit_constant_pool(
+        self, channel_vals: torch.Tensor, Dt: torch.Tensor
+    ) -> torch.Tensor:
+        """Pooled LodeRunnerViT output for the constant pseudo-image, from 2 tokens.
+
+        On a spatially constant image every patch embeds to the same token, and
+        the var/time embeds and the 2-frame fusion act per token, so every token
+        is identical. The ViT has no additive position embedding; RoPE only
+        rotates q and k, and attention over identical values returns that value
+        whatever the weights. So the tokens stay identical through every block.
+        The output image is then one ``(p_h, p_w)`` patch tiled over the grid, and
+        its mean / std / max over ``H x W`` follow from that one patch. The
+        result matches :meth:`_run_backbone` plus pooling, values and gradients,
+        at ~1/4480 of the cost for the 8960-token ViT.
+
+        Args:
+            channel_vals (torch.Tensor): Conditioner output, [B, waist].
+            Dt (torch.Tensor): Lead time, [B].
+
+        Returns:
+            torch.Tensor: Pooled backbone summary, [B, 3 * backbone_channels] for
+            ``pool_mode="meanstdmax"`` else [B, backbone_channels].
+        """
+        vit = self.backbone
+        plain = vit.backbone
+        B = channel_vals.shape[0]
+        H, W = self.image_size
+        p_h, p_w = vit.patch_size
+        in_vars = torch.arange(self.backbone_channels, device=channel_vals.device)
+
+        # Two patches, not one: AggVars squeezes its [B*L, 1, D] output, which
+        # would also drop the batch axis at B = L = 1.
+        img = channel_vals.view(B, self.waist, 1, 1).expand(
+            B, self.waist, 2 * p_h, p_w
+        )
+        Dt = Dt.reshape(-1)
+        if vit.num_input_frames == 2:
+            # Same as LodeRunnerViT.forward with lead_times = (backbone_dt_in, Dt).
+            dt_in = torch.full_like(Dt, self.backbone_dt_in)
+            tok_prev = vit._embed_frame(img, in_vars, dt_in + Dt)
+            tok_curr = vit._embed_frame(img, in_vars, Dt)
+            tokens = vit.temporal_fusion(torch.cat([tok_prev, tok_curr], dim=-1))
+        else:
+            tokens = vit._embed_frame(img, in_vars, Dt)  # [B, 2, D]
+
+        # Same as PlainViTBackbone.forward; any two token positions will do.
+        with torch.autocast(tokens.device.type, enabled=False):
+            rotary_emb = plain.rope(plain.centers[:2])
+        for block in plain.transformer_blocks:
+            tokens = block(tokens, image_rotary_emb=rotary_emb)
+        tokens = plain.norm_out(tokens)
+
+        # Unpatchify packs each token as (v, p_h, p_w); out_vars = all channels.
+        patch = vit.linear4unpatch(tokens[:, 0]).view(B, vit.max_vars, p_h * p_w)
+        patch = patch[:, : self.backbone_channels]  # [B, C, p_h * p_w]
+
+        mean = patch.mean(dim=2)
+        if self.pool_mode != "meanstdmax":
+            return mean
+        # The population variance of the tiled image equals the patch's;
+        # rescale to torch.std's default (correction=1) over all H * W pixels.
+        n_pix = H * W
+        std = (patch.var(dim=2, correction=0) * (n_pix / (n_pix - 1))).sqrt()
+        return torch.cat([mean, std, patch.amax(dim=2)], dim=1)
 
     def _encode_dt(self, Dt: torch.Tensor, batch_size: int) -> torch.Tensor:
         """Fourier-encode the lead time for the trainable path.
@@ -1885,6 +1968,10 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 )  # [B, 3 * waist]
             else:
                 pred_channel_vals = channel_vals  # [B, waist]
+        elif self._use_vit_constant_pool():
+            # Same pooled summary as the branch below, without materializing the
+            # 8960-token ViT pass (see _vit_constant_pool).
+            pred_channel_vals = self._vit_constant_pool(channel_vals, Dt)
         else:
             pseudo_img = channel_vals.view(
                 B,

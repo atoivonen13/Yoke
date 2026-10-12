@@ -71,9 +71,44 @@ def test_wrapper_forward_shape(num_input_frames: int) -> None:
     assert torch.isfinite(out).all()
 
 
+@pytest.mark.parametrize("num_input_frames", [1, 2])
+def test_vit_constant_shortcut_matches_full(num_input_frames: int) -> None:
+    """The 2-token shortcut equals the full ViT pass + pooling, values and grads."""
+    torch.manual_seed(0)
+    model = _make_wrapper(num_input_frames).double()
+    for p in model.parameters():
+        p.requires_grad_(True)
+    x, in_vars, Dt = _inputs()
+    x, Dt = x.double(), Dt.double()
+
+    outs, grads = [], []
+    for shortcut in (False, True):
+        model.vit_constant_shortcut = shortcut
+        model.zero_grad()
+        out = model(x, in_vars, in_vars, Dt)
+        out.pow(2).sum().backward()
+        outs.append(out.detach())
+        grads.append({n: p.grad.clone() for n, p in model.named_parameters()})
+
+    assert torch.allclose(outs[0], outs[1], atol=1e-10)
+    for name, g_full in grads[0].items():
+        assert torch.allclose(g_full, grads[1][name], atol=1e-10), name
+
+
+def test_vit_constant_shortcut_skips_backbone_forward() -> None:
+    """With the shortcut on (default) the pseudo-image never hits the full ViT."""
+    model = _make_wrapper(2)
+    calls = []
+    model.backbone.register_forward_pre_hook(lambda *_: calls.append(1))
+    x, in_vars, Dt = _inputs()
+    model(x, in_vars, in_vars, Dt)
+    assert calls == []
+
+
 def test_two_frame_backbone_inputs() -> None:
     """A 2-frame backbone gets [img, img] and lead_times (dt_in, Dt)."""
     model = _make_wrapper(2)
+    model.vit_constant_shortcut = False  # inspect the full backbone call
     x, in_vars, Dt = _inputs()
 
     seen = {}
