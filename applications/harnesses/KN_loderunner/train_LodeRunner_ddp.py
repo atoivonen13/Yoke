@@ -709,7 +709,10 @@ def main(args, rank, world_size, local_rank, device):
         BACKBONE_TAIL_LR_MULT = 0.0
     elif studyIDX == 201:  # = 200 with the whole ViT fine-tuned (as 143 vs 142)
         BACKBONE_FINETUNE_SCOPE = "full"
-    elif studyIDX == 202:  # = 200 with the ViT bypassed (as 144 vs 142)
+    elif studyIDX in (202, 205):  # = 200 with the ViT bypassed (as 144 vs 142)
+        # 205 = the no-backbone leg of the 203/204 event-token triplet. The
+        # token readout is zero-init, so 203/204 start AT this model; 205 is a
+        # same-config re-seed of 202.
         BYPASS_BACKBONE = True
         BACKBONE_TAIL_LR_MULT = 0.0
 
