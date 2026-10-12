@@ -143,6 +143,11 @@ def vit_backbone_scope_modules(model: torch.nn.Module, scope: str) -> list:
         blocks, and ``linear4unpatch``. ``backbone.norm_out`` is non-affine and the
         RoPE holds only buffers, so this covers the whole pretrained backbone.
 
+    On the event-token path (``model.event_tokens``, Study 203) only the
+    transformer blocks run (the image embed stack and ``linear4unpatch`` are
+    unused), so ``"decoder"`` is the last ``VIT_DECODER_BLOCKS`` blocks, ``"full"``
+    is all blocks, and ``"tail"`` is rejected (it has nothing that runs).
+
     Args:
         model (torch.nn.Module): A ScalarTemporalConditionedLodeRunner_9band whose
             ``.backbone`` is a LodeRunnerViT.
@@ -153,6 +158,15 @@ def vit_backbone_scope_modules(model: torch.nn.Module, scope: str) -> list:
     """
     vit = model.backbone
     blocks = list(vit.backbone.transformer_blocks)
+    if getattr(model, "event_tokens", False):
+        if scope == "decoder":
+            return blocks[-VIT_DECODER_BLOCKS:]
+        if scope == "full":
+            return blocks
+        raise ValueError(
+            "With event_tokens=True, backbone_finetune_scope must be 'decoder' "
+            f"or 'full' (linear4unpatch does not run), got {scope!r}."
+        )
     if scope == "tail":
         return [vit.linear4unpatch]
     if scope == "decoder":
@@ -237,6 +251,9 @@ def build_finetune_optimizer(
         trainable_mods = [model.conditioner, model.ref_head, model.sed_head]
     else:
         trainable_mods = [model.conditioner, model.output_head]
+    # Study 203: the token embed / band queries / readout around the ViT blocks.
+    if getattr(model, "event_tokens", False):
+        trainable_mods.append(model.event_token_io)
 
     head_params = []
     for mod in trainable_mods:
@@ -977,6 +994,10 @@ def load_direct_loderunner_checkpoint_9band(
         color_ztf_tie_twins=checkpoint_data.get("color_ztf_tie_twins", False),
         # Only read by a 2-frame LodeRunnerViT backbone; adds no params.
         backbone_dt_in=checkpoint_data.get("backbone_dt_in", 0.25),
+        # False for pre-203 checkpoints (no key). True adds event_token_io and
+        # widens the head input, so it MUST match training for strict load.
+        event_tokens=checkpoint_data.get("event_tokens", False),
+        event_token_readout=checkpoint_data.get("event_token_readout", 8),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]
