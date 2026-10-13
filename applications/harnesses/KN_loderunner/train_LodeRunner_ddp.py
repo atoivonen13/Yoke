@@ -743,24 +743,29 @@ def main(args, rank, world_size, local_rank, device):
     # not a resume of 206: the CSV row sets TERMINAL_STEPS = 15000 (= 300 epochs
     # x 50 batches), so the cosine anneal reaches MIN_FRACTION on the last epoch
     # instead of stopping part-way down (206 ended at 0.24x anchor).
+    # Study 209: = 207 (random-init ViT, event tokens, full scope) run to 300
+    # epochs with 208's schedule (TERMINAL_STEPS = 15000). From-scratch blocks
+    # may need more steps than pretrained ones, so 207 @100 alone could
+    # under-credit random init. Read vs 208 (the same schedule with pretrained
+    # weights, decoder scope).
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208):
+    if studyIDX in (203, 204, 206, 207, 208, 209):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207):
+    if studyIDX in (204, 207, 209):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
-    if studyIDX == 207:
+    if studyIDX in (207, 209):
         VIT_RANDOM_INIT = True
-    if studyIDX == 208:
+    if studyIDX in (208, 209):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
         if terminal_steps != total_epochs * train_batches:
             raise ValueError(
-                f"Study 208 expects TERMINAL_STEPS = {total_epochs} x "
+                f"Study {studyIDX} expects TERMINAL_STEPS = {total_epochs} x "
                 f"{train_batches} = {total_epochs * train_batches} so the anneal "
                 f"spans the whole run; got {terminal_steps}."
             )
