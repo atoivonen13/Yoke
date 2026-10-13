@@ -738,10 +738,15 @@ def main(args, rank, world_size, local_rank, device):
     # from-scratch transformer LR), so weights are the only change vs 204. Read
     # it vs 203/204 (1.1529/1.1849). If it ties, the pretraining is not the
     # cause; if it regresses, an LR-mult follow-up separates LR from pretraining.
+    # Study 208: = 206 (event tokens, decoder scope, mult 0.1) run to 300 epochs,
+    # since 206's val loss was still at its minimum at epoch 140-145. A fresh run,
+    # not a resume of 206: the CSV row sets TERMINAL_STEPS = 15000 (= 300 epochs
+    # x 50 batches), so the cosine anneal reaches MIN_FRACTION on the last epoch
+    # instead of stopping part-way down (206 ended at 0.24x anchor).
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207):
+    if studyIDX in (203, 204, 206, 207, 208):
         EVENT_TOKENS = True
     if studyIDX in (204, 207):
         BACKBONE_FINETUNE_SCOPE = "full"
@@ -749,6 +754,16 @@ def main(args, rank, world_size, local_rank, device):
         total_epochs = 150
     if studyIDX == 207:
         VIT_RANDOM_INIT = True
+    if studyIDX == 208:
+        total_epochs = 300
+        # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
+        # anneal short (or leave it flat past the end).
+        if terminal_steps != total_epochs * train_batches:
+            raise ValueError(
+                f"Study 208 expects TERMINAL_STEPS = {total_epochs} x "
+                f"{train_batches} = {total_epochs * train_batches} so the anneal "
+                f"spans the whole run; got {terminal_steps}."
+            )
     # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
     # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
