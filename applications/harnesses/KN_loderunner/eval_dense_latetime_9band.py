@@ -30,6 +30,17 @@ Normalization uses the TRAIN-ONLY realistic stats the model was trained with
 (``kilonova_9band_norm_stats_trainonly.npz`` by default) -- the exact encoding
 the model saw. This is a read-only diagnostic: it writes plots and a CSV and
 never trains.
+
+Checkpoint selection (``--sweep_epochs``): choosing the epoch from the TEST
+numbers leaks the test set into the reported score. The sweep scores each listed
+checkpoint on the VALIDATION split (``--calibrate_filelist``) instead and writes
+one row per checkpoint to ``<outdir>/val_sweep/checkpoint_sweep_val.csv``. Each
+row has the dense and uniform RMSE/bias, the per-band uniform RMSE/bias, the
+i/z/y bias, the beyond-dense-depth RMSE/bias, and the raw and cross-fitted
+calibrated coverage. The sweep picks the best row by ``--select_metric`` and only
+then runs the calibration and test eval, once, on that checkpoint::
+
+    python eval_dense_latetime_9band.py --study 208 --sweep_epochs 10:300:10
 """
 
 import argparse
@@ -89,6 +100,12 @@ IO_PREFETCH = 32
 # the same checkpoint and settings reloads them instead of re-evaluating.
 EVAL_META_NAME = "eval_meta.json"
 BAND_INDEX = {name: b for b, name in enumerate(BAND_NAMES)}
+# Rubin red bands whose pooled bias the checkpoint sweep tracks: from epoch 95
+# to 145, study 206's average RMSE fell while these drifted faint (+0.10..+0.14).
+RED_BANDS = ("i", "z", "y")
+# Validation metrics (lower is better) --select_metric can rank checkpoints by.
+SELECT_METRICS = ("uniform_rmse", "dense_rmse")
+SWEEP_CSV_NAME = "checkpoint_sweep_val.csv"
 
 
 def study_tag(study: int) -> str:
@@ -1118,6 +1135,34 @@ def get_args():
         "PROBE_DENSE_CONTEXT=True, so train and eval both feed dense context and "
         "the number is the true dense-context ceiling. NOT the deployable path.",
     )
+    p.add_argument(
+        "--sweep_epochs",
+        type=str,
+        default=None,
+        help="Select the checkpoint on the VALIDATION split instead of by val "
+        "loss. Each listed epoch's checkpoint is scored on --calibrate_filelist "
+        "and gets a row in <outdir>/val_sweep/checkpoint_sweep_val.csv. The best "
+        "by --select_metric then gets the usual calibration + test eval, and no "
+        "other checkpoint is scored on test. Spec: 'start:stop[:step]' (stop "
+        "inclusive), a comma list, or both, e.g. '10:300:10' or '95,145,150:300:"
+        "50'. Epochs with no checkpoint on disk are skipped. Overrides --epoch / "
+        "--exact_epoch; not allowed with --ckpt or --rollout. --max_objects also "
+        "caps the sweep. Each checkpoint's val results are cached in "
+        "val_sweep/epochNNNN, so a re-run only scores new checkpoints.",
+    )
+    p.add_argument(
+        "--select_metric",
+        choices=SELECT_METRICS,
+        default="uniform_rmse",
+        help="Validation metric (lower is better) that --sweep_epochs selects "
+        "on. 'uniform_rmse' (default) is the study headline; 'dense_rmse' is the "
+        "survey-depth-limited score.",
+    )
+    p.add_argument(
+        "--sweep_only",
+        action="store_true",
+        help="Stop after the --sweep_epochs table and selection (no test eval).",
+    )
     return p.parse_args()
 
 
@@ -1565,6 +1610,11 @@ def _concat_uniform(per_object):
     return out
 
 
+def dense_depth(dense_true_band: np.ndarray) -> float:
+    """One band's dense depth: the 99th percentile of its scored dense truth."""
+    return float(np.percentile(dense_true_band, 99))
+
+
 def report_uniform(uni, dense_bands, dense_true, split_label):
     """Print the uniform-truth score, split at each band's dense-truth depth.
 
@@ -1602,7 +1652,7 @@ def report_uniform(uni, dense_bands, dense_true, split_label):
         dm = dense_bands == b
         if not np.any(m) or not np.any(dm):
             continue
-        depth = float(np.percentile(dense_true[dm], 99))
+        depth = dense_depth(dense_true[dm])
         beyond = m & (uni["true_mag"] > depth)
         within = m & ~beyond
         print(f"  {BAND_NAMES[b]:>5}{depth:>7.2f}{m.sum():>8d}{_stats(resid[m])}"
@@ -1698,72 +1748,26 @@ def fit_calibration_from_scored(scored, interval, out_path, split_signature=None
     return load_interval_calibration(out_path)
 
 
-def main():
-    """Run the dense late-time evaluation.
+def load_eval_inputs(args: argparse.Namespace, device: torch.device) -> dict:
+    """Load ``args.ckpt`` and the data it is scored on, as ``run_split`` kwargs.
 
-    By default the whole post-training pass runs in one go on ONE checkpoint:
-    pick it (best val loss unless --exact_epoch / --ckpt), eval the calibration
-    (validation) split, fit per-band interval scales on it, then eval + plot the
-    test split with the calibrated band. Steps already done for the same
-    checkpoint and settings are loaded from disk (``--recompute`` redoes them).
+    Globs and the norm-stats path left unset default to the checkpoint's (and
+    are written back to ``args``, so a sweep scores every checkpoint on the
+    same files).
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args; ``args.ckpt`` must be set.
+        device (torch.device): Device the model runs on.
+
+    Returns:
+        dict: ``args``, ``model``, ``device``, ``means``, ``stds``,
+        ``context_window_days``, ``max_context_len``, ``real_map``,
+        ``dense_map`` and ``uniform_map``.
     """
-    args = get_args()
-    tag = study_tag(args.study)
-    if args.ckpt is None:
-        run_dir = f"runs/study_{tag}"
-        fixed_ckpt = os.path.join(
-            run_dir, f"study{tag}_modelState_epoch{args.epoch:04d}.pth"
-        )
-        if args.exact_epoch:
-            args.ckpt = fixed_ckpt
-            print(f"Using exact epoch {args.epoch}: {args.ckpt}")
-        else:
-            best_epoch, best_loss, best_path = resolve_best_checkpoint(
-                run_dir, tag, args.epoch
-            )
-            if best_path is not None:
-                args.ckpt = best_path
-                print(
-                    f"Best val-loss checkpoint at or below epoch {args.epoch}: "
-                    f"epoch {best_epoch} (median val loss {best_loss:.6f}) -> "
-                    f"{args.ckpt}"
-                )
-            else:
-                # No usable val records (e.g. records not co-located, or an old
-                # run): fall back to the literal epoch so the eval still runs.
-                args.ckpt = fixed_ckpt
-                print(
-                    f"No val records found under {run_dir}; falling back to the "
-                    f"exact epoch {args.epoch}: {args.ckpt}"
-                )
-    if args.outdir is None:
-        args.outdir = f"runs/study_{tag}/dense_latetime_eval_9band"
-    os.makedirs(args.outdir, exist_ok=True)
-
-    if not args.test_filelist:
-        args.test_filelist = None
-    if args.rollout and args.interval_calibration is not None:
-        raise ValueError("--interval_calibration applies to DIRECT mode only.")
-    # One-shot calibration is the default; a reused JSON, --no_calibration, the
-    # rollout path (no quantile band), or an unrestricted test set turn it off.
-    if (args.no_calibration or args.interval_calibration is not None
-            or args.rollout or args.test_filelist is None
-            or not args.calibrate_filelist):
-        args.calibrate_filelist = None
-    elif not os.path.exists(args.calibrate_filelist):
-        raise FileNotFoundError(
-            f"--calibrate_filelist {args.calibrate_filelist} not found (pass "
-            "--no_calibration to skip calibration)."
-        )
-    print("Calibration split: "
-          + (args.calibrate_filelist or "none (raw quantile band)"))
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     (
         model,
-        context_len,
-        n_bands,
+        _context_len,
+        _n_bands,
         context_window_days,
         max_context_len,
     ) = load_9band_model(args.ckpt, device, use_ema=getattr(args, "use_ema", False))
@@ -1805,20 +1809,399 @@ def main():
     if uniform_map:
         print(f"Uniform-grid overlay files: {len(uniform_map)}")
     print(f"Realistic files: {len(real_map)}; dense files: {len(dense_map)}")
+
+    return dict(
+        args=args, model=model, device=device, means=means, stds=stds,
+        context_window_days=context_window_days, max_context_len=max_context_len,
+        real_map=real_map, dense_map=dense_map, uniform_map=uniform_map,
+    )
+
+
+def parse_epoch_spec(spec: str) -> list[int]:
+    """Epochs listed by a ``--sweep_epochs`` spec, sorted and de-duplicated.
+
+    Args:
+        spec (str): Comma-separated items, each an epoch (``"95"``) or an
+            inclusive range ``"start:stop"`` / ``"start:stop:step"``.
+
+    Returns:
+        list[int]: The epochs, ascending.
+    """
+    epochs = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            epochs.add(int(part))
+            continue
+        fields = [int(x) for x in part.split(":")]
+        if len(fields) not in (2, 3) or (len(fields) == 3 and fields[2] <= 0):
+            raise ValueError(f"Bad --sweep_epochs range {part!r}; use start:stop:step.")
+        step = fields[2] if len(fields) == 3 else 1
+        epochs.update(range(fields[0], fields[1] + 1, step))
+    if not epochs:
+        raise ValueError(f"--sweep_epochs {spec!r} lists no epochs.")
+    return sorted(epochs)
+
+
+def _rmse(r: np.ndarray) -> float:
+    """Root mean square of ``r`` (NaN when empty)."""
+    return float(np.sqrt(np.mean(r**2))) if r.size else float("nan")
+
+
+def _mean(r: np.ndarray) -> float:
+    """Mean of ``r`` (NaN when empty)."""
+    return float(np.mean(r)) if r.size else float("nan")
+
+
+def _crossfit_coverage(uni: dict, interval: float) -> float:
+    """Calibrated uniform-truth coverage with the scales fit out of sample.
+
+    In-sample calibrated coverage is ~``interval`` by construction, so it cannot
+    rank checkpoints. Here the val objects are split into two folds by stem;
+    each fold is scored with per-band scales fit on the other fold (the same
+    ``fit_scales`` the one-shot calibration uses).
+
+    Args:
+        uni (dict): Flat uniform-truth arrays from ``_concat_uniform``.
+        interval (float): Target central coverage.
+
+    Returns:
+        float: Pooled coverage over both folds.
+    """
+    from calibrate_intervals import apply_scales, fit_scales
+
+    fold_of = {s: i % 2 for i, s in enumerate(sorted(set(uni["stem"])))}
+    fold = np.array([fold_of[s] for s in uni["stem"]])
+    names = np.array(BAND_NAMES, dtype=object)[uni["band"]]
+    med = uni["pred_mag"].astype(np.float64)
+    low = uni["pred_low"].astype(np.float64)
+    high = uni["pred_high"].astype(np.float64)
+    true = uni["true_mag"].astype(np.float64)
+    covered = np.zeros(true.shape[0], dtype=bool)
+    for k in (0, 1):
+        fit, ev = fold != k, fold == k
+        if not np.any(fit) or not np.any(ev):
+            return float("nan")
+        scales = fit_scales({"band": names[fit], "med": med[fit], "low": low[fit],
+                             "high": high[fit], "true": true[fit]}, interval)
+        ones = {"k_lo": 1.0, "k_hi": 1.0}
+        k_lo = np.array([scales.get(n, ones)["k_lo"] for n in names[ev]])
+        k_hi = np.array([scales.get(n, ones)["k_hi"] for n in names[ev]])
+        lo, hi = apply_scales(med[ev], low[ev], high[ev], k_lo, k_hi)
+        covered[ev] = (true[ev] >= lo) & (true[ev] <= hi)
+    return float(np.mean(covered))
+
+
+def checkpoint_metrics(scored: list, uni: dict | None, interval: float) -> dict:
+    """Scalar val-split metrics of one checkpoint, for the sweep table.
+
+    Residuals are pred - true (+ = forecast too faint). "Beyond depth" pools
+    the uniform points fainter than their band's dense depth (``dense_depth``,
+    as in the ``report_uniform`` table): the region the dense score cannot see,
+    where a forecast that stops fading shows up as a bright bias.
+
+    Args:
+        scored (list): Dense-truth scored points from ``run_split``.
+        uni (dict | None): Flat uniform-truth arrays, or None when the split has
+            no uniform files (the uniform columns are then NaN).
+        interval (float): Target coverage of the cross-fitted calibrated band.
+
+    Returns:
+        dict: Metric name -> float. The same keys whether or not ``uni`` is
+        given, so every sweep row has the same columns.
+    """
+    nan = float("nan")
+    resid = np.asarray([s["residual_mag"] for s in scored])
+    bands = np.asarray([s["band"] for s in scored])
+    dense_true = np.asarray([s["true_mag"] for s in scored])
+    red = np.isin(bands, [BAND_INDEX[b] for b in RED_BANDS])
+    row = {
+        "n_objects": len({s["stem"] for s in scored}),
+        "n_dense": int(resid.shape[0]),
+        "dense_rmse": _rmse(resid),
+        "dense_bias": _mean(resid),
+        "dense_izy_bias": _mean(resid[red]),
+    }
+    uniform_keys = ["n_uniform", "uniform_rmse", "uniform_bias", "uniform_izy_bias",
+                    "within_rmse", "within_bias", "beyond_frac", "beyond_rmse",
+                    "beyond_bias", "cov_raw_uniform", "cov_cal_uniform_crossfit"]
+    for name in BAND_NAMES:
+        uniform_keys += [f"uniform_rmse_{name}", f"uniform_bias_{name}",
+                         f"beyond_rmse_{name}", f"beyond_bias_{name}"]
+    row.update(dict.fromkeys(uniform_keys, nan))
+    if uni is None:
+        return row
+
+    u_resid = (uni["pred_mag"] - uni["true_mag"]).astype(np.float64)
+    beyond = np.zeros(u_resid.shape[0], dtype=bool)
+    has_depth = np.zeros(u_resid.shape[0], dtype=bool)
+    for b, name in enumerate(BAND_NAMES):
+        m = uni["band"] == b
+        dm = bands == b
+        row[f"uniform_rmse_{name}"] = _rmse(u_resid[m])
+        row[f"uniform_bias_{name}"] = _mean(u_resid[m])
+        if not np.any(m) or not np.any(dm):
+            continue
+        has_depth |= m
+        mb = m & (uni["true_mag"] > dense_depth(dense_true[dm]))
+        beyond |= mb
+        row[f"beyond_rmse_{name}"] = _rmse(u_resid[mb])
+        row[f"beyond_bias_{name}"] = _mean(u_resid[mb])
+    within = has_depth & ~beyond
+    u_red = np.isin(uni["band"], [BAND_INDEX[b] for b in RED_BANDS])
+    row.update({
+        "n_uniform": int(u_resid.shape[0]),
+        "uniform_rmse": _rmse(u_resid),
+        "uniform_bias": _mean(u_resid),
+        "uniform_izy_bias": _mean(u_resid[u_red]),
+        "within_rmse": _rmse(u_resid[within]),
+        "within_bias": _mean(u_resid[within]),
+        "beyond_frac": (float(beyond.sum() / has_depth.sum())
+                        if has_depth.any() else nan),
+        "beyond_rmse": _rmse(u_resid[beyond]),
+        "beyond_bias": _mean(u_resid[beyond]),
+    })
+    # A point head has no band to cover with; leave the coverage NaN.
+    if "pred_low" in scored[0]:
+        row["cov_raw_uniform"] = float(np.mean(
+            (uni["true_mag"] >= uni["pred_low"])
+            & (uni["true_mag"] <= uni["pred_high"])
+        ))
+        row["cov_cal_uniform_crossfit"] = _crossfit_coverage(uni, interval)
+    return row
+
+
+def write_sweep_csv(rows: list, csv_path: str) -> None:
+    """Write the per-checkpoint sweep rows (rewritten after every checkpoint)."""
+    cols = list(rows[0])
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: (f"{v:.5f}" if isinstance(v, float) else v)
+                        for k, v in r.items()})
+
+
+def print_sweep_table(rows: list, best_epoch: int, metric: str) -> None:
+    """Print the headline sweep columns, marking the selected checkpoint."""
+    cols = [("val_loss", "val_loss", "10.4f"), ("dense_rmse", "dense", "10.4f"),
+            ("uniform_rmse", "uniform", "10.4f"),
+            ("uniform_bias", "u_bias", "+10.3f"),
+            ("uniform_izy_bias", "izy_bias", "+10.3f"),
+            ("beyond_rmse", "beyond", "10.3f"), ("beyond_bias", "b_bias", "+10.3f"),
+            ("cov_raw_uniform", "cov_raw", "10.3f"),
+            ("cov_cal_uniform_crossfit", "cov_cal", "10.3f")]
+    print(f"\nValidation-split checkpoint sweep (selected on {metric}, * = "
+          "selected; uniform truth unless noted; + = forecast too faint; "
+          "beyond = fainter than the band's dense depth; cov_cal cross-fitted)")
+    print(f"  {'epoch':>6}" + "".join(f"{h:>10}" for _, h, _ in cols))
+    for r in rows:
+        mark = "*" if r["epoch"] == best_epoch else " "
+        cells = "".join(
+            f"{'-':>10}" if np.isnan(r[k]) else f"{r[k]:{fmt}}"
+            for k, _, fmt in cols
+        )
+        print(f" {mark}{r['epoch']:>6}{cells}")
+
+
+def sweep_checkpoints(
+    args: argparse.Namespace,
+    device: torch.device,
+    run_dir: str,
+    tag: str,
+    val_filelist: str | None,
+    test_stems: set | None,
+) -> dict:
+    """Score each ``--sweep_epochs`` checkpoint on the validation split.
+
+    Writes ``<outdir>/val_sweep/checkpoint_sweep_val.csv`` (one row per
+    checkpoint, from ``checkpoint_metrics``) and ``selection.json``, prints the
+    table, and returns the row with the lowest ``--select_metric``. Nothing is
+    scored on the test split here.
+
+    Args:
+        args (argparse.Namespace): Parsed CLI args. ``args.ckpt`` is set to each
+            checkpoint in turn (the caller sets the selected one afterwards).
+        device (torch.device): Device the models run on.
+        run_dir (str): Directory holding the per-epoch checkpoints and val
+            record CSVs.
+        tag (str): Zero-padded study id.
+        val_filelist (str | None): Validation-split stem list (the
+            ``--calibrate_filelist`` as given, before calibration is resolved).
+        test_stems (set | None): Test-split stems, to check the validation
+            split is disjoint from them.
+
+    Returns:
+        dict: The selected row (``epoch``, ``ckpt`` and the metrics).
+    """
+    if not val_filelist or not os.path.exists(val_filelist):
+        raise FileNotFoundError(
+            "--sweep_epochs scores the validation split given by "
+            f"--calibrate_filelist, which was not found: {val_filelist!r}"
+        )
+    val_stems = _read_stems(val_filelist)
+    if test_stems is not None and val_stems & test_stems:
+        raise ValueError(
+            f"{len(val_stems & test_stems)} objects are in both "
+            "--calibrate_filelist and --test_filelist; the sweep must select on "
+            "objects disjoint from test."
+        )
+    metric = args.select_metric
+    epochs = parse_epoch_spec(args.sweep_epochs)
+    val_loss = _epoch_median_val_losses(
+        os.path.join(run_dir, f"validation_study{tag}_epoch*.csv")
+    )
+    sweep_dir = os.path.join(args.outdir, "val_sweep")
+    os.makedirs(sweep_dir, exist_ok=True)
+    csv_path = os.path.join(sweep_dir, SWEEP_CSV_NAME)
+    print(f"Checkpoint sweep on the validation split {val_filelist}: "
+          f"epochs {epochs[0]}..{epochs[-1]} ({len(epochs)} listed), selecting on "
+          f"{metric}.")
+
+    rows = []
+    for ep in epochs:
+        ckpt = os.path.join(run_dir, f"study{tag}_modelState_epoch{ep:04d}.pth")
+        if not os.path.exists(ckpt):
+            print(f"[sweep] epoch {ep}: no checkpoint at {ckpt}; skipping.")
+            continue
+        print(f"\n[sweep] epoch {ep}: {ckpt}")
+        args.ckpt = ckpt
+        inputs = load_eval_inputs(args, device)
+        result = run_split(
+            **inputs, split_stems=val_stems,
+            outdir=os.path.join(sweep_dir, f"epoch{ep:04d}"),
+            split_label=f"val epoch {ep}", n_plots=0, score_uniform=True,
+        )
+        # Free this checkpoint before the next one loads.
+        del inputs
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        if result is None:
+            continue
+        scored, uni = result
+        rows.append({"epoch": ep, "ckpt": ckpt,
+                     "val_loss": float(val_loss.get(ep, float("nan"))),
+                     **checkpoint_metrics(scored, uni, args.calibration_interval)})
+        write_sweep_csv(rows, csv_path)
+
+    if not rows:
+        raise ValueError(f"No --sweep_epochs checkpoint scored any point in {run_dir}.")
+    ranked = [r for r in rows if not np.isnan(r[metric])]
+    if not ranked:
+        raise ValueError(
+            f"--select_metric {metric} is NaN for every checkpoint (no uniform "
+            "files?); use --select_metric dense_rmse."
+        )
+    best = min(ranked, key=lambda r: r[metric])
+    print_sweep_table(rows, best["epoch"], metric)
+    print(f"\nSelected epoch {best['epoch']} ({metric} {best[metric]:.4f} on the "
+          f"validation split): {best['ckpt']}")
+    print(f"Wrote {csv_path}")
+    if best["epoch"] == rows[-1]["epoch"]:
+        print("Note: the selected checkpoint is the LAST one swept, so the val "
+              "metric may still be improving.")
+    with open(os.path.join(sweep_dir, "selection.json"), "w") as fh:
+        json.dump({"select_metric": metric, "epoch": best["epoch"],
+                   "value": best[metric], "ckpt": best["ckpt"],
+                   "validation_filelist": val_filelist,
+                   "swept_epochs": [r["epoch"] for r in rows]}, fh, indent=2)
+    return best
+
+
+def main():
+    """Run the dense late-time evaluation.
+
+    By default the whole post-training pass runs in one go on ONE checkpoint:
+    pick it (best val loss unless --exact_epoch / --ckpt), eval the calibration
+    (validation) split, fit per-band interval scales on it, then eval + plot the
+    test split with the calibrated band. With --sweep_epochs the checkpoint is
+    instead the best of the listed epochs on validation-split metrics
+    (``sweep_checkpoints``). Steps already done for the same checkpoint and
+    settings are loaded from disk (``--recompute`` redoes them).
+    """
+    args = get_args()
+    tag = study_tag(args.study)
+    run_dir = f"runs/study_{tag}"
+    if args.sweep_epochs is not None:
+        if args.ckpt is not None:
+            raise ValueError("--sweep_epochs selects the checkpoint; drop --ckpt.")
+        if args.rollout:
+            raise ValueError("--sweep_epochs scores the DIRECT forecast only.")
+    elif args.ckpt is None:
+        fixed_ckpt = os.path.join(
+            run_dir, f"study{tag}_modelState_epoch{args.epoch:04d}.pth"
+        )
+        if args.exact_epoch:
+            args.ckpt = fixed_ckpt
+            print(f"Using exact epoch {args.epoch}: {args.ckpt}")
+        else:
+            best_epoch, best_loss, best_path = resolve_best_checkpoint(
+                run_dir, tag, args.epoch
+            )
+            if best_path is not None:
+                args.ckpt = best_path
+                print(
+                    f"Best val-loss checkpoint at or below epoch {args.epoch}: "
+                    f"epoch {best_epoch} (median val loss {best_loss:.6f}) -> "
+                    f"{args.ckpt}"
+                )
+            else:
+                # No usable val records (e.g. records not co-located, or an old
+                # run): fall back to the literal epoch so the eval still runs.
+                args.ckpt = fixed_ckpt
+                print(
+                    f"No val records found under {run_dir}; falling back to the "
+                    f"exact epoch {args.epoch}: {args.ckpt}"
+                )
+    if args.outdir is None:
+        args.outdir = f"runs/study_{tag}/dense_latetime_eval_9band"
+    os.makedirs(args.outdir, exist_ok=True)
+
+    if not args.test_filelist:
+        args.test_filelist = None
+    # The sweep always selects on the validation split, even when the interval
+    # calibration below is switched off.
+    val_filelist = args.calibrate_filelist
+    if args.rollout and args.interval_calibration is not None:
+        raise ValueError("--interval_calibration applies to DIRECT mode only.")
+    # One-shot calibration is the default; a reused JSON, --no_calibration, the
+    # rollout path (no quantile band), or an unrestricted test set turn it off.
+    if (args.no_calibration or args.interval_calibration is not None
+            or args.rollout or args.test_filelist is None
+            or not args.calibrate_filelist):
+        args.calibrate_filelist = None
+    elif not os.path.exists(args.calibrate_filelist):
+        raise FileNotFoundError(
+            f"--calibrate_filelist {args.calibrate_filelist} not found (pass "
+            "--no_calibration to skip calibration)."
+        )
+    print("Calibration split: "
+          + (args.calibrate_filelist or "none (raw quantile band)"))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    test_stems = (_read_stems(args.test_filelist)
+                  if args.test_filelist is not None else None)
+
+    if args.sweep_epochs is not None:
+        best = sweep_checkpoints(args, device, run_dir, tag, val_filelist,
+                                 test_stems)
+        args.ckpt = best["ckpt"]
+        if args.sweep_only:
+            return
+        print(f"\nRunning the calibration + test eval on the selected epoch "
+              f"{best['epoch']} only.")
+
+    common = load_eval_inputs(args, device)
+    real_map, dense_map = common["real_map"], common["dense_map"]
+    uniform_map = common["uniform_map"]
     if args.probe_dense_context:
         print(
             "PROBE_DENSE_CONTEXT: model CONTEXT drawn from the DENSE set "
             f"(truncated at {args.late_time_cutoff_days} d), scored against dense "
             "truth. Dense-context CEILING probe -- NOT the deployable path."
         )
-
-    common = dict(
-        args=args, model=model, device=device, means=means, stds=stds,
-        context_window_days=context_window_days, max_context_len=max_context_len,
-        real_map=real_map, dense_map=dense_map, uniform_map=uniform_map,
-    )
-    test_stems = (_read_stems(args.test_filelist)
-                  if args.test_filelist is not None else None)
 
     interval_calibration = None
     if args.calibrate_filelist is not None:
