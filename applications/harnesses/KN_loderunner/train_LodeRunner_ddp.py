@@ -731,14 +731,24 @@ def main(args, rank, world_size, local_rank, device):
     # TERMINAL_STEPS stays 10000 (= 200 epochs x 50 batches), so epochs 1-100 get
     # the same LR as 203: the epoch-100 checkpoint is a pure re-seed, and epochs
     # 101-150 continue the same anneal (LR 0.57x anchor at epoch 100 -> 0.24x).
+    # Study 207: = 204 with the ViT at RANDOM init (the checkpoint is not loaded).
+    # Separates "the pretrained hydro attention helps" from "any attention over
+    # event tokens helps". Full scope, because frozen random blocks would only
+    # test random features. The backbone LR mult stays 0.1 (2e-4, a normal
+    # from-scratch transformer LR), so weights are the only change vs 204. Read
+    # it vs 203/204 (1.1529/1.1849). If it ties, the pretraining is not the
+    # cause; if it regresses, an LR-mult follow-up separates LR from pretraining.
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
-    if studyIDX in (203, 204, 206):
+    VIT_RANDOM_INIT = False
+    if studyIDX in (203, 204, 206, 207):
         EVENT_TOKENS = True
-    if studyIDX == 204:
+    if studyIDX in (204, 207):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
+    if studyIDX == 207:
+        VIT_RANDOM_INIT = True
     # Study 200: = 142 (decoder scope, mult 0.1) with the LodeRunnerViT backbone.
     # For the ViT, "decoder" = the last 2 of 6 transformer blocks + linear4unpatch;
     # "full" = patch/var/agg/time embeds, temporal_fusion, all 6 blocks and
@@ -749,7 +759,8 @@ def main(args, rank, world_size, local_rank, device):
             f"Study {studyIDX}: BYPASS_BACKBONE={BYPASS_BACKBONE}, "
             f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
             f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}, "
-            f"EVENT_TOKENS={EVENT_TOKENS}, total_epochs={total_epochs}",
+            f"EVENT_TOKENS={EVENT_TOKENS}, VIT_RANDOM_INIT={VIT_RANDOM_INIT}, "
+            f"total_epochs={total_epochs}",
             flush=True,
         )
 
@@ -1281,29 +1292,39 @@ def main(args, rank, world_size, local_rank, device):
             model = LodeRunnerViT(**model_args)
             model.to(device)
 
-            # The EMA export is a bare state_dict; also accept a wrapped
-            # {"model_state_dict": ...} checkpoint of the same model.
-            checkpoint_data = torch.load(
-                VIT_PRETRAINED_CHECKPOINT,
-                map_location=device,
-                weights_only=True,
-            )
-            state_dict = checkpoint_data.get("model_state_dict", checkpoint_data)
+            if VIT_RANDOM_INIT:
+                # Study 207: keep the constructor's random init (same arch).
+                missing_keys, unexpected_keys = [], []
+                if rank == 0:
+                    print("VIT_RANDOM_INIT: LodeRunnerViT left at random init; "
+                          "pretrained weights NOT loaded.")
+            else:
+                # The EMA export is a bare state_dict; also accept a wrapped
+                # {"model_state_dict": ...} checkpoint of the same model.
+                checkpoint_data = torch.load(
+                    VIT_PRETRAINED_CHECKPOINT,
+                    map_location=device,
+                    weights_only=True,
+                )
+                state_dict = checkpoint_data.get("model_state_dict", checkpoint_data)
 
-            if all(k.startswith("module.") for k in state_dict.keys()):
-                state_dict = {
-                    k.replace("module.", "", 1): v for k, v in state_dict.items()
-                }
+                if all(k.startswith("module.") for k in state_dict.keys()):
+                    state_dict = {
+                        k.replace("module.", "", 1): v for k, v in state_dict.items()
+                    }
 
-            # Strict: the ViT config is fixed by this checkpoint, so a mismatch
-            # is a config error and must not silently leave layers at random
-            # init. (The RoPE centers/scale are non-persistent buffers.)
-            missing_keys, unexpected_keys = model.load_state_dict(
-                state_dict,
-                strict=True,
-            )
-            if rank == 0:
-                print(f"Loaded LodeRunnerViT weights: {VIT_PRETRAINED_CHECKPOINT}")
+                # Strict: the ViT config is fixed by this checkpoint, so a
+                # mismatch is a config error and must not silently leave layers
+                # at random init. (The RoPE centers/scale are non-persistent
+                # buffers.)
+                missing_keys, unexpected_keys = model.load_state_dict(
+                    state_dict,
+                    strict=True,
+                )
+                if rank == 0:
+                    print(
+                        f"Loaded LodeRunnerViT weights: {VIT_PRETRAINED_CHECKPOINT}"
+                    )
         else:
             model = LodeRunner(**model_args)
             model.to(device)
@@ -1327,7 +1348,8 @@ def main(args, rank, world_size, local_rank, device):
             )
 
         if rank == 0:
-            print("Loaded pretrained backbone weights.")
+            if not VIT_RANDOM_INIT:
+                print("Loaded pretrained backbone weights.")
             print("Missing keys:", missing_keys)
             print("Unexpected keys:", unexpected_keys)
 
