@@ -752,7 +752,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 210: = 209 with the ViT blocks at the FULL head LR
     # (BACKBONE_TAIL_LR_MULT 0.1 -> 1.0; sole change). The 0.1x mult was tuned in
     # 082-108 to keep PRETRAINED weights from over-moving; 209's blocks are random,
-    # so there is nothing to protect, and ~96M block params were training at 0.1x
+    # so there is nothing to protect, and all 6 blocks (~255M params) trained at 0.1x
     # (peak ~2.2e-5 vs the head's ~2.2e-4 = 2e-3 x sqrt(20) / 40). 209's val loss
     # was still creeping down as the anneal hit its floor. Same 300-epoch schedule
     # (TERMINAL_STEPS = 15000, 250 warmup steps). Read vs 209 (0.8581 uniform).
