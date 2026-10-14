@@ -734,8 +734,9 @@ def main(args, rank, world_size, local_rank, device):
     # Study 207: = 204 with the ViT at RANDOM init (the checkpoint is not loaded).
     # Separates "the pretrained hydro attention helps" from "any attention over
     # event tokens helps". Full scope, because frozen random blocks would only
-    # test random features. The backbone LR mult stays 0.1 (2e-4, a normal
-    # from-scratch transformer LR), so weights are the only change vs 204. Read
+    # test random features. The backbone LR mult stays 0.1, so weights are the
+    # only change vs 204. (The block peak LR is 0.1 x the ~2.2e-4 head anchor =
+    # ~2.2e-5, not the 2e-4 an earlier note here claimed; see Study 210.) Read
     # it vs 203/204 (1.1529/1.1849). If it ties, the pretraining is not the
     # cause; if it regresses, an LR-mult follow-up separates LR from pretraining.
     # Study 208: = 206 (event tokens, decoder scope, mult 0.1) run to 300 epochs,
@@ -748,18 +749,28 @@ def main(args, rank, world_size, local_rank, device):
     # may need more steps than pretrained ones, so 207 @100 alone could
     # under-credit random init. Read vs 208 (the same schedule with pretrained
     # weights, decoder scope).
+    # Study 210: = 209 with the ViT blocks at the FULL head LR
+    # (BACKBONE_TAIL_LR_MULT 0.1 -> 1.0; sole change). The 0.1x mult was tuned in
+    # 082-108 to keep PRETRAINED weights from over-moving; 209's blocks are random,
+    # so there is nothing to protect, and ~96M block params were training at 0.1x
+    # (peak ~2.2e-5 vs the head's ~2.2e-4 = 2e-3 x sqrt(20) / 40). 209's val loss
+    # was still creeping down as the anneal hit its floor. Same 300-epoch schedule
+    # (TERMINAL_STEPS = 15000, 250 warmup steps). Read vs 209 (0.8581 uniform).
+    # If val loss spikes or goes NaN early, fall back to 0.3.
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207, 209):
+    if studyIDX in (204, 207, 209, 210):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
-    if studyIDX in (207, 209):
+    if studyIDX in (207, 209, 210):
         VIT_RANDOM_INIT = True
-    if studyIDX in (208, 209):
+    if studyIDX == 210:
+        BACKBONE_TAIL_LR_MULT = 1.0
+    if studyIDX in (208, 209, 210):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
