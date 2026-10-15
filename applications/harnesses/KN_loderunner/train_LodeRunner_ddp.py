@@ -757,12 +757,18 @@ def main(args, rank, world_size, local_rank, device):
     # was still creeping down as the anneal hit its floor. Same 300-epoch schedule
     # (TERMINAL_STEPS = 15000, 250 warmup steps). Read vs 209 (0.8581 uniform).
     # If val loss spikes or goes NaN early, fall back to 0.3.
+    # 210 RESULT: 1.0245 uniform, +0.166 vs 209 (mostly spread) -> keep 0.1.
+    # Study 211: PRETRAINED ViT, event tokens, FULL scope, mult 0.1, 300 epochs
+    # (= 204 run to 300 epochs; = 208 with full scope; = 209 with Kyle's
+    # weights). The missing arm of the 208/209 comparison: 208 vs 209 changed
+    # init AND scope, so 211 vs 209 isolates init and 211 vs 208 isolates scope,
+    # both on the same 300-epoch anneal (TERMINAL_STEPS = 15000).
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207, 209, 210):
+    if studyIDX in (204, 207, 209, 210, 211):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
@@ -770,7 +776,7 @@ def main(args, rank, world_size, local_rank, device):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
-    if studyIDX in (208, 209, 210):
+    if studyIDX in (208, 209, 210, 211):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
