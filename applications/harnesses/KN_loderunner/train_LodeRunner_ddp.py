@@ -768,19 +768,19 @@ def main(args, rank, world_size, local_rank, device):
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207, 209, 210, 211):
+    if studyIDX in (204, 207, 209, 210, 211, 213):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
-    if studyIDX in (207, 209, 210):
+    if studyIDX in (207, 209, 210, 213):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
     # Study 212: = 205 (ViT bypassed, head only) run to 300 epochs, so all four
     # arms of the 209 / 208 / 211 / 212 comparison share one schedule.
-    if studyIDX in (208, 209, 210, 211, 212):
+    if studyIDX in (208, 209, 210, 211, 212, 213):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
@@ -880,6 +880,19 @@ def main(args, rank, world_size, local_rank, device):
     # addressable via this architecture. 0/False -> legacy (byte-identical).
     # Study 130 ran with False (123 base); restored True for the 129 champion.
     REDSHIFT_PIVOT_DIRECT = True
+    # Study 213: = 209 with NO redshift input (pivot-direct off -> append_redshift
+    # False, the z scalar never reaches the model). NOTE: build_finetune_optimizer
+    # never put redshift_pivot_weight in an optimizer group, so w_z stayed at its
+    # init 0 in every pivot-direct run since 125 -> 209's redshift term was exactly
+    # zero and 213 is effectively a seed re-run of 209.
+    if studyIDX == 213:
+        REDSHIFT_PIVOT_DIRECT = False
+    if rank == 0:
+        print(
+            f"Study {studyIDX}: REDSHIFT_FOURIER_BANDS={REDSHIFT_FOURIER_BANDS}, "
+            f"REDSHIFT_PIVOT_DIRECT={REDSHIFT_PIVOT_DIRECT}",
+            flush=True,
+        )
 
     # Delta-anchored head. When True, the output head predicts a CHANGE relative
     # to the per-band last observed magnitude (fallback: most-recent observation
