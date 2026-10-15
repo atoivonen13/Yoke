@@ -709,10 +709,12 @@ def main(args, rank, world_size, local_rank, device):
         BACKBONE_TAIL_LR_MULT = 0.0
     elif studyIDX == 201:  # = 200 with the whole ViT fine-tuned (as 143 vs 142)
         BACKBONE_FINETUNE_SCOPE = "full"
-    elif studyIDX in (202, 205):  # = 200 with the ViT bypassed (as 144 vs 142)
+    elif studyIDX in (202, 205, 212):  # = 200 with the ViT bypassed (as 144 vs 142)
         # 205 = the no-backbone leg of the 203/204 event-token triplet. The
         # token readout is zero-init, so 203/204 start AT this model; 205 is a
         # same-config re-seed of 202.
+        # 212 = 205 run to 300 epochs (total_epochs set below): the head-only
+        # arm on the same anneal as 208/209/211 (TERMINAL_STEPS = 15000).
         BYPASS_BACKBONE = True
         BACKBONE_TAIL_LR_MULT = 0.0
 
@@ -776,7 +778,9 @@ def main(args, rank, world_size, local_rank, device):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
-    if studyIDX in (208, 209, 210, 211):
+    # Study 212: = 205 (ViT bypassed, head only) run to 300 epochs, so all four
+    # arms of the 209 / 208 / 211 / 212 comparison share one schedule.
+    if studyIDX in (208, 209, 210, 211, 212):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
