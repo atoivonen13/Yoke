@@ -196,7 +196,8 @@ def build_finetune_optimizer(
 ) -> tuple:
     """Freeze the backbone, set trainable params, and build the AdamW optimizer.
 
-    Always trains ``conditioner`` + ``output_head``. When
+    Always trains ``conditioner`` + ``output_head`` (or the color-anchored head,
+    plus ``redshift_pivot_weight`` when ``redshift_pivot_direct``). When
     ``backbone_tail_lr_mult > 0`` it additionally unfreezes a subset of the
     pretrained backbone -- selected by ``backbone_finetune_scope`` -- and puts it in
     a SECOND optimizer param group at ``base_lr * backbone_tail_lr_mult``
@@ -267,6 +268,13 @@ def build_finetune_optimizer(
         for p in (model.W_band, model.b_band):
             p.requires_grad = True
             head_params.append(p)
+
+    # Study 125's pivot-direct redshift scalar w_z is also a raw Parameter. Before
+    # study 215 it was missing here, so it never trained: w_z stayed at its init 0
+    # and every pivot-direct run since 125 had an exactly-zero redshift term.
+    if getattr(model, "redshift_pivot_direct", False):
+        model.redshift_pivot_weight.requires_grad = True
+        head_params.append(model.redshift_pivot_weight)
 
     if backbone_tail_lr_mult and backbone_tail_lr_mult > 0.0:
         # The backbone must actually run for its tail to receive gradients. Under

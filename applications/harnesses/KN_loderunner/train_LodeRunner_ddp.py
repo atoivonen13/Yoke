@@ -768,19 +768,19 @@ def main(args, rank, world_size, local_rank, device):
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207, 209, 210, 211, 213):
+    if studyIDX in (204, 207, 209, 210, 211, 213, 215):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
-    if studyIDX in (207, 209, 210, 213):
+    if studyIDX in (207, 209, 210, 213, 215):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
     # Study 212: = 205 (ViT bypassed, head only) run to 300 epochs, so all four
     # arms of the 209 / 208 / 211 / 212 comparison share one schedule.
-    if studyIDX in (208, 209, 210, 211, 212, 213):
+    if studyIDX in (208, 209, 210, 211, 212, 213, 215):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
@@ -885,6 +885,9 @@ def main(args, rank, world_size, local_rank, device):
     # never put redshift_pivot_weight in an optimizer group, so w_z stayed at its
     # init 0 in every pivot-direct run since 125 -> 209's redshift term was exactly
     # zero and 213 is effectively a seed re-run of 209.
+    # Study 215: = 209 (pivot-direct ON) with build_finetune_optimizer now training
+    # w_z -- the first run where the redshift level term is live. Read vs the
+    # 209/213 seed pair (0.8581 / 0.8515 uniform, seed floor ~0.05).
     if studyIDX == 213:
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
@@ -2086,6 +2089,10 @@ def main(args, rank, world_size, local_rank, device):
         if rank == 0:
             print(f"Completed epoch {epochIDX}...", flush=True)
             print(f"Epoch time (minutes): {epoch_time:.2f}", flush=True)
+            if REDSHIFT_PIVOT_DIRECT:
+                # Should move off 0 after epoch 1 (it stayed 0 before study 215).
+                w_z = model.module.redshift_pivot_weight.item()
+                print(f"redshift_pivot_weight (w_z): {w_z:+.5f}", flush=True)
 
         # Save model and optimizer
         #chkpt_name_str = f'study{studyIDX:03d}_modelState_epoch{epochIDX:04d}.pth'
