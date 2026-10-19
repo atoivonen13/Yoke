@@ -73,6 +73,13 @@ def context_band_counts(
     from yoke.utils.context_selection import window_select_positions
 
     paths = _stem_to_path(realistic_glob)
+    if not paths:
+        raise SystemExit(f"--realistic_glob matched no files: {realistic_glob!r}")
+    if not set(stems) & set(paths):
+        raise SystemExit(
+            f"--realistic_glob matched {len(paths)} files, but none share a stem "
+            f"with the CSV (e.g. CSV {stems[0]!r} vs glob {next(iter(paths))!r})."
+        )
     rows = []
     for s in stems:
         if s not in paths:
