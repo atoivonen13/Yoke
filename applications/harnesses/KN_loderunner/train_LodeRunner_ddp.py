@@ -305,7 +305,10 @@ def main(args, rank, world_size, local_rank, device):
     # so do not edit it without a matching checkpoint. --embed_dim and
     # --block_structure are Swin-only and ignored under "vit".
     # 142-144 stay "swin" so their rows in ddp_production.csv still reproduce.
-    BACKBONE_ARCH = "swin" if studyIDX <= 144 else "vit"
+    # Study 214 (branch KN_swin_fresh): the Swin LodeRunner at RANDOM init, the
+    # pre-ViT architecture counterpart of 209/213 (see SWIN_RANDOM_INIT below).
+    SWIN_STUDIES = (214,)
+    BACKBONE_ARCH = "swin" if studyIDX <= 144 or studyIDX in SWIN_STUDIES else "vit"
 
     # Plain state_dict written by yoke.utils.ema.save_ema_checkpoint. Override
     # with $KN_VIT_PRETRAINED; the default is a placeholder cluster location.
@@ -778,9 +781,19 @@ def main(args, rank, world_size, local_rank, device):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
+    # Study 214: the Swin U-Net LodeRunner (the pre-ViT backbone, as in 142) at
+    # RANDOM init, otherwise = 213: full scope, mult 0.1, 300 epochs, no redshift.
+    # Event tokens need the ViT's RoPE blocks, so the Swin runs the pseudo-image
+    # path (as 142). Full scope because frozen random blocks would only test
+    # random features (as 207). Read vs 209/213 (0.858/0.852, fresh ViT + event
+    # tokens) and vs 142 (1.3988, pretrained Swin, decoder, 100 ep).
+    SWIN_RANDOM_INIT = False
+    if studyIDX == 214:
+        SWIN_RANDOM_INIT = True
+        BACKBONE_FINETUNE_SCOPE = "full"
     # Study 212: = 205 (ViT bypassed, head only) run to 300 epochs, so all four
     # arms of the 209 / 208 / 211 / 212 comparison share one schedule.
-    if studyIDX in (208, 209, 210, 211, 212, 213):
+    if studyIDX in (208, 209, 210, 211, 212, 213, 214):
         total_epochs = 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
@@ -801,6 +814,7 @@ def main(args, rank, world_size, local_rank, device):
             f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
             f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}, "
             f"EVENT_TOKENS={EVENT_TOKENS}, VIT_RANDOM_INIT={VIT_RANDOM_INIT}, "
+            f"SWIN_RANDOM_INIT={SWIN_RANDOM_INIT}, "
             f"total_epochs={total_epochs}",
             flush=True,
         )
@@ -885,7 +899,7 @@ def main(args, rank, world_size, local_rank, device):
     # never put redshift_pivot_weight in an optimizer group, so w_z stayed at its
     # init 0 in every pivot-direct run since 125 -> 209's redshift term was exactly
     # zero and 213 is effectively a seed re-run of 209.
-    if studyIDX == 213:
+    if studyIDX in (213, 214):
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
         print(
@@ -1383,26 +1397,35 @@ def main(args, rank, world_size, local_rank, device):
             model = LodeRunner(**model_args)
             model.to(device)
 
-            manual_checkpoint = "/users/atoivonen/data/kyle_vit/study002_modelState_epoch0100_ema_weights.pth" #"/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth"
+            if SWIN_RANDOM_INIT:
+                # Study 214: keep the constructor's random init (same arch).
+                missing_keys, unexpected_keys = [], []
+                if rank == 0:
+                    print("SWIN_RANDOM_INIT: LodeRunner left at random init; "
+                          "pretrained weights NOT loaded.")
+            else:
+                # NOTE: 9c86cbf pointed this at the ViT checkpoint, which does not
+                # match the Swin; the Swin pretraining is the commented path.
+                manual_checkpoint = "/users/atoivonen/data/kyle_vit/study002_modelState_epoch0100_ema_weights.pth" #"/usr/projects/artimis/mpmm/pretrained_models/ddp_ldr_prod_250721/study005_modelState_epoch0100.pth"
 
-            checkpoint_data = torch.load(
-                manual_checkpoint,
-                map_location=device,
-                weights_only=False,
-            )
+                checkpoint_data = torch.load(
+                    manual_checkpoint,
+                    map_location=device,
+                    weights_only=False,
+                )
 
-            state_dict = checkpoint_data["model_state_dict"]
+                state_dict = checkpoint_data["model_state_dict"]
 
-            if all(k.startswith("module.") for k in state_dict.keys()):
-                state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+                if all(k.startswith("module.") for k in state_dict.keys()):
+                    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
 
-            missing_keys, unexpected_keys = model.load_state_dict(
-                state_dict,
-                strict=False,
-            )
+                missing_keys, unexpected_keys = model.load_state_dict(
+                    state_dict,
+                    strict=False,
+                )
 
         if rank == 0:
-            if not VIT_RANDOM_INIT:
+            if not (VIT_RANDOM_INIT or SWIN_RANDOM_INIT):
                 print("Loaded pretrained backbone weights.")
             print("Missing keys:", missing_keys)
             print("Unexpected keys:", unexpected_keys)
