@@ -768,20 +768,23 @@ def main(args, rank, world_size, local_rank, device):
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207, 209, 210, 211, 213, 215):
+    if studyIDX in (204, 207, 209, 210, 211, 213, 215, 216):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
-    if studyIDX in (207, 209, 210, 213, 215):
+    if studyIDX in (207, 209, 210, 213, 215, 216):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
     # Study 212: = 205 (ViT bypassed, head only) run to 300 epochs, so all four
     # arms of the 209 / 208 / 211 / 212 comparison share one schedule.
-    if studyIDX in (208, 209, 210, 211, 212, 213, 215):
-        total_epochs = 300
+    # Study 216: = 213 (the champion, no redshift) run to 500 epochs with the
+    # anneal stretched to match (TERMINAL_STEPS = 25000). 207 -> 209 (100 -> 300
+    # ep) gained 0.106; 216 asks whether the schedule is still the lever.
+    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216):
+        total_epochs = 500 if studyIDX == 216 else 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
         if terminal_steps != total_epochs * train_batches:
@@ -888,7 +891,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 215: = 209 (pivot-direct ON) with build_finetune_optimizer now training
     # w_z -- the first run where the redshift level term is live. Read vs the
     # 209/213 seed pair (0.8581 / 0.8515 uniform, seed floor ~0.05).
-    if studyIDX == 213:
+    if studyIDX in (213, 216):
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
         print(
