@@ -28,6 +28,16 @@ Figures (PDF + PNG, 7.0 in = two-column page width) in ``runs/study_NNN/figures`
                         90th percentile object by per-object uniform RMSE (the
                         CSVs hold only the scored late-time window, so the
                         realistic context is not drawn).
+  7. ``median_example_truth`` / ``median_example_forecast``  a pair for the
+                        median object by per-object uniform RMSE, all 9 bands:
+                        the realistic context the model saw and the uniform
+                        truth, then the same with the forecast median and
+                        calibrated band added (same axes, so the two read as a
+                        before / after). The context is rebuilt from the
+                        realistic npz with the eval's rule (detections up to the
+                        cutoff, trailing window, cap). Needs the realistic and
+                        uniform npz sets (globs default to the ones the eval
+                        recorded in ``eval_meta.json``); skipped if unreadable.
 
 plus ``metrics.csv`` / ``metrics.tex`` (per band and pooled).
 
@@ -81,6 +91,25 @@ MIN_BIN_POINTS = 50
 TRUTH_BIN_MAG = 0.25
 MIN_TRUTH_BIN_POINTS = 20
 EXAMPLE_PERCENTILES = (10, 50, 90)
+# Median-example pair: days of uniform truth drawn before the first detection.
+EXAMPLE_PRE_DAYS = 1.0
+
+# Light-curve npz sets for the median-example pair (fallbacks when the eval's
+# eval_meta.json does not name them). Band keys in band-index order, as
+# kilonova_dataset.NINE_BAND_KEYS / LSST_NINE_BAND_KEYS (not imported: torch).
+KN_DATA_DIR = "/net/sescratch1/exempt/artimis/atoivonen/data/KN_lightcurves"
+DEFAULT_REALISTIC_GLOB = (f"{KN_DATA_DIR}/rubin_lsst_ztf_10000_dataset_same_seed/"
+                          "lc_*.npz")
+DEFAULT_UNIFORM_GLOB = (f"{KN_DATA_DIR}/rubin_lsst_ztf_uniform_10000_dataset_"
+                        "same_seed/lc_*.npz")
+NPZ_BAND_KEYS = (
+    ("arr_ztfg", "arr_ztfr", "arr_ztfi", "arr_sdssu", "arr_ps1__g",
+     "arr_ps1__r", "arr_ps1__i", "arr_ps1__z", "arr_ps1__y"),
+    ("arr_ztfg", "arr_ztfr", "arr_ztfi", "arr_lsstu", "arr_lsstg", "arr_lsstr",
+     "arr_lssti", "arr_lsstz", "arr_lssty"),
+)
+NPZ_VALUE_COL = 1
+NPZ_ERROR_COL = 2  # non-finite error = upper limit
 
 # Colors: the dataviz reference palette, light mode. Categorical slots are used
 # in this fixed order (run i -> slot i, never cycled); the first 4 pass the
@@ -208,14 +237,18 @@ def _read_records(pattern: str) -> pd.DataFrame | None:
                          "p95": g.quantile(0.95)}).reset_index()
 
 
-def _eval_epoch(eval_dir: str) -> int | None:
-    """Epoch of the checkpoint the eval scored (from eval_meta.json), if known."""
+def _eval_signature(eval_dir: str) -> dict:
+    """The eval's settings signature from eval_meta.json ({} if absent)."""
     path = os.path.join(eval_dir, META_JSON)
     if not os.path.exists(path):
-        return None
+        return {}
     with open(path) as fh:
-        ckpt = json.load(fh).get("signature", {}).get("ckpt", "")
-    hit = re.search(r"epoch(\d+)", os.path.basename(ckpt))
+        return json.load(fh).get("signature", {})
+
+
+def _eval_epoch(signature: dict) -> int | None:
+    """Epoch of the checkpoint the eval scored, if known."""
+    hit = re.search(r"epoch(\d+)", os.path.basename(signature.get("ckpt", "")))
     return int(hit.group(1)) if hit else None
 
 
@@ -245,6 +278,7 @@ def load_run(study: int, runs_root: str = "runs", label: str | None = None,
     uniform["beyond"] = uniform["true"].to_numpy() > depth[uniform["b"].to_numpy()]
 
     tag = f"{study:03d}"
+    signature = _eval_signature(eval_dir)
     run = {
         "study": study,
         "label": label or f"Study {study}",
@@ -256,7 +290,8 @@ def load_run(study: int, runs_root: str = "runs", label: str | None = None,
         "calibrated": cal is not None,
         "interval": cal["interval"] if cal else 0.90,
         "has_band": bool((uniform["high"] - uniform["low"]).abs().max() > 1e-6),
-        "epoch": _eval_epoch(eval_dir),
+        "epoch": _eval_epoch(signature),
+        "signature": signature,
         "train_loss": _read_records(
             os.path.join(run_dir, f"training_study{tag}_epoch*.csv")),
         "val_loss": _read_records(
@@ -717,10 +752,15 @@ def fig_coverage(run: dict, boot: ObjectBootstrap, edges: np.ndarray,
     return fig
 
 
+def per_object_rmse(run: dict) -> pd.Series:
+    """Uniform-truth RMSE of each object (index = stem)."""
+    u = run["uniform"]
+    return np.sqrt((u["r"] ** 2).groupby(u["stem"]).mean())
+
+
 def pick_examples(run: dict, stems: list | None) -> list:
     """``(stem, caption)`` per example row: given stems, or RMSE percentiles."""
-    u = run["uniform"]
-    per_obj = np.sqrt((u["r"] ** 2).groupby(u["stem"]).mean())
+    per_obj = per_object_rmse(run)
     if stems:
         missing = [s for s in stems if s not in per_obj.index]
         if missing:
@@ -772,6 +812,182 @@ def fig_examples(run: dict, bands: list, stems: list | None,
     fig.supxlabel("Days since first realistic detection")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     top_legend(fig, handles, labels, ncol=len(labels), title=title)
+    return fig
+
+
+def _find_npz(pattern: str, stem: str) -> str | None:
+    """Path of object ``stem`` in the set matched by ``pattern`` (None if absent)."""
+    direct = os.path.join(os.path.dirname(pattern),
+                          stem + os.path.splitext(pattern)[1])
+    if os.path.exists(direct):
+        return direct
+    for path in glob.glob(pattern):
+        if os.path.splitext(os.path.basename(path))[0] == stem:
+            return path
+    return None
+
+
+def read_npz_stream(path: str, drop_upper_limits: bool) -> tuple:
+    """Merged, time-sorted ``(MJD, mag, band index)`` of one light-curve npz.
+
+    Torch-free twin of ``eval_dense_latetime_9band.read_merged_stream``.
+    """
+    t, v, b = [], [], []
+    with np.load(path, allow_pickle=True) as data:
+        names = set(data.files)
+        keys = next((k for k in NPZ_BAND_KEYS if names & set(k[3:])),
+                    NPZ_BAND_KEYS[0])
+        for band, key in enumerate(keys):
+            if key not in names:
+                continue
+            arr = np.asarray(data[key])
+            if arr.size == 0:
+                continue
+            if drop_upper_limits:
+                arr = arr[np.isfinite(arr[:, NPZ_ERROR_COL])]
+            t.append(arr[:, 0].astype(np.float64))
+            v.append(arr[:, NPZ_VALUE_COL].astype(np.float64))
+            b.append(np.full(len(arr), band, dtype=np.int64))
+    if not t:
+        return np.empty(0), np.empty(0), np.empty(0, dtype=np.int64)
+    t, v, b = np.concatenate(t), np.concatenate(v), np.concatenate(b)
+    order = np.argsort(t, kind="stable")
+    return t[order], v[order], b[order]
+
+
+def eval_context(t: np.ndarray, v: np.ndarray, b: np.ndarray, cutoff_days: float,
+                 window_days: float, max_context_len: int) -> dict | None:
+    """The realistic context the eval fed the model (``eval_object``'s rule).
+
+    Phase 0 = the first realistic detection. Keep detections with phase <=
+    ``cutoff_days``, then the trailing ``window_days`` window ending at the last
+    of them, then the ``max_context_len`` cap.
+    """
+    # numpy-only module (no torch).
+    from yoke.utils.context_selection import window_select_positions
+
+    if t.size == 0:
+        return None
+    t0 = float(t[0])
+    pre = (t - t0) <= cutoff_days
+    t, v, b = t[pre], v[pre], b[pre]
+    # float32 times, as _select_window compares them.
+    t32 = t.astype(np.float32)
+    win = np.nonzero(t32 >= t32[-1] - window_days)[0]
+    win = win[window_select_positions(win.shape[0], max_context_len)]
+    return {"t0": t0, "phase": t[win] - t0, "mag": v[win], "b": b[win],
+            "n_pre_cutoff": int(pre.sum())}
+
+
+def median_example(run: dict, stem: str | None, realistic_glob: str,
+                   uniform_glob: str, window_days: float,
+                   max_context_len: int) -> dict | None:
+    """Context, uniform truth and forecast of the median object (or ``stem``)."""
+    per_obj = per_object_rmse(run)
+    if stem is None:
+        target = np.percentile(per_obj.to_numpy(), 50)
+        stem = (per_obj - target).abs().idxmin()
+        caption = f"median object, uniform RMSE {per_obj[stem]:.2f}"
+    elif stem in per_obj.index:
+        rank = float((per_obj < per_obj[stem]).mean() * 100)
+        caption = f"uniform RMSE {per_obj[stem]:.2f} ({rank:.0f}th pct)"
+    else:
+        raise ValueError(f"median example {stem!r} is not in the scored set")
+    sig = run["signature"]
+    cutoff = float(sig.get("late_time_cutoff_days", 2.0))
+    max_days = float(sig.get("late_time_max_days", 10.0))
+
+    paths = {}
+    for kind, pattern in (("realistic", realistic_glob), ("uniform", uniform_glob)):
+        paths[kind] = _find_npz(pattern, stem)
+        if paths[kind] is None:
+            print(f"{run['label']}: {stem} not found in the {kind} set "
+                  f"{pattern!r}; skipping the median-example pair.")
+            return None
+    ctx = eval_context(*read_npz_stream(paths["realistic"], True), cutoff,
+                       window_days, max_context_len)
+    if ctx is None:
+        print(f"{run['label']}: {stem} has no realistic detections; skipping the "
+              "median-example pair.")
+        return None
+
+    u = run["uniform"]
+    forecast = u[u["stem"] == stem]
+    # The eval's lead is measured from the last pre-cutoff detection, so
+    # phase - lead must equal the rebuilt context's last phase.
+    last = float(np.median(forecast["phase"] - forecast["lead"]))
+    if abs(last - ctx["phase"][-1]) > 0.02:
+        warnings.warn(f"{stem}: rebuilt context ends at phase {ctx['phase'][-1]:.3f} "
+                      f"d but the eval's leads imply {last:.3f} d; the drawn "
+                      "context may not be the one the model saw.", stacklevel=2)
+
+    ut, uv, ub = read_npz_stream(paths["uniform"], False)
+    x_lim = (-EXAMPLE_PRE_DAYS, max_days)
+    phase = ut - ctx["t0"]
+    keep = np.isfinite(uv) & (phase >= x_lim[0]) & (phase <= x_lim[1])
+    truth = (phase[keep], uv[keep], ub[keep])
+
+    # One y range per band, shared by the pair so they read as before / after.
+    y_lim = []
+    for b in range(N_BANDS):
+        vals = np.concatenate([truth[1][truth[2] == b], ctx["mag"][ctx["b"] == b],
+                               forecast.loc[forecast["b"] == b, "med"].to_numpy()])
+        if vals.size == 0:
+            y_lim.append(None)
+            continue
+        lo, hi = float(vals.min()), float(vals.max())
+        pad = max(0.06 * (hi - lo), 0.3)
+        y_lim.append((hi + pad, lo - pad))  # faint at the bottom
+    print(f"{run['label']}: median example {stem} (uniform RMSE "
+          f"{per_obj[stem]:.3f}), {len(ctx['phase'])} context detections of "
+          f"{ctx['n_pre_cutoff']} before the {cutoff:g} d cutoff")
+    return {"stem": stem, "caption": caption, "cutoff": cutoff,
+            "ctx": ctx, "truth": truth, "forecast": forecast, "x_lim": x_lim,
+            "y_lim": y_lim}
+
+
+def fig_median_example(run: dict, ex: dict, with_forecast: bool,
+                       title: str | None) -> plt.Figure:
+    """All 9 bands of one object: realistic context + uniform truth (+ forecast)."""
+    fig, axes = plt.subplots(3, 3, figsize=(FULL_W, FULL_W * 0.78), sharex=True)
+    axes = axes.ravel()
+    ctx, (t_ph, t_mag, t_b), fc = ex["ctx"], ex["truth"], ex["forecast"]
+    band_label = "Calibrated" if run["calibrated"] else "Raw"
+    for b, ax in enumerate(axes):
+        ax.set_title(BAND_LABELS[b])
+        ax.axvline(ex["cutoff"], color=MUTED, ls=":", lw=0.9,
+                   label=f"Context cutoff ({ex['cutoff']:g} d)")
+        m = t_b == b
+        ax.plot(t_ph[m], t_mag[m], color=INK_2, lw=1.0, label="Uniform truth")
+        note = f"{int(np.sum(ctx['b'] == b))} in context"
+        if with_forecast:
+            f = fc[fc["b"] == b].sort_values("phase")
+            if run["has_band"]:
+                ax.fill_between(f["phase"], f["low_cal"], f["high_cal"],
+                                color=SERIES[0], alpha=0.2, lw=0,
+                                label=f"{band_label} {run['interval']:.0%} band")
+            ax.plot(f["phase"], f["med"], color=SERIES[0], lw=1.3,
+                    label="Forecast median")
+            if len(f):
+                note += f", RMSE {np.sqrt(np.mean(f['r'] ** 2)):.2f}"
+        m = ctx["b"] == b
+        ax.plot(ctx["phase"][m], ctx["mag"][m], ls="none", marker="o",
+                markersize=3.5, mfc=SERIES[1], mec=INK, mew=0.4, zorder=3,
+                label="Realistic context")
+        ax.annotate(note, (0.02, 0.03), xycoords="axes fraction", ha="left",
+                    va="bottom", fontsize=6, color=MUTED)
+        ax.set_xlim(ex["x_lim"])
+        if ex["y_lim"][b] is not None:
+            ax.set_ylim(ex["y_lim"][b])
+    fig.supxlabel("Days since first realistic detection")
+    fig.supylabel("Magnitude")
+    handles = {}
+    for ax in axes:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            handles.setdefault(lab, h)
+    caption = f"{ex['stem']}: {ex['caption']}"
+    top_legend(fig, list(handles.values()), list(handles), ncol=len(handles),
+               title=f"{title}\n{caption}" if title else caption)
     return fig
 
 
@@ -832,6 +1048,21 @@ def main() -> None:
     p.add_argument("--example_stems", nargs="+", default=None,
                    help="Objects for the examples figure (default: the 10th / "
                    "50th / 90th percentile object by uniform RMSE).")
+    p.add_argument("--median_example_stem", default=None,
+                   help="Object for the median-example pair (default: the "
+                   "median object by uniform RMSE).")
+    p.add_argument("--realistic_glob", default=None,
+                   help="Realistic npz set for the median-example context "
+                   "(default: the eval's, from eval_meta.json, else "
+                   f"{DEFAULT_REALISTIC_GLOB}).")
+    p.add_argument("--uniform_glob", default=None,
+                   help="Uniform npz set for the median-example truth (default: "
+                   "the eval's, else the LSST uniform set).")
+    p.add_argument("--context_window_days", type=float, default=2.0,
+                   help="The checkpoint's trailing context window (rebuilds the "
+                   "eval context; not in eval_meta.json).")
+    p.add_argument("--max_context_len", type=int, default=12,
+                   help="The checkpoint's context cap.")
     p.add_argument("--n_boot", type=int, default=500,
                    help="Object-bootstrap resamples for the CIs.")
     p.add_argument("--seed", type=int, default=0)
@@ -851,6 +1082,12 @@ def main() -> None:
         f"{run['label']} (study {run['study']}"
         + (f", epoch {run['epoch']})" if run["epoch"] is not None else ")"))
     fmts = tuple(args.formats)
+    sig = run["signature"]
+    example = median_example(
+        run, args.median_example_stem,
+        args.realistic_glob or sig.get("realistic_glob") or DEFAULT_REALISTIC_GLOB,
+        args.uniform_glob or sig.get("uniform_glob") or DEFAULT_UNIFORM_GLOB,
+        args.context_window_days, args.max_context_len)
 
     for name, fig in (
         ("loss", fig_loss(run, title)),
@@ -860,6 +1097,10 @@ def main() -> None:
         ("coverage", fig_coverage(run, boot, edges, title)),
         ("examples", fig_examples(run, args.example_bands, args.example_stems,
                                   title)),
+        ("median_example_truth", example and fig_median_example(
+            run, example, False, title)),
+        ("median_example_forecast", example and fig_median_example(
+            run, example, True, title)),
     ):
         if fig is not None:
             save(fig, outdir, name, fmts)
