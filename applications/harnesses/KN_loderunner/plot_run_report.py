@@ -33,7 +33,10 @@ Figures (PDF + PNG, 7.0 in = two-column page width) in ``runs/study_NNN/figures`
                         the realistic context the model saw and the uniform
                         truth, then the same with the forecast median and
                         calibrated band added (same axes, so the two read as a
-                        before / after). The context is rebuilt from the
+                        before / after); ``median_example_forecast_3band`` is
+                        the forecast version for ZTF r / LSST r / LSST u in one
+                        column (``--median_example_bands``). The context is
+                        rebuilt from the
                         realistic npz with the eval's rule (detections up to the
                         cutoff, trailing window, cap). Needs the realistic and
                         uniform npz sets (globs default to the ones the eval
@@ -947,13 +950,27 @@ def median_example(run: dict, stem: str | None, realistic_glob: str,
 
 
 def fig_median_example(run: dict, ex: dict, with_forecast: bool,
-                       title: str | None) -> plt.Figure:
-    """All 9 bands of one object: realistic context + uniform truth (+ forecast)."""
-    fig, axes = plt.subplots(3, 3, figsize=(FULL_W, FULL_W * 0.78), sharex=True)
+                       title: str | None, bands: list | None = None) -> plt.Figure:
+    """One object: realistic context + uniform truth (+ forecast) per band.
+
+    ``bands`` = None draws all 9 bands on a 3 x 3 grid; a list of band names
+    draws one column of panels in that order (one-column figure width).
+    """
+    if bands is None:
+        band_idx = list(range(N_BANDS))
+        fig, axes = plt.subplots(3, 3, figsize=(FULL_W, FULL_W * 0.78),
+                                 sharex=True)
+        ncol = None
+    else:
+        band_idx = [BAND_INDEX[name] for name in bands]
+        fig, axes = plt.subplots(len(bands), 1,
+                                 figsize=(HALF_W, 1.55 * len(bands) + 0.9),
+                                 sharex=True, squeeze=False)
+        ncol = 2
     axes = axes.ravel()
     ctx, (t_ph, t_mag, t_b), fc = ex["ctx"], ex["truth"], ex["forecast"]
     band_label = "Calibrated" if run["calibrated"] else "Raw"
-    for b, ax in enumerate(axes):
+    for b, ax in zip(band_idx, axes):
         ax.set_title(BAND_LABELS[b])
         ax.axvline(ex["cutoff"], color=MUTED, ls=":", lw=0.9,
                    label=f"Context cutoff ({ex['cutoff']:g} d)")
@@ -986,7 +1003,8 @@ def fig_median_example(run: dict, ex: dict, with_forecast: bool,
         for h, lab in zip(*ax.get_legend_handles_labels()):
             handles.setdefault(lab, h)
     caption = f"{ex['stem']}: {ex['caption']}"
-    top_legend(fig, list(handles.values()), list(handles), ncol=len(handles),
+    top_legend(fig, list(handles.values()), list(handles),
+               ncol=ncol or len(handles),
                title=f"{title}\n{caption}" if title else caption)
     return fig
 
@@ -1051,6 +1069,10 @@ def main() -> None:
     p.add_argument("--median_example_stem", default=None,
                    help="Object for the median-example pair (default: the "
                    "median object by uniform RMSE).")
+    p.add_argument("--median_example_bands", nargs="+",
+                   default=["ztfr", "r", "u"], choices=BAND_NAMES,
+                   help="Bands of the one-column median-example forecast, top "
+                   "to bottom.")
     p.add_argument("--realistic_glob", default=None,
                    help="Realistic npz set for the median-example context "
                    "(default: the eval's, from eval_meta.json, else "
@@ -1101,6 +1123,8 @@ def main() -> None:
             run, example, False, title)),
         ("median_example_forecast", example and fig_median_example(
             run, example, True, title)),
+        ("median_example_forecast_3band", example and fig_median_example(
+            run, example, True, title, args.median_example_bands)),
     ):
         if fig is not None:
             save(fig, outdir, name, fmts)
