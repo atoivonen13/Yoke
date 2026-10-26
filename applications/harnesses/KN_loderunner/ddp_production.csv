@@ -1,4 +1,7 @@
-studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZE,NTRN_BATCH,NVAL_BATCH,ANCHOR_LR,NUM_CYCLES,MIN_FRACTION,TERMINAL_STEPS,WARMUP_STEPS,NOISE_SCALE,train_script
+studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZE,NTRN_BATCH,NVAL_BATCH,ANCHOR_LR,NUM_CYCLES,MIN_FRACTION,TERMINAL_STEPS,WARMUP_STEPS,NOISE_SCALE,train_script,CONFIG_STUDY,SEED
+# CONFIG_STUDY / SEED: -1 = legacy (recipe = studyIDX, unseeded). Seed replicas
+# live in their own CSV (make_seed_sweep.py); the commented rows below predate
+# these two columns.
 # This is a longer epoch production run after tuning.
 # Single epoch with validation should be ~30 mins
 #1,torch_ch_gpu_241112,4,4,128,1,1,9,1,2,10,1000,500,2.0e-3,0.5,0.5,1000,500,0.0,train_LodeRunner_ddp.py
@@ -148,23 +151,23 @@ studyIDX,YOKE_TORCH_ENV,KNODES,NGPUS,EMBED_DIM,B0,B1,B2,B3,NUM_WORKERS,BATCH_SIZ
 #142,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 #143,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
 #144,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-200,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-201,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-202,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-203,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-204,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-205,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
-206,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+200,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+201,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+202,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+203,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+204,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+205,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+206,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
 
 
-207,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py
+207,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,10000,250,0.0,train_LodeRunner_ddp.py,-1,-1
 
 
-208,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-209,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-210,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-211,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-212,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-213,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-215,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py
-216,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,25000,250,0.0,train_LodeRunner_ddp.py
+208,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+209,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+210,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+211,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+212,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+213,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+215,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,15000,250,0.0,train_LodeRunner_ddp.py,-1,-1
+216,yoke311,1,4,128,1,1,9,1,2,5,50,20,2.0e-3,0.5,0.1,25000,250,0.0,train_LodeRunner_ddp.py,-1,-1

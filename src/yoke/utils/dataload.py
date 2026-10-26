@@ -12,6 +12,7 @@ def make_distributed_dataloader(
     num_workers: int,
     rank: int,
     world_size: int,
+    seed: int = 0,
 ) -> DataLoader:
     """Creates a DataLoader with a DistributedSampler.
 
@@ -22,6 +23,7 @@ def make_distributed_dataloader(
         num_workers (int): Number of processes to load data in parallel
         rank (int): Rank of device for distribution
         world_size (int): Number of DDP processes
+        seed (int): Sampler shuffle seed; must match across ranks
 
     Returns:
         dataloader (torch.utils.data.DataLoader): pytorch dataloader
@@ -32,6 +34,7 @@ def make_distributed_dataloader(
         num_replicas=world_size,
         rank=rank,
         shuffle=shuffle,
+        seed=seed,
     )
 
     pin_memory = True if torch.cuda.is_available() else False

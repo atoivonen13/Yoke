@@ -1,5 +1,9 @@
 --studyIDX
 <studyIDX>
+--config_study
+<CONFIG_STUDY>
+--seed
+<SEED>
 --FILELIST_DIR
 /net/sescratch1/exempt/artimis/atoivonen/filelists/
 --LSC_NPZ_DIR
