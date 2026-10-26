@@ -199,6 +199,26 @@ parser.add_argument(
     "TARGET set when UNIFORM_CROSSSTREAM_TARGET is True.",
 )
 
+# Seed replicas. The per-study recipe below is selected by study number
+# (``if studyIDX in (...)``), so a replica run under a NEW studyIDX names the
+# study whose recipe it copies via --config_study. --seed fixes the torch init,
+# the DataLoader worker RNG and the DistributedSampler shuffle order (through
+# 216 that order was the sampler default seed 0 in EVERY run, so replicas only
+# varied init). -1 / unset = legacy behavior (unseeded init, sampler seed 0).
+# The val draws (VAL_DRAW_SEED) and the test set stay fixed across seeds.
+parser.add_argument(
+    "--config_study",
+    type=int,
+    default=-1,
+    help="Study number whose hard-coded recipe this run uses. -1 = studyIDX.",
+)
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=-1,
+    help="Replica seed (torch init, worker RNG, sampler order). -1 = unseeded.",
+)
+
 # Change some default filepaths. The KN split lists hold object stems (one per
 # line), shared across the realistic and dense directories; see
 # make_kn_object_lists.py.
@@ -213,8 +233,16 @@ def main(args, rank, world_size, local_rank, device):
     #############################################
     # Process Inputs
     #############################################
-    # Study ID
-    studyIDX = args.studyIDX
+    # Study ID. RUN_STUDY names the files (checkpoints, records, resubmits);
+    # studyIDX selects the recipe and is the --config_study for a seed replica.
+    RUN_STUDY = args.studyIDX
+    studyIDX = args.config_study if args.config_study >= 0 else RUN_STUDY
+    SEED = args.seed if args.seed >= 0 else None
+    if rank == 0:
+        print(
+            f"Run study {RUN_STUDY}: recipe of study {studyIDX}, seed {SEED}",
+            flush=True,
+        )
 
     # Resources
     Ngpus = args.Ngpus
@@ -1348,6 +1376,11 @@ def main(args, rank, world_size, local_rank, device):
     else:
         starting_epoch = 0
 
+        # Seed replicas: fix the init. Every rank seeds identically (DDP
+        # broadcasts rank 0's weights anyway).
+        if SEED is not None:
+            torch.manual_seed(SEED)
+
         if BACKBONE_ARCH == "vit":
             model = LodeRunnerViT(**model_args)
             model.to(device)
@@ -1960,6 +1993,14 @@ def main(args, rank, world_size, local_rank, device):
             val_dataset = _make_9band(args.kn_realistic_glob, val_stems)
 
 
+    # Seed replicas: the DataLoader workers seed numpy (the lead-time / target
+    # draws) from the torch RNG, and cycle_epochs=1 restarts the process every
+    # epoch, so reseed per (seed, epoch, rank) -- a bare SEED would replay the
+    # same draw stream every epoch and on every rank. (The model is already
+    # built, so this does not touch the init.)
+    if SEED is not None:
+        torch.manual_seed((SEED * 100003 + starting_epoch + 1) * 1009 + rank)
+
     # NOTE: For DDP the batch_size is the per-GPU batch_size!!!
     train_dataloader = make_distributed_dataloader(
         train_dataset,
@@ -1968,6 +2009,7 @@ def main(args, rank, world_size, local_rank, device):
         num_workers=num_workers,
         rank=rank,
         world_size=world_size,
+        seed=SEED if SEED is not None else 0,
     )
     val_dataloader = make_distributed_dataloader(
         val_dataset,
@@ -2102,7 +2144,7 @@ def main(args, rank, world_size, local_rank, device):
         #new_chkpt_path = os.path.join("./", chkpt_name_str)
 
         if rank == 0:
-            chkpt_name_str = f"study{studyIDX:03d}_modelState_epoch{epochIDX:04d}.pth"
+            chkpt_name_str = f"study{RUN_STUDY:03d}_modelState_epoch{epochIDX:04d}.pth"
             new_chkpt_path = os.path.join("./", chkpt_name_str)
 
             print(f"Saving checkpoint: {new_chkpt_path}", flush=True)
@@ -2186,6 +2228,8 @@ def main(args, rank, world_size, local_rank, device):
                     "kn_realistic_glob": args.kn_realistic_glob,
                     "kn_dense_glob": args.kn_dense_glob,
                     "norm_stats_path": norm_stats_path,
+                    "config_study": studyIDX,
+                    "seed": SEED,
                 },
                 new_chkpt_path,
             )
@@ -2200,7 +2244,7 @@ def main(args, rank, world_size, local_rank, device):
             # missing record (e.g. an epoch skipped by train_per_val) is a no-op.
             best_val_glob = val_rcrd_filename.replace("<epochIDX>", "*")
             best_epoch, best_loss, best_path = update_best_checkpoint(
-                studyIDX, best_val_glob, ckpt_dir="./"
+                RUN_STUDY, best_val_glob, ckpt_dir="./"
             )
             if best_epoch is not None:
                 print(
@@ -2216,9 +2260,15 @@ def main(args, rank, world_size, local_rank, device):
         FINISHED_TRAINING = epochIDX + 1 > total_epochs
         if not FINISHED_TRAINING:
             new_slurm_file = continuation_setup(
-                new_chkpt_path, studyIDX, last_epoch=epochIDX
+                new_chkpt_path, RUN_STUDY, last_epoch=epochIDX
             )
             os.system(f"sbatch {new_slurm_file}")
+        elif os.path.exists("./NEXT_STUDY"):
+            # Seed sweeps (make_seed_sweep.py): hand the lane to the next run.
+            with open("./NEXT_STUDY") as f:
+                next_dir, next_slurm = f.read().split()
+            print(f"Training done; submitting next study in {next_dir}", flush=True)
+            os.system(f"cd {next_dir} && sbatch {next_slurm}")
 
 if __name__ == "__main__":
     print('running main')

@@ -20,6 +20,11 @@ parser = argparse.ArgumentParser(
     prog="HARNESS START", description="Starts execution of training harness"
 )
 parser = cli.add_default_args(parser)
+parser.add_argument(
+    "--no_submit",
+    action="store_true",
+    help="Set up the study directories but do not submit any jobs.",
+)
 args = parser.parse_args()
 
 training_START_input = "./training_START.input"
@@ -211,6 +216,9 @@ for k, study in enumerate(studylist):
         shutil.copy(f, studydirname)
 
     # Submit a job with the appropriate submission type
+    if args.no_submit:
+        continue
+
     if args.submissionType.lower() == "slurm":
         slurm_cmd = (
             f"cd {studydirname}; sbatch {START_slurm_name}; "
