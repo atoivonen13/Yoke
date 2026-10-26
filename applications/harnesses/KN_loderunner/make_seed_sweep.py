@@ -40,8 +40,37 @@ parser.add_argument("--sweep_csv", default="./seed_sweep.csv",
                     help="CSV written for the replica rows.")
 parser.add_argument("--rundir", default="./runs")
 parser.add_argument("--cpFile", default="./cp_files.txt")
+parser.add_argument("--start_script", default=None,
+                    help="Path to START_study.py. Default: ./ then ../, then "
+                    "applications/harnesses/ of the installed yoke repo.")
 parser.add_argument("--dry_run", action="store_true")
 args = parser.parse_args()
+
+
+def find_start_script() -> str:
+    """Locate START_study.py (standalone harness copies have no ../)."""
+    if args.start_script is not None:
+        candidates = [args.start_script]
+    else:
+        candidates = ["./START_study.py", "../START_study.py"]
+        try:
+            import yoke
+
+            repo = os.path.dirname(os.path.dirname(os.path.dirname(yoke.__file__)))
+            candidates.append(
+                os.path.join(repo, "applications", "harnesses", "START_study.py")
+            )
+        except ImportError:
+            pass
+    for path in candidates:
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    raise FileNotFoundError(
+        f"START_study.py not found (tried {candidates}); pass --start_script."
+    )
+
+
+start_script = find_start_script()
 
 if args.first_seed + args.n_seeds > 100:
     raise ValueError("Replica study = config*100 + seed, so seeds must be < 100.")
@@ -83,12 +112,15 @@ for i, lane in enumerate(lanes):
 
 sweep.to_csv(args.sweep_csv)
 print(f"Wrote {args.sweep_csv}")
+print(f"Using {start_script}")
 if args.dry_run:
     raise SystemExit(0)
 
 # Build every study dir (templates, inputs, copied scripts) without submitting.
+# An older START_study.py without --no_submit exits on the unknown flag here, so
+# it can never submit behind the chaining.
 subprocess.run(
-    ["python", "../START_study.py", "--csv", args.sweep_csv,
+    ["python", start_script, "--csv", args.sweep_csv,
      "--rundir", args.rundir, "--cpFile", args.cpFile, "--no_submit"],
     check=True,
 )
