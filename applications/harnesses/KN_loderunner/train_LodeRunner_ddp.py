@@ -925,7 +925,11 @@ def main(args, rank, world_size, local_rank, device):
     # Study 215: = 209 (pivot-direct ON) with build_finetune_optimizer now training
     # w_z -- the first run where the redshift level term is live. Read vs the
     # 209/213 seed pair (0.8581 / 0.8515 uniform, seed floor ~0.05).
-    if studyIDX in (213, 216, 217):
+    # Study 211 joins the list for its seed replicas (21100-...): the original
+    # 211 ran before the w_z fix, so its redshift term was exactly zero; with w_z
+    # now trained, pivot-direct ON would make the replicas a different model.
+    # Off = the original 211, and matches the 213 / 217 sweeps.
+    if studyIDX in (211, 213, 216, 217):
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
         print(
