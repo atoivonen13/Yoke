@@ -793,10 +793,16 @@ def main(args, rank, world_size, local_rank, device):
     # weights). The missing arm of the 208/209 comparison: 208 vs 209 changed
     # init AND scope, so 211 vs 209 isolates init and 211 vs 208 isolates scope,
     # both on the same 300-epoch anneal (TERMINAL_STEPS = 15000).
+    # Study 217: = 203 (PRETRAINED ViT, event tokens, decoder scope = last 2
+    # blocks, mult 0.1) run to 300 epochs (TERMINAL_STEPS = 15000), redshift off.
+    # That is 208 with pivot-direct off: 208 predates the w_z optimizer fix, so its
+    # redshift term was exactly zero; turning it off keeps 217 the same model now
+    # that w_z trains. Only run as seed replicas (make_seed_sweep --configs 217
+    # -> 21700-21704), the pretrained-decoder arm vs the 213 sweep.
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216, 217):
         EVENT_TOKENS = True
     if studyIDX in (204, 207, 209, 210, 211, 213, 215, 216):
         BACKBONE_FINETUNE_SCOPE = "full"
@@ -811,7 +817,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 216: = 213 (the champion, no redshift) run to 500 epochs with the
     # anneal stretched to match (TERMINAL_STEPS = 25000). 207 -> 209 (100 -> 300
     # ep) gained 0.106; 216 asks whether the schedule is still the lever.
-    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216):
+    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216, 217):
         total_epochs = 500 if studyIDX == 216 else 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
@@ -919,7 +925,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 215: = 209 (pivot-direct ON) with build_finetune_optimizer now training
     # w_z -- the first run where the redshift level term is live. Read vs the
     # 209/213 seed pair (0.8581 / 0.8515 uniform, seed floor ~0.05).
-    if studyIDX in (213, 216):
+    if studyIDX in (213, 216, 217):
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
         print(

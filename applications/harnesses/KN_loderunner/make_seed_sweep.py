@@ -36,8 +36,9 @@ parser.add_argument("--lanes", type=int, default=None,
                     help="Number of concurrent chains. Default: all at once.")
 parser.add_argument("--csv", default="./ddp_production.csv",
                     help="CSV holding the config studies' rows.")
-parser.add_argument("--sweep_csv", default="./seed_sweep.csv",
-                    help="CSV written for the replica rows.")
+parser.add_argument("--sweep_csv", default=None,
+                    help="CSV written for the replica rows. Default: "
+                    "./seed_sweep_<configs>.csv.")
 parser.add_argument("--rundir", default="./runs")
 parser.add_argument("--cpFile", default="./cp_files.txt")
 parser.add_argument("--start_script", default=None,
@@ -45,6 +46,8 @@ parser.add_argument("--start_script", default=None,
                     "applications/harnesses/ of the installed yoke repo.")
 parser.add_argument("--dry_run", action="store_true")
 args = parser.parse_args()
+if args.sweep_csv is None:
+    args.sweep_csv = "./seed_sweep_" + "_".join(map(str, args.configs)) + ".csv"
 
 
 def find_start_script() -> str:
