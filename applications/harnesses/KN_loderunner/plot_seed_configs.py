@@ -119,21 +119,45 @@ def welch_p(a: np.ndarray, b: np.ndarray) -> float:
     return float(ttest_ind(a, b, equal_var=False).pvalue)
 
 
-def load_configs(configs: list, labels: list, seeds: list, runs_root: str) -> list:
+def load_configs(configs: list, labels: list, seeds: list, runs_root: str,
+                 config_run: str) -> list:
     """Evaluated replicas per config. Each config keeps the series slot of its
-    position in ``configs``, so leaving one out never repaints the others."""
+    position in ``configs``, so leaving one out never repaints the others.
+
+    ``config_run``: ``fallback`` uses the original study ``config`` (one run, no
+    seed sigma) when no replica is evaluated yet; ``always`` adds it as one more
+    seed; ``never`` uses replicas only.
+    """
     out = []
     for slot, (config, label) in enumerate(zip(configs, labels)):
         studies = [config * 100 + s for s in seeds]
         runs = load_available(studies, runs_root,
                               [f"{label}, seed {s % 100}" for s in studies])
+        n_rep = len(runs)
+        if config_run == "always" or (config_run == "fallback" and not runs):
+            runs += load_available([config], runs_root, [f"{label}, study {config}"])
         if not runs:
-            print(f"WARNING: config {config}: no evaluated replica; left out.")
+            print(f"WARNING: config {config}: no evaluated replica or study "
+                  f"{config}; left out.")
             continue
-        if len(runs) < 2:
-            print(f"WARNING: config {config}: 1 replica, so no seed sigma.")
-        out.append({"config": config, "label": label, "slot": slot, "runs": runs})
+        out.append({"config": config, "label": label, "slot": slot, "runs": runs,
+                    "n_rep": n_rep})
+    print("\nRuns per config:")
+    for c in out:
+        note = "" if c["n_rep"] == len(c["runs"]) else \
+            f"  ({c['n_rep']} replicas + original study {c['config']})"
+        if c["n_rep"] == 0:
+            note = f"  (NO replica evaluated: original study {c['config']} only, no σ)"
+        print(f"  {c['config']:>4} {c['label']:<32} "
+              f"{[r['study'] for r in c['runs']]}{note}")
     return out
+
+
+def n_runs_label(c: dict) -> str:
+    """Tick-label suffix: seed count, or that only the single original run exists."""
+    if c["n_rep"] == 0:
+        return "(1 run, no σ)"
+    return f"({len(c['runs'])} seeds)"
 
 
 def add_stats(cfgs: list, boot: ObjectBootstrap, how: str) -> None:
@@ -213,7 +237,7 @@ def fig_overview(cfgs: list, ref: dict | None, how: str) -> plt.Figure:
         ax.set_xlim(lo - pad, hi + (9.0 if annotate else 1.5) * pad)
         ax.set_xlabel(METRIC_NAMES[m] + (", all bands" if not signed else ""))
         panel_letter(ax, letter)
-    axes[0].set_yticks(y, [f"{c['label']}\n{c['config']} · {len(c['runs'])} seeds"
+    axes[0].set_yticks(y, [f"{c['label']}\n{c['config']} · {n_runs_label(c)[1:-1]}"
                            for c in cfgs])
     handles = [
         plt.Line2D([], [], color=MUTED, marker="o", ls="none", alpha=0.55,
@@ -252,7 +276,7 @@ def fig_rmse_vs_config(cfgs: list, how: str, metric: str) -> plt.Figure:
         ax.annotate(f"{cv:.3f}", (x[i] + 0.08, top), xytext=(0, 4),
                     textcoords="offset points", ha="center", va="bottom",
                     fontsize=7, color=INK)
-    ax.set_xticks(x, [textwrap.fill(c["label"], 16) + f"\n({len(c['runs'])} seeds)"
+    ax.set_xticks(x, [textwrap.fill(c["label"], 16) + "\n" + n_runs_label(c)
                       for c in cfgs])
     ax.set_xlim(-0.6, n - 0.4)
     ax.margins(y=0.12)
@@ -434,6 +458,11 @@ def main() -> None:
     p.add_argument("--center", choices=("mean", "median"), default="mean")
     p.add_argument("--metric", choices=tuple(METRIC_NAMES), default="uniform_rmse",
                    help="Metric of the rmse_vs_config figure.")
+    p.add_argument("--config_run", choices=("fallback", "always", "never"),
+                   default="fallback",
+                   help="Original study <config> itself: use it when no replica "
+                   "is evaluated yet (fallback), add it as an extra seed (always), "
+                   "or ignore it (never).")
     p.add_argument("--runs_root", default="runs")
     p.add_argument("--outdir", default=None,
                    help="Figure dir (default runs/seed_configs_<configs>).")
@@ -450,11 +479,15 @@ def main() -> None:
     labels = args.labels or [CONFIG_LABELS.get(c, f"Study {c}") for c in args.configs]
 
     set_style()
-    cfgs = load_configs(args.configs, labels, args.seeds, args.runs_root)
+    cfgs = load_configs(args.configs, labels, args.seeds, args.runs_root,
+                        args.config_run)
     if not cfgs:
         raise SystemExit("No config has an evaluated replica.")
     runs = [r for c in cfgs for r in c["runs"]]
     common = common_objects(runs)
+    n_each = [r["uniform"]["stem"].nunique() for r in runs]
+    print(f"\n{len(common)} test objects common to all {len(runs)} runs "
+          f"(per run {min(n_each)}-{max(n_each)}).")
     for r in runs:
         restrict_to(r, common)
     boot = ObjectBootstrap(list(common), args.n_boot, 0)
