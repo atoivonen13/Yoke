@@ -9,8 +9,10 @@ model and seed, never in test sample. A config is drawn as its center over seeds
 noise that matters between configs -- not a test-sample CI); single seeds are
 small dots.
 
-Figures (PDF + PNG, 7.0 in two-column width) in ``--outdir``:
+Figures (PDF + PNG) in ``--outdir``:
 
+  0. ``rmse_vs_config`` ``--metric`` (default uniform-truth RMSE, all bands) vs
+                       config: seed dots + center +- 1 sigma;
   1. ``overview``      (a) uniform-truth RMSE, (b) dense-truth RMSE, (c) bias,
                        all bands pooled, one row per config;
   2. ``by_band``       (a) uniform RMSE, (b) bias, (c) calibrated 90% coverage
@@ -32,6 +34,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import textwrap
 import warnings
 
 import matplotlib
@@ -225,6 +228,46 @@ def fig_overview(cfgs: list, ref: dict | None, how: str) -> plt.Figure:
     return fig
 
 
+def fig_rmse_vs_config(cfgs: list, how: str, metric: str) -> plt.Figure:
+    """One metric (all bands pooled) per config: seed dots + center +- 1 sigma."""
+    n = len(cfgs)
+    fig, ax = plt.subplots(figsize=(max(3.4, 0.85 * n + 1.0), 2.8))
+    ax.tick_params(axis="x", length=0)
+    if metric in SIGNED:
+        ax.axhline(0.0, color=AXIS, lw=0.6)
+    x = np.arange(n, dtype=float)
+    for i, c in enumerate(cfgs):
+        st = series_style(c["slot"])
+        v = c["stack"][metric][:, -1]
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            continue
+        cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
+        ax.plot(np.full(v.size, x[i] - 0.18), v, ls="none", marker=st["marker"],
+                color=st["color"], alpha=0.55, markersize=3, mew=0)
+        ax.errorbar([x[i] + 0.08], [cv], yerr=[[sd], [sd]] if np.isfinite(sd) else None,
+                    fmt=st["marker"], color=st["color"], markersize=5.5,
+                    elinewidth=1.2, capsize=2.5, mec="white", mew=0.6)
+        top = max(v.max(), cv + (sd if np.isfinite(sd) else 0.0))
+        ax.annotate(f"{cv:.3f}", (x[i] + 0.08, top), xytext=(0, 4),
+                    textcoords="offset points", ha="center", va="bottom",
+                    fontsize=7, color=INK)
+    ax.set_xticks(x, [textwrap.fill(c["label"], 16) + f"\n({len(c['runs'])} seeds)"
+                      for c in cfgs])
+    ax.set_xlim(-0.6, n - 0.4)
+    ax.margins(y=0.12)
+    ax.set_ylabel(METRIC_NAMES[metric] + ("\nall bands" if metric not in SIGNED
+                                          else ""))
+    handles = [
+        plt.Line2D([], [], color=MUTED, marker="o", ls="none", alpha=0.55,
+                   markersize=3, mew=0),
+        plt.Line2D([], [], color=MUTED, marker="o", ls="-", lw=1.2, markersize=5),
+    ]
+    top_legend(fig, handles, ["One seed", f"{how.capitalize()} ± 1σ across seeds"],
+               ncol=2)
+    return fig
+
+
 def fig_by_band(cfgs: list) -> plt.Figure:
     """Per-band uniform RMSE, bias and coverage: center +- 1 sigma per config."""
     rows = [m for m in ("uniform_rmse", "uniform_bias", "cov_cal")
@@ -389,6 +432,8 @@ def main() -> None:
                    help="Config the differences are taken against (default: the "
                    "first; -1 for none).")
     p.add_argument("--center", choices=("mean", "median"), default="mean")
+    p.add_argument("--metric", choices=tuple(METRIC_NAMES), default="uniform_rmse",
+                   help="Metric of the rmse_vs_config figure.")
     p.add_argument("--runs_root", default="runs")
     p.add_argument("--outdir", default=None,
                    help="Figure dir (default runs/seed_configs_<configs>).")
@@ -425,7 +470,9 @@ def main() -> None:
         args.runs_root, "seed_configs_" + "_".join(str(c["config"]) for c in cfgs))
     os.makedirs(outdir, exist_ok=True)
     fmts = tuple(args.formats)
-    for name, fig in (("overview", fig_overview(cfgs, ref, args.center)),
+    for name, fig in (("rmse_vs_config",
+                       fig_rmse_vs_config(cfgs, args.center, args.metric)),
+                      ("overview", fig_overview(cfgs, ref, args.center)),
                       ("by_band", fig_by_band(cfgs)),
                       ("rmse_vs_lead", fig_vs_lead(cfgs, lead_edges(runs), boot,
                                                   args.center))):
