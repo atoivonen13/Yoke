@@ -1,0 +1,93 @@
+# Publication plots: Times New Roman, single-column default (inches).
+# Usage: plt.style.use("publication.mplstyle")
+# Install Times New Roman on the machine that renders the figure.
+# Sizes are in points; choose the final figure dimensions before plotting.
+
+# Fonts and math (no LaTeX installation needed).
+font.family: serif
+font.serif: Times New Roman
+font.size: 10
+text.usetex: False
+mathtext.fontset: custom
+mathtext.rm: Times New Roman
+mathtext.it: Times New Roman:italic
+mathtext.bf: Times New Roman:bold
+mathtext.bfit: Times New Roman:italic:bold
+mathtext.sf: Times New Roman
+mathtext.tt: Times New Roman
+mathtext.cal: STIXGeneral:italic
+mathtext.fallback: stix
+
+# Figure size and layout. For two columns, use figsize=(7.0, 4.5).
+figure.figsize: 3.5, 2.7
+figure.dpi: 150
+figure.facecolor: white
+figure.constrained_layout.use: True
+
+# Axes and labels.
+axes.facecolor: white
+axes.edgecolor: black
+axes.linewidth: 0.8
+axes.labelsize: 11
+axes.labelpad: 4
+axes.titlesize: 11
+axes.titleweight: normal
+axes.titlepad: 6
+axes.grid: False
+axes.spines.top: True
+axes.spines.right: True
+axes.formatter.use_mathtext: True
+axes.formatter.limits: -3, 4
+axes.unicode_minus: True
+
+# Inward ticks on all sides.
+xtick.direction: in
+ytick.direction: in
+xtick.top: True
+ytick.right: True
+xtick.labelsize: 9
+ytick.labelsize: 9
+xtick.minor.visible: True
+ytick.minor.visible: True
+xtick.major.size: 4
+ytick.major.size: 4
+xtick.minor.size: 2
+ytick.minor.size: 2
+xtick.major.width: 0.8
+ytick.major.width: 0.8
+xtick.minor.width: 0.6
+ytick.minor.width: 0.6
+xtick.major.pad: 4
+ytick.major.pad: 4
+
+# Lines, markers, and error bars.
+lines.linewidth: 1.4
+lines.markersize: 4
+lines.markeredgewidth: 0.7
+errorbar.capsize: 2
+# Hex colors omit the hash for mplstyle compatibility.
+axes.prop_cycle: cycler('color', ['0072B2', 'D55E00', '009E73', 'CC79A7', 'E69F00', '56B4E9', '000000'])
+image.cmap: viridis
+
+# Legends and optional grid appearance.
+legend.fontsize: 9
+legend.title_fontsize: 9
+legend.frameon: False
+legend.numpoints: 1
+legend.handlelength: 1.8
+legend.borderaxespad: 0.5
+grid.color: 0.85
+grid.linewidth: 0.5
+grid.alpha: 0.6
+
+# Exports: PDF is vector; DPI affects PNG and rasterized plot elements.
+savefig.format: pdf
+savefig.dpi: 600
+savefig.facecolor: white
+savefig.transparent: False
+savefig.pad_inches: 0.04
+# Embed TrueType fonts in PDF/PS; keep SVG text editable.
+pdf.fonttype: 42
+ps.fonttype: 42
+svg.fonttype: none
+
