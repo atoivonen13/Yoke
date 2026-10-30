@@ -32,6 +32,8 @@ over seeds). Configs with no evaluated replica are left out with a warning.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import glob
 import os
 import sys
 import textwrap
@@ -43,6 +45,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from matplotlib import font_manager  # noqa: E402
+from matplotlib.ticker import NullLocator  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_compare_runs import GRID_SEP, common_objects  # noqa: E402
@@ -54,6 +58,7 @@ from plot_run_report import (  # noqa: E402
     INK,
     INK_2,
     MUTED,
+    SERIES,
     ObjectBootstrap,
     band_axis,
     dodge,
@@ -71,6 +76,9 @@ from plot_run_report import (  # noqa: E402
     write_tex,
 )
 from plot_seed_replicas import band_separators, load_available  # noqa: E402
+
+DEFAULT_STYLE = "publication.mplstyle"
+DEFAULT_FONT_DIR = "/usr/share/fonts/urw-base35"  # Nimbus Roman (Times metrics)
 
 DEFAULT_CONFIGS = (213, 211, 217, 212, 910)
 # Concise legend / axis names (see STUDY_LOG.md for the full recipes). All
@@ -109,6 +117,56 @@ SIGNED = ("uniform_bias", "beyond_bias")
 # Metrics in the tables and printout, in column order.
 TABLE_METRICS = ("uniform_rmse", "dense_rmse", "uniform_bias", "beyond_bias",
                  "cov_cal")
+
+
+def find_style(name: str) -> str | None:
+    """Path of the style file ``name``: as given, else in the cwd, this script's
+    dir or any parent of it (the repo root keeps ``publication.mplstyle``)."""
+    if os.path.isfile(name):
+        return os.path.abspath(name)
+    if os.path.isabs(name):
+        return None
+    d = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        path = os.path.join(d, name)
+        if os.path.isfile(path):
+            return path
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def load_pub_style(style: str, font_dir: str) -> str | None:
+    """Register the style's fonts and return the style path (None = not found)."""
+    for f in sorted(glob.glob(os.path.join(font_dir, "*.otf"))
+                    + glob.glob(os.path.join(font_dir, "*.ttf"))):
+        font_manager.fontManager.addfont(f)
+    path = find_style(style)
+    if path is None:
+        print(f"WARNING: style {style!r} not found (cwd, script dir or a parent); "
+              "rmse_vs_config uses the default house style.")
+        return None
+    family = matplotlib.rc_params_from_file(path, use_default_template=False).get(
+        "font.serif")
+    if family:
+        try:
+            print(f"Style {path}: font {family[0]!r} -> "
+                  f"{font_manager.findfont(family[0], fallback_to_default=False)}")
+        except ValueError:
+            print(f"WARNING: font {family[0]!r} of {path} not installed (looked "
+                  f"in {font_dir} too); matplotlib falls back to its default serif.")
+    return path
+
+
+def pub_context(path: str | None) -> contextlib.AbstractContextManager:
+    """rc context of the publication style (the house style when ``path`` is None).
+
+    The house rcParams are reset first so nothing of ``set_style`` leaks in.
+    """
+    if path is None:
+        return contextlib.nullcontext()
+    return plt.style.context(["default", path])
 
 
 def center_of(v: np.ndarray, how: str) -> np.ndarray:
@@ -276,22 +334,44 @@ def tick_label(c: dict) -> str:
         c["config"]) else None
     name = name or textwrap.fill(c["label"], 15)
     n = len(c["runs"])
-    return f"{name}\n$n={n}$" + (" (no σ)" if n < 2 else "")
+    # sigma in mathtext: the style's text font may lack Greek, its math has stix.
+    return f"{name}\n$n={n}$" + (" (no $\\sigma$)" if n < 2 else "")
 
 
 def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
-                       metric: str) -> tuple:
+                       metric: str, styled: bool = False) -> tuple:
     """Publication figure: one metric (all bands pooled) per config.
 
     Hollow markers = individual seeds (evenly jittered), horizontal bar = seed
     center, whisker = +-1 sigma across seeds; ``ref``'s center +- sigma is a light
     horizontal band so every config reads against it. Returns (figure, caption).
+
+    ``styled``: drawn inside a publication style (``pub_context``) -- fonts,
+    sizes, ticks, spines and figure width come from it; only the category axis
+    is adjusted (no ticks / minor ticks between configs).
     """
     n = len(cfgs)
-    fig, ax = plt.subplots(figsize=(HALF_W if n <= 5 else FULL_W, 2.5))
-    ax.tick_params(axis="x", length=0, pad=3)
-    ax.tick_params(axis="x", labelsize=7, labelcolor=INK)
-    ax.spines["bottom"].set_visible(False)
+    prm = plt.rcParams
+    if styled:
+        # The style's single-column width fits ~3 two-line category labels at
+        # its tick size; more configs go to two-column width (2x, ~7 in).
+        w, h = prm["figure.figsize"]
+        fig, ax = plt.subplots(figsize=(w if n <= 3 else 2 * w, h))
+        ax.xaxis.set_minor_locator(NullLocator())  # categories: no minor ticks
+        ax.tick_params(axis="x", which="both", length=0, top=False)
+        cycle = prm["axes.prop_cycle"].by_key().get("color", list(SERIES))
+        note_size, note_color = prm["xtick.labelsize"], prm["text.color"]
+        lw, ms, mew = prm["lines.linewidth"], prm["lines.markersize"], \
+            prm["lines.markeredgewidth"]
+        cap = prm["errorbar.capsize"] + 1
+    else:
+        fig, ax = plt.subplots(figsize=(HALF_W if n <= 5 else FULL_W, 2.5))
+        ax.tick_params(axis="x", length=0, pad=3)
+        ax.tick_params(axis="x", labelsize=7, labelcolor=INK)
+        ax.spines["bottom"].set_visible(False)
+        cycle = list(SERIES)
+        note_size, note_color = 6.5, INK_2
+        lw, ms, mew, cap = 1.8, 3.6, 0.8, 3
     x = np.arange(n, dtype=float)
     if metric in SIGNED:
         ax.axhline(0.0, color=AXIS, lw=0.6, zorder=1)
@@ -304,27 +384,28 @@ def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
     half = 0.17  # half-width of the center bar (x units)
     lows, highs = [], []
     for i, c in enumerate(cfgs):
-        st = series_style(c["slot"])
+        marker = series_style(c["slot"])["marker"]
+        color = cycle[c["slot"] % len(cycle)]  # color follows the config slot
         v = c["stack"][metric][:, -1]
         v = v[np.isfinite(v)]
         if v.size == 0:
             continue
         cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
         jit = np.linspace(-0.11, 0.11, v.size) if v.size > 1 else np.zeros(1)
-        ax.plot(x[i] + jit, v, ls="none", marker=st["marker"], mfc="white",
-                mec=st["color"], mew=0.8, markersize=3.6, zorder=3)
+        ax.plot(x[i] + jit, v, ls="none", marker=marker, mfc="white",
+                mec=color, mew=mew, markersize=ms, zorder=3)
         if v.size > 1:
             ax.errorbar([x[i]], [cv], yerr=[[sd], [sd]], fmt="none",
-                        ecolor=st["color"], elinewidth=0.9, capsize=3,
-                        capthick=0.9, zorder=4)
-            ax.plot([x[i] - half, x[i] + half], [cv, cv], color=st["color"],
-                    lw=1.8, solid_capstyle="butt", zorder=4)
+                        ecolor=color, elinewidth=0.5 * lw, capsize=cap,
+                        capthick=0.5 * lw, zorder=4)
+            ax.plot([x[i] - half, x[i] + half], [cv, cv], color=color,
+                    lw=lw, solid_capstyle="butt", zorder=4)
         top = max(v.max(), cv + (sd if np.isfinite(sd) else 0.0))
         lows.append(min(v.min(), cv - (sd if np.isfinite(sd) else 0.0)))
         highs.append(top)
         text = (f"{cv:.3f}" if v.size < 2 else f"{cv:.3f}\n±{sd:.3f}")
         ax.annotate(text, (x[i], top), xytext=(0, 3), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=6.5, color=INK_2,
+                    ha="center", va="bottom", fontsize=note_size, color=note_color,
                     linespacing=1.0)
     lo, hi = min(lows), max(highs)
     if has_ref:
@@ -522,6 +603,12 @@ def main() -> None:
                    help="Original study <config> itself: use it when no replica "
                    "is evaluated yet (fallback), add it as an extra seed (always), "
                    "or ignore it (never).")
+    p.add_argument("--style", default=DEFAULT_STYLE,
+                   help="Matplotlib style of the rmse_vs_config figure (path, or a "
+                   "name searched in the cwd, this dir and its parents); 'none' "
+                   "for the house style. The other figures keep the house style.")
+    p.add_argument("--font_dir", default=DEFAULT_FONT_DIR,
+                   help="Extra .otf/.ttf fonts to register (the style's font).")
     p.add_argument("--runs_root", default="runs")
     p.add_argument("--outdir", default=None,
                    help="Figure dir (default runs/seed_configs_<configs>).")
@@ -562,8 +649,14 @@ def main() -> None:
         args.runs_root, "seed_configs_" + "_".join(str(c["config"]) for c in cfgs))
     os.makedirs(outdir, exist_ok=True)
     fmts = tuple(args.formats)
-    fig, caption = fig_rmse_vs_config(cfgs, ref, args.center, args.metric)
-    save(fig, outdir, "rmse_vs_config", fmts)
+    style = None if args.style == "none" else load_pub_style(args.style,
+                                                             args.font_dir)
+    # Drawn AND saved inside the style: savefig.* (dpi, padding) and the fonts
+    # are read at save time.
+    with pub_context(style):
+        fig, caption = fig_rmse_vs_config(cfgs, ref, args.center, args.metric,
+                                          styled=style is not None)
+        save(fig, outdir, "rmse_vs_config", fmts)
     path = os.path.join(outdir, "rmse_vs_config_caption.txt")
     with open(path, "w") as fh:
         fh.write(caption + "\n")
