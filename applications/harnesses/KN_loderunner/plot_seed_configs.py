@@ -45,12 +45,14 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_compare_runs import common_objects  # noqa: E402
+from plot_compare_runs import GRID_SEP, common_objects  # noqa: E402
 from plot_run_report import (  # noqa: E402
     AXIS,
     FULL_W,
     GROUP_NAMES,
+    HALF_W,
     INK,
+    INK_2,
     MUTED,
     ObjectBootstrap,
     band_axis,
@@ -79,6 +81,22 @@ CONFIG_LABELS = {
     217: "ViT, pretrained, last 2 blocks",
     212: "No ViT (head only)",
     910: "1D U-Net",
+}
+# Two-line tick labels of the publication figure (used while the label is the
+# default one above; a --labels override is wrapped automatically instead).
+PUB_LABELS = {
+    213: "ViT\nrandom init",
+    211: "ViT\npretrained",
+    217: "ViT, pretrained\nlast 2 blocks",
+    212: "No ViT\n(head only)",
+    910: "1D U-Net\nbaseline",
+}
+PUB_YLABELS = {
+    "uniform_rmse": "RMSE (mag)",
+    "dense_rmse": "RMSE vs. dense truth (mag)",
+    "uniform_bias": "Mean residual (mag)",
+    "beyond_bias": "Mean residual beyond depth (mag)",
+    "cov_cal": "Coverage of 90% interval",
 }
 METRIC_NAMES = {
     "uniform_rmse": "Uniform-truth RMSE (mag)",
@@ -252,14 +270,39 @@ def fig_overview(cfgs: list, ref: dict | None, how: str) -> plt.Figure:
     return fig
 
 
-def fig_rmse_vs_config(cfgs: list, how: str, metric: str) -> plt.Figure:
-    """One metric (all bands pooled) per config: seed dots + center +- 1 sigma."""
+def tick_label(c: dict) -> str:
+    """Two-line config name (PUB_LABELS, else wrapped label) + run count."""
+    name = PUB_LABELS.get(c["config"]) if c["label"] == CONFIG_LABELS.get(
+        c["config"]) else None
+    name = name or textwrap.fill(c["label"], 15)
+    n = len(c["runs"])
+    return f"{name}\n$n={n}$" + (" (no σ)" if n < 2 else "")
+
+
+def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
+                       metric: str) -> tuple:
+    """Publication figure: one metric (all bands pooled) per config.
+
+    Hollow markers = individual seeds (evenly jittered), horizontal bar = seed
+    center, whisker = +-1 sigma across seeds; ``ref``'s center +- sigma is a light
+    horizontal band so every config reads against it. Returns (figure, caption).
+    """
     n = len(cfgs)
-    fig, ax = plt.subplots(figsize=(max(3.4, 0.85 * n + 1.0), 2.8))
-    ax.tick_params(axis="x", length=0)
-    if metric in SIGNED:
-        ax.axhline(0.0, color=AXIS, lw=0.6)
+    fig, ax = plt.subplots(figsize=(HALF_W if n <= 5 else FULL_W, 2.5))
+    ax.tick_params(axis="x", length=0, pad=3)
+    ax.tick_params(axis="x", labelsize=7, labelcolor=INK)
+    ax.spines["bottom"].set_visible(False)
     x = np.arange(n, dtype=float)
+    if metric in SIGNED:
+        ax.axhline(0.0, color=AXIS, lw=0.6, zorder=1)
+    has_ref = ref is not None and np.isfinite(ref["center"][metric][-1])
+    if has_ref:
+        rc, rs = ref["center"][metric][-1], ref["sd"][metric][-1]
+        if np.isfinite(rs):
+            ax.axhspan(rc - rs, rc + rs, color=GRID_SEP, lw=0, zorder=0)
+        ax.axhline(rc, color=AXIS, lw=0.6, ls=(0, (2, 2)), zorder=1)
+    half = 0.17  # half-width of the center bar (x units)
+    lows, highs = [], []
     for i, c in enumerate(cfgs):
         st = series_style(c["slot"])
         v = c["stack"][metric][:, -1]
@@ -267,29 +310,45 @@ def fig_rmse_vs_config(cfgs: list, how: str, metric: str) -> plt.Figure:
         if v.size == 0:
             continue
         cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
-        ax.plot(np.full(v.size, x[i] - 0.18), v, ls="none", marker=st["marker"],
-                color=st["color"], alpha=0.55, markersize=3, mew=0)
-        ax.errorbar([x[i] + 0.08], [cv], yerr=[[sd], [sd]] if np.isfinite(sd) else None,
-                    fmt=st["marker"], color=st["color"], markersize=5.5,
-                    elinewidth=1.2, capsize=2.5, mec="white", mew=0.6)
+        jit = np.linspace(-0.11, 0.11, v.size) if v.size > 1 else np.zeros(1)
+        ax.plot(x[i] + jit, v, ls="none", marker=st["marker"], mfc="white",
+                mec=st["color"], mew=0.8, markersize=3.6, zorder=3)
+        if v.size > 1:
+            ax.errorbar([x[i]], [cv], yerr=[[sd], [sd]], fmt="none",
+                        ecolor=st["color"], elinewidth=0.9, capsize=3,
+                        capthick=0.9, zorder=4)
+            ax.plot([x[i] - half, x[i] + half], [cv, cv], color=st["color"],
+                    lw=1.8, solid_capstyle="butt", zorder=4)
         top = max(v.max(), cv + (sd if np.isfinite(sd) else 0.0))
-        ax.annotate(f"{cv:.3f}", (x[i] + 0.08, top), xytext=(0, 4),
-                    textcoords="offset points", ha="center", va="bottom",
-                    fontsize=7, color=INK)
-    ax.set_xticks(x, [textwrap.fill(c["label"], 16) + "\n" + n_runs_label(c)
-                      for c in cfgs])
-    ax.set_xlim(-0.6, n - 0.4)
-    ax.margins(y=0.12)
-    ax.set_ylabel(METRIC_NAMES[metric] + ("\nall bands" if metric not in SIGNED
-                                          else ""))
-    handles = [
-        plt.Line2D([], [], color=MUTED, marker="o", ls="none", alpha=0.55,
-                   markersize=3, mew=0),
-        plt.Line2D([], [], color=MUTED, marker="o", ls="-", lw=1.2, markersize=5),
-    ]
-    top_legend(fig, handles, ["One seed", f"{how.capitalize()} ± 1σ across seeds"],
-               ncol=2)
-    return fig
+        lows.append(min(v.min(), cv - (sd if np.isfinite(sd) else 0.0)))
+        highs.append(top)
+        text = (f"{cv:.3f}" if v.size < 2 else f"{cv:.3f}\n±{sd:.3f}")
+        ax.annotate(text, (x[i], top), xytext=(0, 3), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=6.5, color=INK_2,
+                    linespacing=1.0)
+    lo, hi = min(lows), max(highs)
+    if has_ref:
+        lo, hi = min(lo, rc - (rs if np.isfinite(rs) else 0)), max(hi, rc)
+    span = (hi - lo) or 0.05
+    ax.set_ylim(lo - 0.08 * span, hi + 0.30 * span)  # headroom for the labels
+    ax.set_xticks(x, [tick_label(c) for c in cfgs])
+    ax.set_xlim(-0.55, n - 0.45)
+    ax.set_ylabel(PUB_YLABELS[metric])
+
+    k = sorted({len(c["runs"]) for c in cfgs})
+    seeds = f"{k[0]}" if len(k) == 1 else f"{k[0]}–{k[-1]}"
+    n_obj = int(cfgs[0]["runs"][0]["uniform"]["stem"].nunique())
+    truth = ("dense truth" if metric == "dense_rmse" else
+             "the uniformly sampled true light curve")
+    caption = (
+        f"{PUB_YLABELS[metric].split(' (')[0]} of the late-time forecast against "
+        f"{truth}, all bands pooled, on {n_obj} common test objects, for each model "
+        f"configuration. Hollow markers: independent training seeds ({seeds} per "
+        f"configuration); bar and whisker: {how} ± 1 standard deviation across "
+        "seeds; numbers give the same."
+        + (f" Shaded band and dashed line: {ref['label']} ({how} ± 1σ)."
+           if has_ref else ""))
+    return fig, caption
 
 
 def fig_by_band(cfgs: list) -> plt.Figure:
@@ -503,9 +562,13 @@ def main() -> None:
         args.runs_root, "seed_configs_" + "_".join(str(c["config"]) for c in cfgs))
     os.makedirs(outdir, exist_ok=True)
     fmts = tuple(args.formats)
-    for name, fig in (("rmse_vs_config",
-                       fig_rmse_vs_config(cfgs, args.center, args.metric)),
-                      ("overview", fig_overview(cfgs, ref, args.center)),
+    fig, caption = fig_rmse_vs_config(cfgs, ref, args.center, args.metric)
+    save(fig, outdir, "rmse_vs_config", fmts)
+    path = os.path.join(outdir, "rmse_vs_config_caption.txt")
+    with open(path, "w") as fh:
+        fh.write(caption + "\n")
+    print(f"Wrote {path}")
+    for name, fig in (("overview", fig_overview(cfgs, ref, args.center)),
                       ("by_band", fig_by_band(cfgs)),
                       ("rmse_vs_lead", fig_vs_lead(cfgs, lead_edges(runs), boot,
                                                   args.center))):
