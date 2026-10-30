@@ -3,18 +3,16 @@
 # Install Times New Roman on the machine that renders the figure.
 # Sizes are in points; choose the final figure dimensions before plotting.
 
-# Fonts and math (no LaTeX installation needed).
 font.family: serif
-font.serif: Times New Roman
-font.size: 10
-text.usetex: False
+font.serif: Nimbus Roman
+
 mathtext.fontset: custom
-mathtext.rm: Times New Roman
-mathtext.it: Times New Roman:italic
-mathtext.bf: Times New Roman:bold
-mathtext.bfit: Times New Roman:italic:bold
-mathtext.sf: Times New Roman
-mathtext.tt: Times New Roman
+mathtext.rm: Nimbus Roman
+mathtext.it: Nimbus Roman:italic
+mathtext.bf: Nimbus Roman:bold
+mathtext.bfit: Nimbus Roman:italic:bold
+mathtext.sf: Nimbus Roman
+mathtext.tt: Nimbus Roman
 mathtext.cal: STIXGeneral:italic
 mathtext.fallback: stix
 
