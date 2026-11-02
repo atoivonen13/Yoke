@@ -32,8 +32,6 @@ over seeds). Configs with no evaluated replica are left out with a warning.
 from __future__ import annotations
 
 import argparse
-import contextlib
-import glob
 import os
 import sys
 import textwrap
@@ -45,7 +43,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from matplotlib import font_manager  # noqa: E402
 from matplotlib.ticker import NullLocator  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -76,9 +73,12 @@ from plot_run_report import (  # noqa: E402
     write_tex,
 )
 from plot_seed_replicas import band_separators, load_available  # noqa: E402
-
-DEFAULT_STYLE = "publication.mplstyle"
-DEFAULT_FONT_DIR = "/usr/share/fonts/urw-base35"  # Nimbus Roman (Times metrics)
+from pub_style import (  # noqa: E402
+    DEFAULT_FONT_DIR,
+    DEFAULT_STYLE,
+    load_pub_style,
+    pub_context,
+)
 
 DEFAULT_CONFIGS = (213, 211, 217, 212, 910)
 # Concise legend / axis names (see STUDY_LOG.md for the full recipes). All
@@ -117,56 +117,6 @@ SIGNED = ("uniform_bias", "beyond_bias")
 # Metrics in the tables and printout, in column order.
 TABLE_METRICS = ("uniform_rmse", "dense_rmse", "uniform_bias", "beyond_bias",
                  "cov_cal")
-
-
-def find_style(name: str) -> str | None:
-    """Path of the style file ``name``: as given, else in the cwd, this script's
-    dir or any parent of it (the repo root keeps ``publication.mplstyle``)."""
-    if os.path.isfile(name):
-        return os.path.abspath(name)
-    if os.path.isabs(name):
-        return None
-    d = os.path.dirname(os.path.abspath(__file__))
-    while True:
-        path = os.path.join(d, name)
-        if os.path.isfile(path):
-            return path
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
-
-
-def load_pub_style(style: str, font_dir: str) -> str | None:
-    """Register the style's fonts and return the style path (None = not found)."""
-    for f in sorted(glob.glob(os.path.join(font_dir, "*.otf"))
-                    + glob.glob(os.path.join(font_dir, "*.ttf"))):
-        font_manager.fontManager.addfont(f)
-    path = find_style(style)
-    if path is None:
-        print(f"WARNING: style {style!r} not found (cwd, script dir or a parent); "
-              "rmse_vs_config uses the default house style.")
-        return None
-    family = matplotlib.rc_params_from_file(path, use_default_template=False).get(
-        "font.serif")
-    if family:
-        try:
-            print(f"Style {path}: font {family[0]!r} -> "
-                  f"{font_manager.findfont(family[0], fallback_to_default=False)}")
-        except ValueError:
-            print(f"WARNING: font {family[0]!r} of {path} not installed (looked "
-                  f"in {font_dir} too); matplotlib falls back to its default serif.")
-    return path
-
-
-def pub_context(path: str | None) -> contextlib.AbstractContextManager:
-    """rc context of the publication style (the house style when ``path`` is None).
-
-    The house rcParams are reset first so nothing of ``set_style`` leaks in.
-    """
-    if path is None:
-        return contextlib.nullcontext()
-    return plt.style.context(["default", path])
 
 
 def center_of(v: np.ndarray, how: str) -> np.ndarray:
