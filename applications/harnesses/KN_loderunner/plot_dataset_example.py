@@ -69,9 +69,11 @@ FILTERS = ("g", "r", "i", "u", "g", "r", "i", "z", "y")  # filter of each band
 # Slot in the style's color cycle of each filter (one hue per filter, the same
 # for ZTF and LSST); slot 5 (sky blue, too close to slot 0) is left out.
 FILTER_SLOT = {"u": 0, "g": 2, "r": 1, "i": 3, "z": 4, "y": 6}
-# Per-band figure: one hue per dataset (style cycle slots: 2 green, 4 orange,
-# 6 black), drawn uniform line below dense dots below realistic points.
-SET_SLOT = {"realistic": 2, "dense": 4, "uniform": 6}
+# Per-band figure: one hue per dataset (style cycle slots: 1 vermillion, 5 sky
+# blue, 6 black): dark warm realistic points stand out on the light cool dense
+# cloud (they differ in hue and lightness, so also for color-blind readers),
+# drawn uniform line below dense dots below realistic points.
+SET_SLOT = {"realistic": 1, "dense": 5, "uniform": 6}
 SET_Z = {"uniform": 2, "dense": 3, "realistic": 4}
 BANDS_DENSE_MS = 0.9  # dense dot size of the per-band figure (x markersize)
 DET_MS = 0.9  # realistic detection marker of the per-band figure (x markersize)
@@ -216,13 +218,13 @@ def style_colors() -> list:
 
 def draw_set(ax: plt.Axes, kind: str, band: tuple, t0: float, x_lim: tuple,
              color: str, z: int, dense_ms: float = 0.45, line_w: float = 1.0,
-             line_ls: str = "-", open_detections: bool = False) -> None:
+             line_ls: str = "-", bold_errors: bool = False) -> None:
     """One band of one dataset: realistic detections (+-1 sigma) and upper
     limits, dense points, or the uniform curve (a line). ``dense_ms`` and
     ``line_w`` scale the style's marker size and line width.
 
-    ``open_detections``: small white-filled detection markers (they mask the
-    dense dots below) with heavier, wide-capped error bars drawn on top.
+    ``bold_errors``: heavier, wide-capped error bars drawn over the detection
+    markers, readable on top of the dense dots.
     """
     t, m, e = band
     ph = t - t0
@@ -231,10 +233,10 @@ def draw_set(ax: plt.Axes, kind: str, band: tuple, t0: float, x_lim: tuple,
     ok = np.isfinite(m) & (ph >= x_lim[0]) & (ph <= x_lim[1])
     if kind == "realistic":
         det, ul = ok & np.isfinite(e), ok & ~np.isfinite(e)
-        if open_detections:
+        if bold_errors:
             ax.errorbar(ph[det], m[det], yerr=e[det], fmt="o", color=color,
-                        ms=DET_MS * ms, mfc="white", mew=1.3 * mew,
-                        elinewidth=1.4 * mew, capsize=3, capthick=1.4 * mew,
+                        ms=DET_MS * ms, mew=mew,
+                        elinewidth=1.4 * mew, capsize=4.5, capthick=1.4 * mew,
                         barsabove=True, zorder=z + 1)
         else:
             ax.errorbar(ph[det], m[det], yerr=e[det], fmt="o", color=color,
@@ -303,7 +305,7 @@ def fig_bands(obj: dict, cutoff: float, x_lim: tuple, size: tuple,
             draw_set(ax, kind, obj[kind][b], obj["t0"], x_lim,
                      colors[SET_SLOT[kind] % len(colors)], SET_Z[kind],
                      dense_ms=BANDS_DENSE_MS, line_w=0.8, line_ls="--",
-                     open_detections=True)
+                     bold_errors=True)
         ax.set_ylim(*(y_range(obj, x_lim, (b,)) if mag_range is None
                       else (max(mag_range), min(mag_range))))
         survey = "ZTF" if b < 3 else "LSST"
@@ -315,7 +317,7 @@ def fig_bands(obj: dict, cutoff: float, x_lim: tuple, size: tuple,
     mew = plt.rcParams["lines.markeredgewidth"]
     handles = [
         Line2D([], [], color=c["realistic"], marker="o", ms=DET_MS * ms,
-               mfc="white", mew=1.3 * mew, ls="none", label="Realistic"),
+               mew=mew, ls="none", label="Realistic"),
         Line2D([], [], color=c["realistic"], marker="v", ms=ms, mfc="none",
                ls="none", label="Realistic upper limit"),
         Line2D([], [], color=c["dense"], marker="o", ms=BANDS_DENSE_MS * ms,
@@ -340,7 +342,7 @@ def caption_bands(obj: dict, how: str, cutoff: float, max_days: float,
     return (
         f"Example kilonova ({obj['stem']}; {how}) in each of the nine filters "
         "(a-c: ZTF g, r, i; d-i: LSST u, g, r, i, z, y), the three datasets "
-        "overlaid. Open circles: realistic detections at the survey cadence "
+        "overlaid. Filled circles: realistic detections at the survey cadence "
         "(error bars: 1 sigma); open triangles: realistic upper limits; "
         "dots: the dense set; dashed line: the uniform set on a regular "
         f"{grid_step(obj):.2g} d grid, the truth the forecast is scored "
