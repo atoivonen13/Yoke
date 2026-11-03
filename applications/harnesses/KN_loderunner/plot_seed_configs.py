@@ -24,7 +24,7 @@ band x metric: mean, median, std, sem, min, max), ``configs_summary.tex`` and a
 printed table with each config's difference from ``--reference`` (Welch t-test
 over seeds). Configs with no evaluated replica are left out with a warning.
 
-    python plot_seed_configs.py                  # 213 211 217 212 910, seeds 0-4
+    python plot_seed_configs.py                  # 213 217 211 910 212, seeds 0-4
     python plot_seed_configs.py --center median
     python plot_seed_configs.py --configs 213 910 --labels "ViT" "U-Net"
 """
@@ -80,24 +80,24 @@ from pub_style import (  # noqa: E402
     pub_context,
 )
 
-DEFAULT_CONFIGS = (213, 211, 217, 212, 910)
+DEFAULT_CONFIGS = (213, 217, 211, 910, 212)
 # Concise legend / axis names (see STUDY_LOG.md for the full recipes). All
 # LodeRunner configs: event-token ViT recipe, 300 epochs, redshift off.
 CONFIG_LABELS = {
-    213: "ViT, random init",
-    211: "ViT, pretrained",
-    217: "ViT, pretrained, last 2 blocks",
-    212: "No ViT (head only)",
-    910: "1D U-Net",
+    213: "ViT, fresh weights",
+    217: "ViT, decoder fine-tune",  # pretrained, last 2 blocks unfrozen
+    211: "ViT, full fine-tune",  # pretrained, all blocks unfrozen
+    910: "U-Net",
+    212: "Task-specific head only",  # ViT bypassed
 }
 # Two-line tick labels of the publication figure (used while the label is the
 # default one above; a --labels override is wrapped automatically instead).
 PUB_LABELS = {
-    213: "ViT\nrandom init",
-    211: "ViT\npretrained",
-    217: "ViT, pretrained\nlast 2 blocks",
-    212: "No ViT\n(head only)",
-    910: "1D U-Net\nbaseline",
+    213: "ViT\nfresh weights",
+    217: "ViT\ndecoder fine-tune",
+    211: "ViT\nfull fine-tune",
+    910: "U-Net",
+    212: "Task-specific\nhead only",
 }
 PUB_YLABELS = {
     "uniform_rmse": "RMSE (mag)",
