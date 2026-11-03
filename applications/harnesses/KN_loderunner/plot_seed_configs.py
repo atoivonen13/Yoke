@@ -46,7 +46,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import NullLocator  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_compare_runs import GRID_SEP, common_objects  # noqa: E402
+from plot_compare_runs import common_objects  # noqa: E402
 from plot_run_report import (  # noqa: E402
     AXIS,
     FULL_W,
@@ -292,9 +292,8 @@ def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
                        metric: str, styled: bool = False) -> tuple:
     """Publication figure: one metric (all bands pooled) per config.
 
-    Hollow markers = individual seeds (evenly jittered), horizontal bar = seed
-    center, whisker = +-1 sigma across seeds; ``ref``'s center +- sigma is a light
-    horizontal band so every config reads against it. Returns (figure, caption).
+    One filled marker per config at the seed center with a +-1 sigma (across
+    seeds) error bar, the value written above it. Returns (figure, caption).
 
     ``styled``: drawn inside a publication style (``pub_context``) -- fonts,
     sizes, ticks, spines and figure width come from it; only the category axis
@@ -325,43 +324,26 @@ def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
     x = np.arange(n, dtype=float)
     if metric in SIGNED:
         ax.axhline(0.0, color=AXIS, lw=0.6, zorder=1)
-    has_ref = ref is not None and np.isfinite(ref["center"][metric][-1])
-    if has_ref:
-        rc, rs = ref["center"][metric][-1], ref["sd"][metric][-1]
-        if np.isfinite(rs):
-            ax.axhspan(rc - rs, rc + rs, color=GRID_SEP, lw=0, zorder=0)
-        ax.axhline(rc, color=AXIS, lw=0.6, ls=(0, (2, 2)), zorder=1)
-    half = 0.17  # half-width of the center bar (x units)
     lows, highs = [], []
     for i, c in enumerate(cfgs):
         marker = series_style(c["slot"])["marker"]
         color = cycle[c["slot"] % len(cycle)]  # color follows the config slot
         v = c["stack"][metric][:, -1]
-        v = v[np.isfinite(v)]
-        if v.size == 0:
+        if not np.isfinite(v).any():
             continue
         cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
-        jit = np.linspace(-0.11, 0.11, v.size) if v.size > 1 else np.zeros(1)
-        ax.plot(x[i] + jit, v, ls="none", marker=marker, mfc="white",
-                mec=color, mew=mew, markersize=ms, zorder=3)
-        if v.size > 1:
-            ax.errorbar([x[i]], [cv], yerr=[[sd], [sd]], fmt="none",
-                        ecolor=color, elinewidth=0.5 * lw, capsize=cap,
-                        capthick=0.5 * lw, zorder=4)
-            ax.plot([x[i] - half, x[i] + half], [cv, cv], color=color,
-                    lw=lw, solid_capstyle="butt", zorder=4)
-        top = max(v.max(), cv + (sd if np.isfinite(sd) else 0.0))
-        lows.append(min(v.min(), cv - (sd if np.isfinite(sd) else 0.0)))
-        highs.append(top)
-        text = (f"{cv:.3f}" if v.size < 2 else f"{cv:.3f}\n±{sd:.3f}")
-        ax.annotate(text, (x[i], top), xytext=(0, 3), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=note_size, color=note_color,
-                    linespacing=1.0)
+        sd = sd if np.isfinite(sd) else 0.0  # one run: marker only, no bar
+        ax.errorbar([x[i]], [cv], yerr=[[sd], [sd]] if sd > 0 else None,
+                    fmt=marker, color=color, markersize=1.5 * ms, mew=mew,
+                    elinewidth=lw, capsize=cap + 1, capthick=lw, zorder=4)
+        lows.append(cv - sd)
+        highs.append(cv + sd)
+        text = f"{cv:.3f}" + (f" ± {sd:.3f}" if sd > 0 else "")
+        ax.annotate(text, (x[i], cv + sd), xytext=(0, 4), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=note_size, color=note_color)
     lo, hi = min(lows), max(highs)
-    if has_ref:
-        lo, hi = min(lo, rc - (rs if np.isfinite(rs) else 0)), max(hi, rc)
     span = (hi - lo) or 0.05
-    ax.set_ylim(lo - 0.08 * span, hi + 0.30 * span)  # headroom for the labels
+    ax.set_ylim(lo - 0.10 * span, hi + 0.15 * span)  # headroom for the labels
     ax.set_xticks(x, [tick_label(c) for c in cfgs])
     ax.set_xlim(-0.55, n - 0.45)
     ax.set_ylabel(PUB_YLABELS[metric])
@@ -374,11 +356,9 @@ def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
     caption = (
         f"{PUB_YLABELS[metric].split(' (')[0]} of the late-time forecast against "
         f"{truth}, all bands pooled, on {n_obj} common test objects, for each model "
-        f"configuration. Hollow markers: independent training seeds ({seeds} per "
-        f"configuration); bar and whisker: {how} ± 1 standard deviation across "
-        "seeds; numbers give the same."
-        + (f" Shaded band and dashed line: {ref['label']} ({how} ± 1σ)."
-           if has_ref else ""))
+        f"configuration. Markers: the {how} over {seeds} independent training "
+        "seeds; error bars: ±1 standard deviation across seeds; numbers give "
+        "the same.")
     return fig, caption
 
 
@@ -545,7 +525,7 @@ def main() -> None:
     p.add_argument("--reference", type=int, default=None,
                    help="Config the differences are taken against (default: the "
                    "first; -1 for none).")
-    p.add_argument("--center", choices=("mean", "median"), default="mean")
+    p.add_argument("--center", choices=("mean", "median"), default="median")
     p.add_argument("--metric", choices=tuple(METRIC_NAMES), default="uniform_rmse",
                    help="Metric of the rmse_vs_config figure.")
     p.add_argument("--config_run", choices=("fallback", "always", "never"),
