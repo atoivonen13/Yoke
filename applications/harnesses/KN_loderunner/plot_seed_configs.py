@@ -12,7 +12,9 @@ small dots.
 Figures (PDF + PNG) in ``--outdir``:
 
   0. ``rmse_vs_config`` ``--metric`` (default uniform-truth RMSE, all bands) vs
-                       config: seed dots + center +- 1 sigma;
+                       config: seed center +- 1 sigma;
+     ``rmse_bias_vs_config``  (a) uniform-truth RMSE, (b) bias vs config, the
+                       same markers, config axis shared;
   1. ``overview``      (a) uniform-truth RMSE, (b) dense-truth RMSE, (c) bias,
                        all bands pooled, one row per config;
   2. ``by_band``       (a) uniform RMSE, (b) bias, (c) calibrated 90% coverage
@@ -288,6 +290,94 @@ def tick_label(c: dict) -> str:
     return f"{name}\n$n={n}$" + (" (no $\\sigma$)" if n < 2 else "")
 
 
+def config_axes_look(styled: bool) -> dict:
+    """Marker / text sizes and colors of the per-config panels: from the
+    publication style (``styled``), else the house values."""
+    prm = plt.rcParams
+    if styled:
+        return {"cycle": prm["axes.prop_cycle"].by_key().get("color", list(SERIES)),
+                "note_size": prm["xtick.labelsize"], "note_color": prm["text.color"],
+                "lw": prm["lines.linewidth"], "ms": prm["lines.markersize"],
+                "mew": prm["lines.markeredgewidth"],
+                "cap": prm["errorbar.capsize"] + 1}
+    return {"cycle": list(SERIES), "note_size": 6.5, "note_color": INK_2,
+            "lw": 1.8, "ms": 3.6, "mew": 0.8, "cap": 3}
+
+
+def config_figure(n: int, n_rows: int, styled: bool) -> tuple:
+    """Figure + axes (one column, ``n_rows`` panels sharing the config axis).
+
+    Styled: the style's single-column width fits ~3 two-line category labels at
+    its tick size; more configs go to two-column width (2x, ~7 in). Each panel
+    keeps the style's height.
+    """
+    if styled:
+        w, h = plt.rcParams["figure.figsize"]
+        size = (w if n <= 3 else 2 * w, h * (1 if n_rows == 1 else 0.8 * n_rows))
+    else:
+        size = (HALF_W if n <= 5 else FULL_W, 2.5 if n_rows == 1 else 2.0 * n_rows)
+    fig, axes = plt.subplots(n_rows, 1, figsize=size, sharex=True, squeeze=False)
+    axes = axes[:, 0]
+    for ax in axes:
+        if styled:
+            ax.xaxis.set_minor_locator(NullLocator())  # categories: no minor ticks
+            ax.tick_params(axis="x", which="both", length=0, top=False)
+        else:
+            ax.tick_params(axis="x", length=0, pad=3)
+            ax.tick_params(axis="x", labelsize=7, labelcolor=INK)
+            ax.spines["bottom"].set_visible(False)
+    return fig, axes
+
+
+def draw_config_metric(ax: plt.Axes, cfgs: list, metric: str, look: dict) -> None:
+    """One metric (all bands pooled) per config: a filled marker at the seed
+    center with a +-1 sigma (across seeds) error bar, the value written above.
+    Signed metrics get a zero line, kept inside the y range."""
+    x = np.arange(len(cfgs), dtype=float)
+    signed = metric in SIGNED
+    if signed:
+        ax.axhline(0.0, color=AXIS, lw=0.6, zorder=1)
+    lows, highs = ([0.0], [0.0]) if signed else ([], [])
+    for i, c in enumerate(cfgs):
+        marker = series_style(c["slot"])["marker"]
+        color = look["cycle"][c["slot"] % len(look["cycle"])]  # follows the slot
+        if not np.isfinite(c["stack"][metric][:, -1]).any():
+            continue
+        cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
+        sd = sd if np.isfinite(sd) else 0.0  # one run: marker only, no bar
+        ax.errorbar([x[i]], [cv], yerr=[[sd], [sd]] if sd > 0 else None,
+                    fmt=marker, color=color, markersize=1.5 * look["ms"],
+                    mew=look["mew"], elinewidth=look["lw"], capsize=look["cap"] + 1,
+                    capthick=look["lw"], zorder=4)
+        lows.append(cv - sd)
+        highs.append(cv + sd)
+        # Typographic minus, as on the tick labels.
+        text = (f"{cv:+.3f}".replace("-", "−") if signed else f"{cv:.3f}") \
+            + (f" ± {sd:.3f}" if sd > 0 else "")
+        ax.annotate(text, (x[i], cv + sd), xytext=(0, 4), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=look["note_size"],
+                    color=look["note_color"])
+    lo, hi = min(lows), max(highs)
+    span = (hi - lo) or 0.05
+    ax.set_ylim(lo - 0.10 * span, hi + 0.22 * span)  # headroom for the labels
+    ax.set_xticks(x, [tick_label(c) for c in cfgs])
+    ax.set_xlim(-0.55, len(cfgs) - 0.45)
+    ax.set_ylabel(PUB_YLABELS[metric])
+
+
+def seed_caption(cfgs: list, how: str) -> str:
+    """Shared caption tail: what the markers, bars and numbers are."""
+    k = sorted({len(c["runs"]) for c in cfgs})
+    seeds = f"{k[0]}" if len(k) == 1 else f"{k[0]}–{k[-1]}"
+    return (f"Markers: the {how} over {seeds} independent training seeds; error "
+            "bars: ±1 standard deviation across seeds; numbers give the same.")
+
+
+def n_objects(cfgs: list) -> int:
+    """Common test objects (every run is restricted to the same set)."""
+    return int(cfgs[0]["runs"][0]["uniform"]["stem"].nunique())
+
+
 def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
                        metric: str, styled: bool = False) -> tuple:
     """Publication figure: one metric (all bands pooled) per config.
@@ -299,66 +389,32 @@ def fig_rmse_vs_config(cfgs: list, ref: dict | None, how: str,
     sizes, ticks, spines and figure width come from it; only the category axis
     is adjusted (no ticks / minor ticks between configs).
     """
-    n = len(cfgs)
-    prm = plt.rcParams
-    if styled:
-        # The style's single-column width fits ~3 two-line category labels at
-        # its tick size; more configs go to two-column width (2x, ~7 in).
-        w, h = prm["figure.figsize"]
-        fig, ax = plt.subplots(figsize=(w if n <= 3 else 2 * w, h))
-        ax.xaxis.set_minor_locator(NullLocator())  # categories: no minor ticks
-        ax.tick_params(axis="x", which="both", length=0, top=False)
-        cycle = prm["axes.prop_cycle"].by_key().get("color", list(SERIES))
-        note_size, note_color = prm["xtick.labelsize"], prm["text.color"]
-        lw, ms, mew = prm["lines.linewidth"], prm["lines.markersize"], \
-            prm["lines.markeredgewidth"]
-        cap = prm["errorbar.capsize"] + 1
-    else:
-        fig, ax = plt.subplots(figsize=(HALF_W if n <= 5 else FULL_W, 2.5))
-        ax.tick_params(axis="x", length=0, pad=3)
-        ax.tick_params(axis="x", labelsize=7, labelcolor=INK)
-        ax.spines["bottom"].set_visible(False)
-        cycle = list(SERIES)
-        note_size, note_color = 6.5, INK_2
-        lw, ms, mew, cap = 1.8, 3.6, 0.8, 3
-    x = np.arange(n, dtype=float)
-    if metric in SIGNED:
-        ax.axhline(0.0, color=AXIS, lw=0.6, zorder=1)
-    lows, highs = [], []
-    for i, c in enumerate(cfgs):
-        marker = series_style(c["slot"])["marker"]
-        color = cycle[c["slot"] % len(cycle)]  # color follows the config slot
-        v = c["stack"][metric][:, -1]
-        if not np.isfinite(v).any():
-            continue
-        cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
-        sd = sd if np.isfinite(sd) else 0.0  # one run: marker only, no bar
-        ax.errorbar([x[i]], [cv], yerr=[[sd], [sd]] if sd > 0 else None,
-                    fmt=marker, color=color, markersize=1.5 * ms, mew=mew,
-                    elinewidth=lw, capsize=cap + 1, capthick=lw, zorder=4)
-        lows.append(cv - sd)
-        highs.append(cv + sd)
-        text = f"{cv:.3f}" + (f" ± {sd:.3f}" if sd > 0 else "")
-        ax.annotate(text, (x[i], cv + sd), xytext=(0, 4), textcoords="offset points",
-                    ha="center", va="bottom", fontsize=note_size, color=note_color)
-    lo, hi = min(lows), max(highs)
-    span = (hi - lo) or 0.05
-    ax.set_ylim(lo - 0.10 * span, hi + 0.15 * span)  # headroom for the labels
-    ax.set_xticks(x, [tick_label(c) for c in cfgs])
-    ax.set_xlim(-0.55, n - 0.45)
-    ax.set_ylabel(PUB_YLABELS[metric])
-
-    k = sorted({len(c["runs"]) for c in cfgs})
-    seeds = f"{k[0]}" if len(k) == 1 else f"{k[0]}–{k[-1]}"
-    n_obj = int(cfgs[0]["runs"][0]["uniform"]["stem"].nunique())
+    fig, (ax,) = config_figure(len(cfgs), 1, styled)
+    draw_config_metric(ax, cfgs, metric, config_axes_look(styled))
     truth = ("dense truth" if metric == "dense_rmse" else
              "the uniformly sampled true light curve")
     caption = (
         f"{PUB_YLABELS[metric].split(' (')[0]} of the late-time forecast against "
-        f"{truth}, all bands pooled, on {n_obj} common test objects, for each model "
-        f"configuration. Markers: the {how} over {seeds} independent training "
-        "seeds; error bars: ±1 standard deviation across seeds; numbers give "
-        "the same.")
+        f"{truth}, all bands pooled, on {n_objects(cfgs)} common test objects, for "
+        f"each model configuration. {seed_caption(cfgs, how)}")
+    return fig, caption
+
+
+def fig_rmse_bias_vs_config(cfgs: list, how: str, styled: bool = False) -> tuple:
+    """Publication figure: (a) uniform-truth RMSE and (b) bias per config, all
+    bands pooled, the config axis shared. Returns (figure, caption)."""
+    fig, axes = config_figure(len(cfgs), 2, styled)
+    look = config_axes_look(styled)
+    for ax, metric, letter in zip(axes, ("uniform_rmse", "uniform_bias"), "ab"):
+        draw_config_metric(ax, cfgs, metric, look)
+        ax.text(0.01, 0.95, f"({letter})", transform=ax.transAxes, ha="left",
+                va="top", fontsize=look["note_size"], color=look["note_color"])
+    axes[0].tick_params(axis="x", labelbottom=False)
+    caption = (
+        "Late-time forecast error against the uniformly sampled true light curve, "
+        f"all bands pooled, on {n_objects(cfgs)} common test objects, for each "
+        "model configuration: (a) RMSE; (b) mean residual (predicted minus true; "
+        f"positive = forecast too faint). {seed_caption(cfgs, how)}")
     return fig, caption
 
 
@@ -584,13 +640,20 @@ def main() -> None:
     # Drawn AND saved inside the style: savefig.* (dpi, padding) and the fonts
     # are read at save time.
     with pub_context(style):
-        fig, caption = fig_rmse_vs_config(cfgs, ref, args.center, args.metric,
-                                          styled=style is not None)
-        save(fig, outdir, "rmse_vs_config", fmts)
-    path = os.path.join(outdir, "rmse_vs_config_caption.txt")
-    with open(path, "w") as fh:
-        fh.write(caption + "\n")
-    print(f"Wrote {path}")
+        pub_figs = (
+            ("rmse_vs_config", fig_rmse_vs_config(cfgs, ref, args.center,
+                                                  args.metric,
+                                                  styled=style is not None)),
+            ("rmse_bias_vs_config", fig_rmse_bias_vs_config(
+                cfgs, args.center, styled=style is not None)),
+        )
+        for name, (fig, _) in pub_figs:
+            save(fig, outdir, name, fmts)
+    for name, (_, caption) in pub_figs:
+        path = os.path.join(outdir, f"{name}_caption.txt")
+        with open(path, "w") as fh:
+            fh.write(caption + "\n")
+        print(f"Wrote {path}")
     for name, fig in (("overview", fig_overview(cfgs, ref, args.center)),
                       ("by_band", fig_by_band(cfgs)),
                       ("rmse_vs_lead", fig_vs_lead(cfgs, lead_edges(runs), boot,
