@@ -26,8 +26,18 @@ band x metric: mean, median, std, sem, min, max), ``configs_summary.tex`` and a
 printed table with each config's difference from ``--reference`` (Welch t-test
 over seeds). Configs with no evaluated replica are left out with a warning.
 
+``--debias val``: post-hoc per-band level correction, the same for every run.
+Each run's forecast (median and interval) is shifted per band by minus its
+mean residual on the VALIDATION split (the RMSE-optimal constant shift), read
+from ``<eval_dir>/calibration_split/latetime_uniform_scored_points.csv``,
+which the eval and the U-Net both write. The interval scales are then re-fit on
+the shifted validation points (``calibrate_intervals.fit_scales``, as the eval)
+so coverage stays calibrated. Test is never used for the fit. Output goes to a
+``_debiased`` dir, so the uncorrected figures are kept for comparison.
+
     python plot_seed_configs.py                  # 213 217 211 910 212, seeds 0-4
     python plot_seed_configs.py --center median
+    python plot_seed_configs.py --debias val     # -> runs/seed_configs_..._debiased
     python plot_seed_configs.py --configs 213 910 --labels "ViT" "U-Net"
 """
 
@@ -48,17 +58,24 @@ import pandas as pd  # noqa: E402
 from matplotlib.ticker import NullLocator  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from calibrate_intervals import fit_scales  # noqa: E402
 from plot_compare_runs import common_objects  # noqa: E402
 from plot_run_report import (  # noqa: E402
     AXIS,
+    BAND_INDEX,
+    BAND_NAMES,
     FULL_W,
     GROUP_NAMES,
     HALF_W,
     INK,
     INK_2,
     MUTED,
+    N_BANDS,
     SERIES,
+    UNIFORM_CSV,
     ObjectBootstrap,
+    _add_intervals,
+    _read_points,
     band_axis,
     dodge,
     fmt,
@@ -179,6 +196,69 @@ def load_configs(configs: list, labels: list, seeds: list, runs_root: str,
         print(f"  {c['config']:>4} {c['label']:<32} "
               f"{[r['study'] for r in c['runs']]}{note}")
     return out
+
+
+def debias_run(run: dict) -> np.ndarray:
+    """Shift one run's test forecast per band by minus its mean VALIDATION
+    residual and re-fit the interval scales on the shifted validation points.
+
+    In place on ``run["uniform"]`` / ``run["dense"]``: median, raw and
+    calibrated band and hits. Returns the per-band offsets (mag, + = the
+    forecast was too faint); bands without validation points get 0.
+    """
+    path = os.path.join(run["eval_dir"], "calibration_split", UNIFORM_CSV)
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    val = _read_points(path)
+    val = val[np.isfinite(val["r"])]
+    offset = (val.groupby("b")["r"].mean().reindex(range(N_BANDS))
+              .fillna(0.0).to_numpy())
+    shift = offset[val["b"].to_numpy()]
+    scales = fit_scales({"band": val["band"].to_numpy(dtype=object),
+                         "med": val["med"].to_numpy() - shift,
+                         "low": val["low"].to_numpy() - shift,
+                         "high": val["high"].to_numpy() - shift,
+                         "true": val["true"].to_numpy()}, run["interval"])
+    k_lo, k_hi = np.ones(N_BANDS), np.ones(N_BANDS)
+    for name, s in scales.items():
+        k_lo[BAND_INDEX[name]], k_hi[BAND_INDEX[name]] = s["k_lo"], s["k_hi"]
+    cal = {"k_lo": k_lo, "k_hi": k_hi}
+    for key in ("uniform", "dense"):
+        df = run[key]
+        if df is None:
+            continue
+        d = offset[df["b"].to_numpy()]
+        for col in ("med", "low", "high"):
+            df[col] = df[col] - d
+        df["r"] = df["med"] - df["true"]
+        _add_intervals(df, cal)
+    run["calibrated"] = True
+    return offset
+
+
+def debias_configs(cfgs: list) -> None:
+    """``debias_run`` every run; prints each config's offsets (median over its
+    seeds) per band. Stops if any run lacks its validation scored points, so
+    the configs are never compared half-corrected."""
+    missing = []
+    for c in cfgs:
+        offs = []
+        for r in c["runs"]:
+            try:
+                offs.append(debias_run(r))
+            except FileNotFoundError as err:
+                missing.append(f"  study {r['study']}: no {err}")
+        c["offsets"] = np.stack(offs) if offs else None
+    if missing:
+        raise SystemExit("--debias val needs every run's validation scored "
+                         "points:\n" + "\n".join(missing))
+    print("\nValidation-fit level offsets removed (mag, + = was too faint; "
+          "median over seeds):")
+    print(f"  {'config':<36}" + "".join(f"{b:>7}" for b in BAND_NAMES))
+    for c in cfgs:
+        med = np.median(c["offsets"], axis=0)
+        print(f"  {(str(c['config']) + ' ' + c['label'])[:35]:<36}"
+              + "".join(f"{v:>+7.3f}" for v in med))
 
 
 def n_runs_label(c: dict) -> str:
@@ -582,6 +662,9 @@ def main() -> None:
                    help="Config the differences are taken against (default: the "
                    "first; -1 for none).")
     p.add_argument("--center", choices=("mean", "median"), default="median")
+    p.add_argument("--debias", choices=("none", "val"), default="none",
+                   help="'val': remove each run's per-band mean validation "
+                   "residual from its test forecast (see the docstring).")
     p.add_argument("--metric", choices=tuple(METRIC_NAMES), default="uniform_rmse",
                    help="Metric of the rmse_vs_config figure.")
     p.add_argument("--config_run", choices=("fallback", "always", "never"),
@@ -615,6 +698,8 @@ def main() -> None:
                         args.config_run)
     if not cfgs:
         raise SystemExit("No config has an evaluated replica.")
+    if args.debias == "val":
+        debias_configs(cfgs)
     runs = [r for c in cfgs for r in c["runs"]]
     common = common_objects(runs)
     n_each = [r["uniform"]["stem"].nunique() for r in runs]
@@ -632,7 +717,8 @@ def main() -> None:
         print(f"WARNING: reference config {ref_id} not loaded; no differences.")
 
     outdir = args.outdir or os.path.join(
-        args.runs_root, "seed_configs_" + "_".join(str(c["config"]) for c in cfgs))
+        args.runs_root, "seed_configs_" + "_".join(str(c["config"]) for c in cfgs)
+        + ("_debiased" if args.debias == "val" else ""))
     os.makedirs(outdir, exist_ok=True)
     fmts = tuple(args.formats)
     style = None if args.style == "none" else load_pub_style(args.style,
@@ -651,6 +737,10 @@ def main() -> None:
             save(fig, outdir, name, fmts)
     for name, (_, caption) in pub_figs:
         path = os.path.join(outdir, f"{name}_caption.txt")
+        if args.debias == "val":
+            caption += (" Each run's forecast is shifted per band by minus its"
+                        " mean residual on the validation split, and its"
+                        " interval scales re-fit there.")
         with open(path, "w") as fh:
             fh.write(caption + "\n")
         print(f"Wrote {path}")
