@@ -824,9 +824,8 @@ def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figur
         ax.plot(c, med[:, 0], color=LOOK["ink"], lw=LOOK["lw"], label="Median prediction")
         if band_label is not None:
             for k in (1, 2):
-                # Thin solid: the 1:1 is dashed and the depth dotted.
-                ax.plot(c, med[:, k], color=LOOK["ink"], lw=0.5 * LOOK["lw"],
-                        label=band_label)
+                ax.plot(c, med[:, k], color=LOOK["ink"], lw=0.75 * LOOK["lw"],
+                        ls=":", label=band_label)
         depth = run["depth"][b]
         if lims[0] < depth < lims[1]:
             ax.axvline(depth, color=color(1), ls=":", lw=LOOK["lw"],
