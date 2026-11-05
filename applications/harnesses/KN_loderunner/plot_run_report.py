@@ -28,9 +28,11 @@ Figures (PDF + PNG) in ``runs/study_NNN/figures``, drawn in ``--style``
   5. ``coverage``       raw vs calibrated 90% coverage per band and vs lead;
   6. ``examples``       forecast + calibrated band vs truth for the 5th / 50th /
                         95th percentile object by per-object uniform RMSE
-                        (``--example_percentiles``; the picks are printed). The
-                        CSVs hold only the scored late-time window, so the
-                        realistic context is not drawn.
+                        (``--example_percentiles``; the picks are printed), with
+                        the realistic context the model saw (first 2 d) and the
+                        uniform truth from 1 d before the first detection. The
+                        context comes from the npz sets as for 7; an object
+                        whose npz is unreadable gets only the scored window.
   7. ``median_example_truth`` / ``median_example_forecast``  a pair for the
                         median object by per-object uniform RMSE, all 9 bands:
                         the realistic context the model saw and the uniform
@@ -105,7 +107,8 @@ MIN_BIN_POINTS = 50
 TRUTH_BIN_MAG = 0.25
 MIN_TRUTH_BIN_POINTS = 20
 EXAMPLE_PERCENTILES = (5, 50, 95)
-# Median-example pair: days of uniform truth drawn before the first detection.
+# Examples / median-example pair: days of uniform truth drawn before the first
+# detection.
 EXAMPLE_PRE_DAYS = 1.0
 
 # Light-curve npz sets for the median-example pair (fallbacks when the eval's
@@ -905,8 +908,14 @@ def pick_examples(run: dict, stems: list | None,
 
 def fig_examples(run: dict, bands: list, stems: list | None,
                  title: str | None,
-                 percentiles: tuple = EXAMPLE_PERCENTILES) -> plt.Figure:
-    """Late-time forecast + calibrated band vs truth for a few objects."""
+                 percentiles: tuple = EXAMPLE_PERCENTILES,
+                 sources: dict | None = None) -> plt.Figure:
+    """Late-time forecast + calibrated band vs truth for a few objects.
+
+    With ``sources`` (see ``object_context``) each row also draws the realistic
+    context the model saw and the uniform truth over the context window; an
+    object whose npz files are missing falls back to the scored window only.
+    """
     u, d = run["uniform"], run["dense"]
     picks = pick_examples(run, stems, percentiles)
     fig, axes = plt.subplots(len(picks), len(bands),
@@ -914,16 +923,27 @@ def fig_examples(run: dict, bands: list, stems: list | None,
                              sharex=True, squeeze=False)
     band_label = "Calibrated" if run["calibrated"] else "Raw"
     for i, (stem, caption) in enumerate(picks):
+        obj = sources and object_context(run, stem, sources,
+                                         "examples row drawn without its context")
         for j, name in enumerate(bands):
             ax = axes[i, j]
             b = BAND_INDEX[name]
             su = u[(u["stem"] == stem) & (u["b"] == b)].sort_values("phase")
+            if obj is not None:
+                ax.axvline(obj["cutoff"], color=LOOK["muted"], ls=":",
+                           lw=LOOK["lw_thin"],
+                           label=f"Context cutoff ({obj['cutoff']:g} d)")
             if run["has_band"]:
                 ax.fill_between(su["phase"], su["low_cal"], su["high_cal"],
                                 color=color(0), alpha=0.2, lw=0,
                                 label=f"{band_label} {run['interval']:.0%} band")
-            ax.plot(su["phase"], su["true"], color=LOOK["ink2"], lw=LOOK["lw_thin"],
-                    label="Uniform truth")
+            if obj is not None:
+                t_ph, t_mag, t_b = obj["truth"]
+                ax.plot(t_ph[t_b == b], t_mag[t_b == b], color=LOOK["ink2"],
+                        lw=LOOK["lw_thin"], label="Uniform truth")
+            else:
+                ax.plot(su["phase"], su["true"], color=LOOK["ink2"],
+                        lw=LOOK["lw_thin"], label="Uniform truth")
             if d is not None:
                 sd = d[(d["stem"] == stem) & (d["b"] == b)]
                 ax.plot(sd["phase"], sd["true"], ls="none", marker="o",
@@ -931,6 +951,13 @@ def fig_examples(run: dict, bands: list, stems: list | None,
                         label="Dense truth")
             ax.plot(su["phase"], su["med"], color=color(0), lw=LOOK["lw"],
                     label="Forecast median")
+            if obj is not None:
+                ctx = obj["ctx"]
+                m = ctx["b"] == b
+                ax.plot(ctx["phase"][m], ctx["mag"][m], ls="none", marker="o",
+                        markersize=LOOK["ms"], mfc=color(1), mec=LOOK["ink"],
+                        mew=0.5 * LOOK["mew"], zorder=3, label="Realistic context")
+                ax.set_xlim(obj["x_lim"])
             ax.invert_yaxis()
             if i == 0:
                 ax.set_title(BAND_LABELS[b])
@@ -941,8 +968,14 @@ def fig_examples(run: dict, bands: list, stems: list | None,
                      xytext=(-4, 3), textcoords="offset points", ha="right",
                      va="bottom", fontsize=LOOK["tiny"], color=LOOK["muted"])
     sup_labels(fig, "Days since first realistic detection", None)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    top_legend(fig, handles, labels, ncol=len(labels), title=title)
+    # Union over panels: a band with no context points has no context handle.
+    handles = {}
+    for ax in axes.ravel():
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            handles.setdefault(lab, h)
+    # Two rows once the context entries are in (one row overflows the width).
+    ncol = len(handles) if len(handles) <= 4 else -(-len(handles) // 2)
+    top_legend(fig, list(handles.values()), list(handles), ncol=ncol, title=title)
     return fig
 
 
@@ -1010,36 +1043,30 @@ def eval_context(t: np.ndarray, v: np.ndarray, b: np.ndarray, cutoff_days: float
             "n_pre_cutoff": int(pre.sum())}
 
 
-def median_example(run: dict, stem: str | None, realistic_glob: str,
-                   uniform_glob: str, window_days: float,
-                   max_context_len: int) -> dict | None:
-    """Context, uniform truth and forecast of the median object (or ``stem``)."""
-    per_obj = per_object_rmse(run)
-    if stem is None:
-        target = np.percentile(per_obj.to_numpy(), 50)
-        stem = (per_obj - target).abs().idxmin()
-        caption = f"median object, uniform RMSE {per_obj[stem]:.2f}"
-    elif stem in per_obj.index:
-        rank = float((per_obj < per_obj[stem]).mean() * 100)
-        caption = f"uniform RMSE {per_obj[stem]:.2f} ({rank:.0f}th pct)"
-    else:
-        raise ValueError(f"median example {stem!r} is not in the scored set")
+def object_context(run: dict, stem: str, sources: dict, what: str) -> dict | None:
+    """Realistic context and uniform truth of one scored object, from the npz sets.
+
+    ``sources`` = ``{"realistic_glob", "uniform_glob", "window_days",
+    "max_context_len"}``. Returns ``{"cutoff", "ctx", "truth", "forecast",
+    "x_lim"}`` with the truth from ``EXAMPLE_PRE_DAYS`` before the first
+    detection to the end of the scored window, or None (printed, naming
+    ``what``) if the object's npz files are missing.
+    """
     sig = run["signature"]
     cutoff = float(sig.get("late_time_cutoff_days", 2.0))
     max_days = float(sig.get("late_time_max_days", 10.0))
-
     paths = {}
-    for kind, pattern in (("realistic", realistic_glob), ("uniform", uniform_glob)):
+    for kind in ("realistic", "uniform"):
+        pattern = sources[f"{kind}_glob"]
         paths[kind] = _find_npz(pattern, stem)
         if paths[kind] is None:
             print(f"{run['label']}: {stem} not found in the {kind} set "
-                  f"{pattern!r}; skipping the median-example pair.")
+                  f"{pattern!r}; {what}.")
             return None
     ctx = eval_context(*read_npz_stream(paths["realistic"], True), cutoff,
-                       window_days, max_context_len)
+                       sources["window_days"], sources["max_context_len"])
     if ctx is None:
-        print(f"{run['label']}: {stem} has no realistic detections; skipping the "
-              "median-example pair.")
+        print(f"{run['label']}: {stem} has no realistic detections; {what}.")
         return None
 
     u = run["uniform"]
@@ -1056,7 +1083,26 @@ def median_example(run: dict, stem: str | None, realistic_glob: str,
     x_lim = (-EXAMPLE_PRE_DAYS, max_days)
     phase = ut - ctx["t0"]
     keep = np.isfinite(uv) & (phase >= x_lim[0]) & (phase <= x_lim[1])
-    truth = (phase[keep], uv[keep], ub[keep])
+    return {"cutoff": cutoff, "ctx": ctx, "truth": (phase[keep], uv[keep], ub[keep]),
+            "forecast": forecast, "x_lim": x_lim}
+
+
+def median_example(run: dict, stem: str | None, sources: dict) -> dict | None:
+    """Context, uniform truth and forecast of the median object (or ``stem``)."""
+    per_obj = per_object_rmse(run)
+    if stem is None:
+        target = np.percentile(per_obj.to_numpy(), 50)
+        stem = (per_obj - target).abs().idxmin()
+        caption = f"median object, uniform RMSE {per_obj[stem]:.2f}"
+    elif stem in per_obj.index:
+        rank = float((per_obj < per_obj[stem]).mean() * 100)
+        caption = f"uniform RMSE {per_obj[stem]:.2f} ({rank:.0f}th pct)"
+    else:
+        raise ValueError(f"median example {stem!r} is not in the scored set")
+    obj = object_context(run, stem, sources, "skipping the median-example pair")
+    if obj is None:
+        return None
+    cutoff, ctx, truth, forecast = obj["cutoff"], obj["ctx"], obj["truth"], obj["forecast"]
 
     # One y range per band, shared by the pair so they read as before / after.
     y_lim = []
@@ -1073,7 +1119,7 @@ def median_example(run: dict, stem: str | None, realistic_glob: str,
           f"{per_obj[stem]:.3f}), {len(ctx['phase'])} context detections of "
           f"{ctx['n_pre_cutoff']} before the {cutoff:g} d cutoff")
     return {"stem": stem, "caption": caption, "cutoff": cutoff,
-            "ctx": ctx, "truth": truth, "forecast": forecast, "x_lim": x_lim,
+            "ctx": ctx, "truth": truth, "forecast": forecast, "x_lim": obj["x_lim"],
             "y_lim": y_lim}
 
 
@@ -1208,11 +1254,11 @@ def main() -> None:
                    help="Bands of the one-column median-example forecast, top "
                    "to bottom.")
     p.add_argument("--realistic_glob", default=None,
-                   help="Realistic npz set for the median-example context "
+                   help="Realistic npz set for the examples' context "
                    "(default: the eval's, from eval_meta.json, else "
                    f"{DEFAULT_REALISTIC_GLOB}).")
     p.add_argument("--uniform_glob", default=None,
-                   help="Uniform npz set for the median-example truth (default: "
+                   help="Uniform npz set for the examples' truth (default: "
                    "the eval's, else the LSST uniform set).")
     p.add_argument("--context_window_days", type=float, default=2.0,
                    help="The checkpoint's trailing context window (rebuilds the "
@@ -1240,11 +1286,15 @@ def main() -> None:
         + (f", epoch {run['epoch']})" if run["epoch"] is not None else ")"))
     fmts = tuple(args.formats)
     sig = run["signature"]
-    example = median_example(
-        run, args.median_example_stem,
-        args.realistic_glob or sig.get("realistic_glob") or DEFAULT_REALISTIC_GLOB,
-        args.uniform_glob or sig.get("uniform_glob") or DEFAULT_UNIFORM_GLOB,
-        args.context_window_days, args.max_context_len)
+    sources = {
+        "realistic_glob": (args.realistic_glob or sig.get("realistic_glob")
+                           or DEFAULT_REALISTIC_GLOB),
+        "uniform_glob": (args.uniform_glob or sig.get("uniform_glob")
+                         or DEFAULT_UNIFORM_GLOB),
+        "window_days": args.context_window_days,
+        "max_context_len": args.max_context_len,
+    }
+    example = median_example(run, args.median_example_stem, sources)
 
     for name, fig in (
         ("loss", fig_loss(run, title)),
@@ -1253,7 +1303,7 @@ def main() -> None:
         ("pred_vs_truth", fig_pred_vs_truth(run, title)),
         ("coverage", fig_coverage(run, boot, edges, title)),
         ("examples", fig_examples(run, args.example_bands, args.example_stems,
-                                  title, tuple(args.example_percentiles))),
+                                  title, tuple(args.example_percentiles), sources)),
         ("median_example_truth", example and fig_median_example(
             run, example, False, title)),
         ("median_example_forecast", example and fig_median_example(
