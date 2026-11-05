@@ -49,7 +49,7 @@ from yoke.models.vit.rope import apply_rotary_emb
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eval_dense_latetime_9band import (  # noqa: E402
-    BAND_COLORS,
+    BAND_COLORS as HOUSE_BAND_COLORS,
     BAND_NAMES,
     DROP_UPPER_LIMITS,
     ERROR_COL,
@@ -67,9 +67,25 @@ from plot_pred_diagnostics_9band import (  # noqa: E402
     build_context_input,
     load_9band_model,
 )
+from pub_style import (  # noqa: E402
+    add_style_args,
+    pub_band_colors,
+    pub_dpi,
+    pub_fs,
+    pub_layout,
+    pub_size,
+    pub_text,
+    pub_title,
+    rc_lw,
+    rc_ms,
+    styled,
+    use_pub_style,
+)
 
 # Lead times the summary averages over (days).
 SUMMARY_DTS = (0.5, 2.0, 4.0, 8.0)
+# Restyled in place by ``main`` (one style hue per filter).
+BAND_COLORS = list(HOUSE_BAND_COLORS)
 
 
 class AttentionRecorder:
@@ -171,6 +187,7 @@ def get_args() -> argparse.Namespace:
                    help="Query band for the attention lines and attention-vs-Dt "
                         "panel (default: the band with most context events).")
     p.add_argument("--outdir", type=str, default=None)
+    add_style_args(p)
     return p.parse_args()
 
 
@@ -278,50 +295,63 @@ def plot_tokens(obj, meta, w_h, dts, ref_i, focus, ref_dt, path, title):
     n_blocks = w_h.shape[1]
     q_rows = np.arange(L, L + N_BANDS)
 
-    fig = plt.figure(figsize=(4 * n_blocks, 10))
+    # Styled: two columns wide, taller than the house aspect (two panel rows of
+    # labeled heatmaps).
+    fig = plt.figure(figsize=pub_size((16, 13)) if styled() else (4 * n_blocks, 10))
     gs = GridSpec(2, n_blocks, figure=fig, height_ratios=[1.15, 1])
+    # Per-token tick labels: smaller than the style's ticks so they fit.
+    tok_fs = 0.7 * pub_fs(10, "xtick.labelsize")
 
     # (a) Token set at its RoPE positions (band column, time row).
     ax = fig.add_subplot(gs[0, : n_blocks // 2])
     vals = meta["value"][valid_idx]
     vmax = max(1e-6, float(np.abs(vals).max()))
+    # s is an area: scale with the marker size squared.
     sc = ax.scatter(meta["band"][valid_idx], meta["tau"][valid_idx], c=vals,
-                    cmap="coolwarm_r", vmin=-vmax, vmax=vmax, s=140,
-                    edgecolors="k", zorder=3)
+                    cmap="coolwarm_r", vmin=-vmax, vmax=vmax, s=140 * rc_ms(1) ** 2,
+                    edgecolors="k", linewidths=rc_lw(1), zorder=3)
     for j, i in enumerate(valid_idx):
         ax.annotate(str(j), (meta["band"][i], meta["tau"][i]), xytext=(7, 4),
-                    textcoords="offset points", fontsize=8)
-    ax.scatter(np.arange(N_BANDS), np.full(N_BANDS, ref_dt), marker="*", s=260,
-               c=BAND_COLORS, edgecolors="k", zorder=3,
-               label=f"band queries at Dt = {ref_dt:g} d")
+                    textcoords="offset points", fontsize=pub_fs(8, "xtick.labelsize"))
+    ax.scatter(np.arange(N_BANDS), np.full(N_BANDS, ref_dt), marker="*",
+               s=260 * rc_ms(1) ** 2, c=BAND_COLORS, edgecolors="k",
+               linewidths=rc_lw(1), zorder=3, label=f"band queries at Dt = {ref_dt:g} d")
     # Last-block attention from the focus query, line width ~ weight.
     last = w_h[ref_i, -1, L + focus]
     for i in valid_idx:
         a = last[i]
         if a > 0.02:
             ax.plot([focus, meta["band"][i]], [ref_dt, meta["tau"][i]],
-                    color=BAND_COLORS[focus], lw=12 * a, alpha=0.6, zorder=2)
-    ax.axhline(0.0, color="0.4", ls="--", lw=0.8)
-    ax.text(N_BANDS - 0.6, 0.05, "anchor (last detection)", fontsize=8,
+                    color=BAND_COLORS[focus], lw=rc_lw(12 * a), alpha=0.6, zorder=2)
+    ax.axhline(0.0, color="0.4", ls="--", lw=rc_lw(0.8))
+    ax.text(N_BANDS - 0.6, 0.05, "anchor (last detection)", fontsize=pub_fs(8),
             ha="right", va="bottom", color="0.3")
-    ax.set_xticks(range(N_BANDS), BAND_NAMES)
+    ax.set_xticks(range(N_BANDS), BAND_NAMES, rotation=90 if styled() else 0)
+    if styled():
+        # Categorical axis: no minor ticks between the bands.
+        ax.tick_params(axis="x", which="minor", bottom=False, top=False)
     ax.set_xlim(-0.6, N_BANDS - 0.4)
-    ax.set_ylabel("anchor-relative time tau (d) = RoPE row")
+    ax.set_ylabel(pub_text("anchor-relative time tau (d) = RoPE row",
+                           r"$\tau$ (d) = RoPE row"))
     ax.set_xlabel("band = RoPE column")
-    ax.set_title(f"Token set: {len(valid_idx)} events + {N_BANDS} queries; lines = "
-                 f"last-block attention from Q {BAND_NAMES[focus]}")
-    ax.legend(loc="upper left", fontsize=8)
-    fig.colorbar(sc, ax=ax, label="event value (z-scored mag; + = fainter)",
-                 pad=0.01)
+    ax.set_title(pub_text(f"Token set: {len(valid_idx)} events + {N_BANDS} queries; lines = "
+                          f"last-block attention from Q {BAND_NAMES[focus]}",
+                          f"(a) {len(valid_idx)} events + {N_BANDS} queries"))
+    ax.legend(loc="upper left", fontsize=pub_fs(8))
+    fig.colorbar(sc, ax=ax, label=pub_text("event value (z-scored mag; + = fainter)",
+                                           "value (z-scored mag)"), pad=0.01)
 
     # (b) Focus query attention vs Dt (last block).
     ax = fig.add_subplot(gs[0, n_blocks // 2 :])
     a_dt = w_h[:, -1, L + focus][:, keys]  # [n_dt, n_keys]
     im = ax.pcolormesh(np.arange(len(keys)), dts, a_dt, cmap="magma",
                        shading="nearest")
-    ax.set_xticks(range(len(keys)), labels, rotation=90, fontsize=7)
-    ax.set_ylabel("lead time Dt (d)")
-    ax.set_title(f"Q {BAND_NAMES[focus]} attention vs Dt (last block, head mean)")
+    ax.set_xticks(range(len(keys)), labels, rotation=90, fontsize=tok_fs)
+    if styled():
+        ax.tick_params(axis="x", which="minor", bottom=False, top=False)
+    ax.set_ylabel(pub_text("lead time Dt (d)", r"lead time $\Delta t$ (d)"))
+    ax.set_title(pub_text(f"Q {BAND_NAMES[focus]} attention vs Dt (last block, head mean)",
+                          f"(b) Q {BAND_NAMES[focus]} attention, last block"))
     fig.colorbar(im, ax=ax, pad=0.01)
 
     # (c) Query -> key attention per block at ref_dt.
@@ -331,44 +361,59 @@ def plot_tokens(obj, meta, w_h, dts, ref_i, focus, ref_dt, path, title):
         im = ax.imshow(w_h[ref_i, b][q_rows][:, keys], cmap="magma", vmin=0,
                        vmax=vmax, aspect="auto")
         ax.set_xticks(range(len(keys)), [str(j) for j in range(len(valid_idx))]
-                      + [f"Q{n}" for n in BAND_NAMES], rotation=90, fontsize=7)
-        ax.set_yticks(range(N_BANDS), [f"Q {n}" for n in BAND_NAMES], fontsize=7)
-        ax.axvline(len(valid_idx) - 0.5, color="w", lw=1)
+                      + [f"Q{n}" for n in BAND_NAMES], rotation=90, fontsize=tok_fs)
+        ax.set_yticks(range(N_BANDS), [f"Q {n}" for n in BAND_NAMES], fontsize=tok_fs)
+        if styled():
+            # Heatmap cells: no minor ticks.
+            ax.minorticks_off()
+            if b:
+                ax.tick_params(axis="y", labelleft=False)
+        ax.axvline(len(valid_idx) - 0.5, color="w", lw=rc_lw(1))
         ev_share = w_h[ref_i, b][q_rows][:, valid_idx].sum(axis=1).mean()
-        ax.set_title(f"block {b + 1}: {100 * ev_share:.0f}% on events", fontsize=9)
+        ax.set_title(pub_text(f"block {b + 1}: {100 * ev_share:.0f}% on events",
+                              f"block {b + 1}: {100 * ev_share:.0f}%"), fontsize=pub_fs(9))
     fig.colorbar(im, ax=fig.axes[-n_blocks:], pad=0.01, label="attention")
-    fig.suptitle(f"{title}  (event numbers match panel a; Dt = {ref_dt:g} d)")
-    fig.savefig(path, dpi=110, bbox_inches="tight")
+    fig.suptitle(pub_title(f"{title}  (event numbers match panel a; Dt = {ref_dt:g} d)"),
+                 fontsize=pub_fs(None, "axes.titlesize"))
+    fig.savefig(path, dpi=pub_dpi(110), bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_forecast(obj, dts, mag_tok, mag_abl, truth, path, title):
     """forecast_<stem>.png: per-band forecast with / without the token path."""
-    fig, axes = plt.subplots(3, 3, figsize=(13, 10), sharex=True)
+    fig, axes = plt.subplots(3, 3, figsize=pub_size((13, 10)), sharex=True)
     for b, ax in enumerate(axes.flat):
         c = BAND_COLORS[b]
         if truth is not None:
             m = truth[2] == b
-            ax.plot(truth[0][m], truth[1][m], color="0.55", lw=1.0,
+            ax.plot(truth[0][m], truth[1][m], color="0.55", lw=rc_lw(1.0),
                     label="uniform truth")
         m = obj["ctx_band"] == b
-        ax.scatter(obj["ctx_tau"][m], obj["ctx_mag"][m], color=c, edgecolors="k",
-                   zorder=3, label="context")
-        ax.plot(dts, mag_tok[:, b], color=c, lw=2, label="with token path")
-        ax.plot(dts, mag_abl[:, b], color=c, lw=1.3, ls="--",
+        ax.scatter(obj["ctx_tau"][m], obj["ctx_mag"][m], s=36 * rc_ms(1) ** 2, color=c,
+                   edgecolors="k", linewidths=rc_lw(1), zorder=3, label="context")
+        ax.plot(dts, mag_tok[:, b], color=c, lw=rc_lw(2), label="with token path")
+        ax.plot(dts, mag_abl[:, b], color=c, lw=rc_lw(1.3), ls="--",
                 label="token readout zeroed")
-        ax.axvline(0.0, color="0.4", ls=":", lw=0.8)
+        ax.axvline(0.0, color="0.4", ls=":", lw=rc_lw(0.8))
         ax.invert_yaxis()
         ax.set_title(BAND_NAMES[b])
-        if b == 0:
+        if b == 0 and not styled():
             ax.legend(fontsize=7)
-    for ax in axes[-1]:
-        ax.set_xlabel("time from last context detection (d)")
-    for ax in axes[:, 0]:
-        ax.set_ylabel("mag")
-    fig.suptitle(title)
-    fig.tight_layout()
-    fig.savefig(path, dpi=110)
+    if styled():
+        # One legend below the grid, so it covers no band's curves.
+        fig.legend(*axes.flat[0].get_legend_handles_labels(), ncol=4,
+                   loc="outside lower center")
+        fig.supxlabel("time from last context detection (d)",
+                      fontsize=pub_fs(None, "axes.labelsize"))
+        fig.supylabel("mag", fontsize=pub_fs(None, "axes.labelsize"))
+    else:
+        for ax in axes[-1]:
+            ax.set_xlabel("time from last context detection (d)")
+        for ax in axes[:, 0]:
+            ax.set_ylabel("mag")
+    fig.suptitle(pub_title(title), fontsize=pub_fs(None, "axes.titlesize"))
+    pub_layout(fig)
+    fig.savefig(path, dpi=pub_dpi(110))
     plt.close(fig)
 
 
@@ -398,29 +443,42 @@ def summarize(records, n_blocks, cw, path, title):
     ratio = np.where(n > 0, s / np.maximum(n, 1), np.nan)
     ev_share /= max(n_q, 1)
 
-    fig, axes = plt.subplots(1, n_blocks, figsize=(3.4 * n_blocks, 3.6), sharey=True)
+    # Styled: one row two columns wide, shared x label and legend below.
+    fig, axes = plt.subplots(1, n_blocks, sharey=True,
+                             figsize=pub_size((10, 4.4)) if styled()
+                             else (3.4 * n_blocks, 3.6))
     print("\nMean query attention per event, as a ratio to uniform (1 = none):")
     print(f"  {'block':>5} {'events %':>9}  same-band by age bin | other-band")
     for b, ax in enumerate(np.atleast_1d(axes)):
-        ax.plot(centers, ratio[b, 0], "o-", label="event in query's band")
-        ax.plot(centers, ratio[b, 1], "s--", label="other band")
-        ax.axhline(1.0, color="0.5", lw=0.8, ls=":")
-        ax.set_xlabel("event age before anchor (d)")
-        ax.set_title(f"block {b + 1}: {100 * ev_share[b]:.0f}% on events", fontsize=9)
+        ax.plot(centers, ratio[b, 0], "o-", ms=rc_ms(6), label="event in query's band")
+        ax.plot(centers, ratio[b, 1], "s--", ms=rc_ms(6), label="other band")
+        ax.axhline(1.0, color="0.5", lw=rc_lw(0.8), ls=":")
+        if not styled():
+            ax.set_xlabel("event age before anchor (d)")
+        ax.set_title(pub_text(f"block {b + 1}: {100 * ev_share[b]:.0f}% on events",
+                              f"block {b + 1}: {100 * ev_share[b]:.0f}%"), fontsize=pub_fs(9))
         print(f"  {b + 1:>5} {100 * ev_share[b]:>8.1f}%  "
               + " ".join(f"{v:4.2f}" for v in ratio[b, 0]) + " | "
               + " ".join(f"{v:4.2f}" for v in ratio[b, 1]))
-    np.atleast_1d(axes)[0].set_ylabel("attention x n_keys (1 = uniform)")
-    np.atleast_1d(axes)[0].legend(fontsize=7)
-    fig.suptitle(title)
-    fig.tight_layout()
-    fig.savefig(path, dpi=110)
+    ax0 = np.atleast_1d(axes)[0]
+    ax0.set_ylabel(pub_text("attention x n_keys (1 = uniform)",
+                            r"attention $\times\,n_{\rm keys}$"))
+    if styled():
+        fig.supxlabel("event age before anchor (d)", fontsize=pub_fs(None, "axes.labelsize"))
+        fig.legend(*ax0.get_legend_handles_labels(), ncol=2, loc="outside lower center")
+    else:
+        ax0.legend(fontsize=7)
+    fig.suptitle(pub_title(title), fontsize=pub_fs(None, "axes.titlesize"))
+    pub_layout(fig)
+    fig.savefig(path, dpi=pub_dpi(110))
     plt.close(fig)
 
 
 def main() -> None:
     """Load the checkpoint, hook the blocks, and write the figures."""
     args = get_args()
+    use_pub_style(args.style, args.font_dir)
+    BAND_COLORS[:] = pub_band_colors(BAND_COLORS)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = resolve_ckpt(args)
     model, _cl, _nb, cw, max_len = load_9band_model(ckpt, device, use_ema=args.use_ema)

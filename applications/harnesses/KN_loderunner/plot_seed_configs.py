@@ -21,10 +21,12 @@ Figures (PDF + PNG) in ``--outdir``:
                        per band, configs side by side;
   3. ``rmse_vs_lead``  uniform RMSE vs lead time per band, center line +-1 sigma;
 
-plus ``configs_runs.csv`` (one row per run), ``configs_summary.csv`` (config x
-band x metric: mean, median, std, sem, min, max), ``configs_summary.tex`` and a
-printed table with each config's difference from ``--reference`` (Welch t-test
-over seeds). Configs with no evaluated replica are left out with a warning.
+all in ``--style`` (default ``publication.mplstyle``; ``none`` = the house
+style), each with a ``<name>_caption.txt``; plus ``configs_runs.csv`` (one row
+per run), ``configs_summary.csv`` (config x band x metric: mean, median, std,
+sem, min, max), ``configs_summary.tex`` and a printed table with each config's
+difference from ``--reference`` (Welch t-test over seeds). Configs with no
+evaluated replica are left out with a warning.
 
 ``--debias val``: post-hoc per-band level correction, the same for every run.
 Each run's forecast (median and interval) is shifted per band by minus its
@@ -55,7 +57,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from matplotlib.ticker import NullLocator  # noqa: E402
+from matplotlib.ticker import MaxNLocator, NullLocator  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from calibrate_intervals import fit_scales  # noqa: E402
@@ -133,6 +135,26 @@ METRIC_NAMES = {
     "cov_cal": "Calibrated coverage",
 }
 SIGNED = ("uniform_bias", "beyond_bias")
+# Two-line x labels of the (narrow) styled overview panels.
+OVERVIEW_XLABELS = {
+    "uniform_rmse": "RMSE (mag)",
+    "dense_rmse": "RMSE vs.\ndense truth (mag)",
+    "uniform_bias": "Mean\nresidual (mag)",
+}
+# Caption phrases of the overview / by-band panels.
+OVERVIEW_PANELS = {
+    "uniform_rmse": "RMSE against the uniformly sampled true light curve",
+    "dense_rmse": "RMSE against the dense truth",
+    "uniform_bias": "mean residual (predicted minus true; positive = forecast "
+                    "too faint)",
+}
+BY_BAND_PANELS = {
+    "uniform_rmse": "RMSE",
+    "uniform_bias": "mean residual (predicted minus true; positive = forecast "
+                    "too faint)",
+    "cov_cal": "coverage of the calibrated {nominal:.0%} prediction interval "
+               "(dotted: nominal)",
+}
 # Metrics in the tables and printout, in column order.
 TABLE_METRICS = ("uniform_rmse", "dense_rmse", "uniform_bias", "beyond_bias",
                  "cov_cal")
@@ -281,56 +303,109 @@ def add_stats(cfgs: list, boot: ObjectBootstrap, how: str) -> None:
         c["tables"] = tables
 
 
-def config_handles(cfgs: list, lines: bool = False) -> tuple:
+def config_style(c: dict, look: dict) -> dict:
+    """Color (the look's cycle, by slot), marker and dash of one config."""
+    st = series_style(c["slot"])
+    st["color"] = look["cycle"][c["slot"] % len(look["cycle"])]
+    return st
+
+
+def config_handles(cfgs: list, look: dict, lines: bool = False) -> tuple:
     """Legend proxies: one per config (its color, marker and dash)."""
     handles = []
     for c in cfgs:
-        st = series_style(c["slot"])
+        st = config_style(c, look)
         handles.append(plt.Line2D([], [], color=st["color"], marker=st["marker"],
-                                  ls=st["ls"] if lines else "-", lw=1.0,
-                                  markersize=4))
+                                  ls=st["ls"] if lines else "-", lw=look["lw"],
+                                  markersize=look["ms"]))
     return handles, [c["label"] for c in cfgs]
+
+
+def category_axis(ax: plt.Axes, axis: str, look: dict) -> None:
+    """A category axis: no ticks (major or minor), only the labels."""
+    if look["styled"]:
+        (ax.xaxis if axis == "x" else ax.yaxis).set_minor_locator(NullLocator())
+    ax.tick_params(axis=axis, which="both", length=0)
+
+
+def band_lines(ax: plt.Axes, look: dict) -> None:
+    """Hairlines between the band categories, a darker one before 'All'."""
+    if not look["styled"]:
+        band_separators(ax)
+        return
+    for gx in np.arange(len(GROUP_NAMES) - 2) + 0.5:
+        ax.axvline(gx, color=look["sep"], lw=0.5, zorder=0)
+    ax.axvline(N_BANDS - 0.5, color=look["ref"], lw=0.6, zorder=0)
+
+
+def letter_title(ax: plt.Axes, letter: str, look: dict) -> None:
+    """Panel letter above the top left corner (the style's title font)."""
+    if look["styled"]:
+        ax.set_title(f"({letter})", loc="left")
+    else:
+        panel_letter(ax, letter)
 
 
 # --------------------------------------------------------------------- figures
 
 
-def fig_overview(cfgs: list, ref: dict | None, how: str) -> plt.Figure:
-    """Pooled uniform RMSE, dense RMSE and bias: seed dots + center +- 1 sigma."""
+def figure_legend(fig: plt.Figure, handles: list, labels: list, ncol: int,
+                  look: dict, title: str | None = None) -> None:
+    """One legend above the panels: the style's legend font when styled."""
+    if not look["styled"]:
+        top_legend(fig, handles, labels, ncol=ncol, title=title)
+        return
+    try:
+        fig.legend(handles, labels, loc="outside upper center", ncol=ncol,
+                   title=title)
+    except ValueError:  # matplotlib < 3.7 has no 'outside' locations
+        fig.legend(handles, labels, loc="upper center", ncol=ncol, title=title,
+                   bbox_to_anchor=(0.5, 1.06))
+
+
+def fig_overview(cfgs: list, ref: dict | None, how: str,
+                 styled: bool = False) -> tuple:
+    """Pooled uniform RMSE, dense RMSE and bias: seed dots + center +- 1 sigma.
+    Returns (figure, caption)."""
+    look = config_axes_look(styled)
     panels = [m for m in ("uniform_rmse", "dense_rmse", "uniform_bias")
               if any(np.isfinite(c["stack"][m][:, -1]).any() for c in cfgs)]
     n = len(cfgs)
+    width = 2 * plt.rcParams["figure.figsize"][0] if styled else FULL_W
     fig, axes = plt.subplots(
-        1, len(panels), figsize=(FULL_W, 0.5 * n + 1.1), sharey=True,
-        gridspec_kw={"width_ratios": [1.5 if m == "uniform_rmse" else 1.0
-                                      for m in panels]})
+        1, len(panels), figsize=(width, (0.6 if styled else 0.5) * n + 1.3),
+        sharey=True, gridspec_kw={"width_ratios": [1.5 if m == "uniform_rmse"
+                                                   else 1.0 for m in panels]})
     axes = np.atleast_1d(axes)
     y = np.arange(n, dtype=float)[::-1]
     for ax, m, letter in zip(axes, panels, "abc"):
-        ax.grid(axis="x")
-        ax.grid(axis="y", visible=False)
-        ax.tick_params(axis="y", length=0)
+        if not styled:
+            ax.grid(axis="x")
+            ax.grid(axis="y", visible=False)
+        category_axis(ax, "y", look)
         signed = m in SIGNED
         if signed:
-            ax.axvline(0.0, color=AXIS, lw=0.6)
+            ax.axvline(0.0, color=look["ref"], lw=0.6)
         if ref is not None:
-            ax.axvline(ref["center"][m][-1], color=MUTED, lw=0.7, ls=":")
+            ax.axvline(ref["center"][m][-1], color=look["muted"], lw=0.7, ls=":")
         # Numbers only on the headline panel (a): selective direct labels.
         annotate = m == "uniform_rmse"
         xs = [0.0] if signed else []
         for i, c in enumerate(cfgs):
-            st = series_style(c["slot"])
+            st = config_style(c, look)
             v = c["stack"][m][:, -1]
             v = v[np.isfinite(v)]
             if v.size == 0:
                 continue
             cv, sd = c["center"][m][-1], c["sd"][m][-1]
             ax.plot(v, np.full(v.size, y[i] - 0.2), ls="none", marker=st["marker"],
-                    color=st["color"], alpha=0.55, markersize=3, mew=0)
+                    color=st["color"], alpha=0.55, markersize=0.8 * look["ms"],
+                    mew=0)
             ax.errorbar([cv], [y[i] + 0.1],
                         xerr=[[sd], [sd]] if np.isfinite(sd) else None,
-                        fmt=st["marker"], color=st["color"], markersize=5.5,
-                        elinewidth=1.2, capsize=2.5, mec="white", mew=0.6)
+                        fmt=st["marker"], color=st["color"],
+                        markersize=1.5 * look["ms"], elinewidth=0.7 * look["lw"],
+                        capsize=look["cap"], mec="white", mew=0.6)
             right = max(v.max(), cv + (sd if np.isfinite(sd) else 0.0))
             xs += [v.min(), v.max(), right]
             if np.isfinite(sd):
@@ -338,26 +413,40 @@ def fig_overview(cfgs: list, ref: dict | None, how: str) -> plt.Figure:
             if annotate:
                 txt = f"{cv:.3f}" + (f" ± {sd:.3f}" if np.isfinite(sd) else "")
                 ax.annotate(txt, (right, y[i] + 0.1), xytext=(5, 0),
-                            textcoords="offset points", va="center", fontsize=7,
-                            color=INK)
+                            textcoords="offset points", va="center",
+                            fontsize=look["note_size"] if styled else 7,
+                            color=look["ink"])
         lo, hi = min(xs), max(xs)
         pad = 0.06 * (hi - lo) if hi > lo else 0.01
-        ax.set_xlim(lo - pad, hi + (9.0 if annotate else 1.5) * pad)
-        ax.set_xlabel(METRIC_NAMES[m] + (", all bands" if not signed else ""))
-        panel_letter(ax, letter)
+        ax.set_xlim(lo - pad, hi + ((16.0 if styled else 9.0) if annotate
+                                    else 1.5) * pad)
+        if styled:
+            ax.xaxis.set_major_locator(MaxNLocator(3))
+            ax.set_xlabel(OVERVIEW_XLABELS[m])
+        else:
+            ax.set_xlabel(METRIC_NAMES[m] + (", all bands" if not signed else ""))
+        letter_title(ax, letter, look)
     axes[0].set_yticks(y, [f"{c['label']}\n{c['config']} · {n_runs_label(c)[1:-1]}"
                            for c in cfgs])
     handles = [
-        plt.Line2D([], [], color=MUTED, marker="o", ls="none", alpha=0.55,
-                   markersize=3, mew=0),
-        plt.Line2D([], [], color=MUTED, marker="o", ls="-", lw=1.2, markersize=5),
+        plt.Line2D([], [], color=look["muted"], marker="o", ls="none", alpha=0.55,
+                   markersize=0.8 * look["ms"], mew=0),
+        plt.Line2D([], [], color=look["muted"], marker="o", ls="-",
+                   lw=0.7 * look["lw"], markersize=1.5 * look["ms"]),
     ]
     names = ["One seed", f"{how.capitalize()} ± 1σ across seeds"]
     if ref is not None:
-        handles.append(plt.Line2D([], [], color=MUTED, lw=0.7, ls=":"))
+        handles.append(plt.Line2D([], [], color=look["muted"], lw=0.7, ls=":"))
         names.append(f"{ref['label']} ({how})")
-    top_legend(fig, handles, names, ncol=len(names))
-    return fig
+    figure_legend(fig, handles, names, len(names), look)
+    caption = (
+        f"Late-time forecast error, all bands pooled, on {n_objects(cfgs)} common "
+        "test objects, for each model configuration: "
+        + "; ".join(f"({lt}) {OVERVIEW_PANELS[m]}" for lt, m in zip("abc", panels))
+        + ". Small markers: individual training seeds; large markers: the "
+        f"{how} over seeds with ±1 standard deviation."
+        + (f" Dotted line: the {how} of {ref['label']}." if ref is not None else ""))
+    return fig, caption
 
 
 def tick_label(c: dict) -> str:
@@ -375,13 +464,19 @@ def config_axes_look(styled: bool) -> dict:
     publication style (``styled``), else the house values."""
     prm = plt.rcParams
     if styled:
-        return {"cycle": prm["axes.prop_cycle"].by_key().get("color", list(SERIES)),
+        return {"styled": True,
+                "cycle": prm["axes.prop_cycle"].by_key().get("color", list(SERIES)),
                 "note_size": prm["xtick.labelsize"], "note_color": prm["text.color"],
                 "lw": prm["lines.linewidth"], "ms": prm["lines.markersize"],
                 "mew": prm["lines.markeredgewidth"],
-                "cap": prm["errorbar.capsize"] + 1}
-    return {"cycle": list(SERIES), "note_size": 6.5, "note_color": INK_2,
-            "lw": 1.8, "ms": 3.6, "mew": 0.8, "cap": 3}
+                "cap": prm["errorbar.capsize"] + 1,
+                # Reference lines (zero, nominal, 'All' separator) in mid gray,
+                # band separators in the style's grid gray.
+                "ink": prm["text.color"], "ref": "0.55", "muted": "0.55",
+                "sep": prm["grid.color"]}
+    return {"styled": False, "cycle": list(SERIES), "note_size": 6.5,
+            "note_color": INK_2, "lw": 1.8, "ms": 3.6, "mew": 0.8, "cap": 3,
+            "ink": INK, "ref": AXIS, "muted": MUTED, "sep": AXIS}
 
 
 def config_figure(n: int, n_rows: int, styled: bool) -> tuple:
@@ -400,8 +495,7 @@ def config_figure(n: int, n_rows: int, styled: bool) -> tuple:
     axes = axes[:, 0]
     for ax in axes:
         if styled:
-            ax.xaxis.set_minor_locator(NullLocator())  # categories: no minor ticks
-            ax.tick_params(axis="x", which="both", length=0, top=False)
+            category_axis(ax, "x", {"styled": True})
         else:
             ax.tick_params(axis="x", length=0, pad=3)
             ax.tick_params(axis="x", labelsize=7, labelcolor=INK)
@@ -416,11 +510,11 @@ def draw_config_metric(ax: plt.Axes, cfgs: list, metric: str, look: dict) -> Non
     x = np.arange(len(cfgs), dtype=float)
     signed = metric in SIGNED
     if signed:
-        ax.axhline(0.0, color=AXIS, lw=0.6, zorder=1)
+        ax.axhline(0.0, color=look["ref"], lw=0.6, zorder=1)
     lows, highs = ([0.0], [0.0]) if signed else ([], [])
     for i, c in enumerate(cfgs):
-        marker = series_style(c["slot"])["marker"]
-        color = look["cycle"][c["slot"] % len(look["cycle"])]  # follows the slot
+        st = config_style(c, look)  # color follows the slot
+        marker, color = st["marker"], st["color"]
         if not np.isfinite(c["stack"][metric][:, -1]).any():
             continue
         cv, sd = c["center"][metric][-1], c["sd"][metric][-1]
@@ -498,50 +592,75 @@ def fig_rmse_bias_vs_config(cfgs: list, how: str, styled: bool = False) -> tuple
     return fig, caption
 
 
-def fig_by_band(cfgs: list) -> plt.Figure:
-    """Per-band uniform RMSE, bias and coverage: center +- 1 sigma per config."""
+def fig_by_band(cfgs: list, how: str, styled: bool = False) -> tuple:
+    """Per-band uniform RMSE, bias and coverage: center +- 1 sigma per config.
+    Returns (figure, caption)."""
+    look = config_axes_look(styled)
     rows = [m for m in ("uniform_rmse", "uniform_bias", "cov_cal")
             if any(np.isfinite(c["stack"][m]).any() for c in cfgs)]
-    fig, axes = plt.subplots(len(rows), 1, figsize=(FULL_W, 1.9 * len(rows) + 0.6),
-                             sharex=True)
+    if styled:
+        w, h = plt.rcParams["figure.figsize"]
+        size = (2 * w, 0.75 * h * len(rows) + 0.6)
+    else:
+        size = (FULL_W, 1.9 * len(rows) + 0.6)
+    fig, axes = plt.subplots(len(rows), 1, figsize=size, sharex=True)
     axes = np.atleast_1d(axes)
     x = np.arange(len(GROUP_NAMES))
     n = len(cfgs)
     nominal = cfgs[0]["runs"][0]["interval"]
     for ax, m, letter in zip(axes, rows, "abc"):
         if m in SIGNED:
-            ax.axhline(0.0, color=AXIS, lw=0.6)
+            ax.axhline(0.0, color=look["ref"], lw=0.6)
         if m == "cov_cal":
-            ax.axhline(nominal, color=INK, lw=0.6, ls=":")
+            ax.axhline(nominal, color=look["ink"], lw=0.6, ls=":")
         for i, c in enumerate(cfgs):
-            st = series_style(c["slot"])
+            st = config_style(c, look)
             cv, sd = c["center"][m], c["sd"][m]
             ok = np.isfinite(cv)
             ax.errorbar(x[ok] + dodge(n, i, 0.72), cv[ok],
                         yerr=np.where(np.isfinite(sd), sd, 0.0)[ok],
-                        fmt=st["marker"], color=st["color"], markersize=3.8,
-                        elinewidth=1.0, capsize=1.8, mec="white", mew=0.4)
-        band_separators(ax)
-        label = METRIC_NAMES[m]
-        if m == "cov_cal":
-            label = f"Coverage of calibrated\n{nominal:.0%} band (uniform)"
-        elif m == "uniform_bias":
-            label = "Bias (mag)\n+ = too faint"
+                        fmt=st["marker"], color=st["color"],
+                        markersize=look["ms"] if styled else 3.8,
+                        elinewidth=0.7 * look["lw"] if styled else 1.0,
+                        capsize=look["cap"] - 1 if styled else 1.8,
+                        mec="white", mew=0.4)
+        band_lines(ax, look)
+        if styled:
+            label = PUB_YLABELS[m]
+            if m == "cov_cal":
+                label = f"Coverage of\n{nominal:.0%} interval"
+        else:
+            label = METRIC_NAMES[m]
+            if m == "cov_cal":
+                label = f"Coverage of calibrated\n{nominal:.0%} band (uniform)"
+            elif m == "uniform_bias":
+                label = "Bias (mag)\n+ = too faint"
         ax.set_ylabel(label)
-        panel_letter(ax, letter)
+        letter_title(ax, letter, look)
     band_axis(axes[-1])
-    handles, labels = config_handles(cfgs)
-    top_legend(fig, handles, labels, ncol=min(n, 3))
-    return fig
+    for ax in axes:
+        category_axis(ax, "x", look)
+    handles, labels = config_handles(cfgs, look)
+    figure_legend(fig, handles, labels, min(n, 3), look)
+    caption = (
+        "Late-time forecast error against the uniformly sampled true light curve "
+        f"per band, on {n_objects(cfgs)} common test objects, for each model "
+        "configuration: "
+        + "; ".join(f"({lt}) {BY_BAND_PANELS[m].format(nominal=nominal)}"
+                    for lt, m in zip("abc", rows))
+        + f". 'All' pools the bands. {seed_caption(cfgs, how).split('; numbers')[0]}.")
+    return fig, caption
 
 
 def fig_vs_lead(cfgs: list, edges: np.ndarray, boot: ObjectBootstrap,
-                how: str) -> plt.Figure:
-    """Uniform RMSE vs lead time per band: center line +- 1 sigma fill per config."""
+                how: str, styled: bool = False) -> tuple:
+    """Uniform RMSE vs lead time per band: center line +- 1 sigma fill per config.
+    Returns (figure, caption)."""
+    look = config_axes_look(styled)
     centers = 0.5 * (edges[1:] + edges[:-1])
-    fig, axes = lead_panels()
+    fig, axes = lead_panels(4.2 if styled else 3.3)
     for c in cfgs:
-        st = series_style(c["slot"])
+        st = config_style(c, look)
         grids = np.stack([lead_grid(boot, r["uniform"], "rmse", edges)["point"]
                           for r in c["runs"]])
         cv, sd = center_of(grids, how), sigma_of(grids)
@@ -549,15 +668,23 @@ def fig_vs_lead(cfgs: list, edges: np.ndarray, boot: ObjectBootstrap,
             if np.isfinite(sd[g]).any():
                 ax.fill_between(centers, cv[g] - sd[g], cv[g] + sd[g],
                                 color=st["color"], alpha=0.15, lw=0)
-            ax.plot(centers, cv[g], color=st["color"], ls=st["ls"], lw=1.1)
-    fig.supxlabel("Lead time (days)")
-    fig.supylabel("Uniform RMSE (mag)")
-    handles, labels = config_handles(cfgs, lines=True)
+            ax.plot(centers, cv[g], color=st["color"], ls=st["ls"],
+                    lw=look["lw"] if styled else 1.1)
+    size = {"fontsize": plt.rcParams["axes.labelsize"]} if styled else {}
+    fig.supxlabel("Lead time (days)", **size)
+    fig.supylabel("RMSE (mag)" if styled else "Uniform RMSE (mag)", **size)
+    handles, labels = config_handles(cfgs, look, lines=True)
     for h in handles:
         h.set_marker("none")
-    top_legend(fig, handles, labels, ncol=min(len(cfgs), 3),
-               title="Line = seed center, band = ±1σ across seeds")
-    return fig
+    figure_legend(fig, handles, labels, min(len(cfgs), 3), look,
+                  title=None if styled else
+                  "Line = seed center, band = ±1σ across seeds")
+    caption = (
+        "Late-time forecast RMSE against the uniformly sampled true light curve vs. "
+        f"lead time, per band and pooled ('All bands'), on {n_objects(cfgs)} common "
+        f"test objects. Lines: the {how} over training seeds; shading: ±1 standard "
+        "deviation across seeds.")
+    return fig, caption
 
 
 # ---------------------------------------------------------------------- tables
@@ -673,9 +800,9 @@ def main() -> None:
                    "is evaluated yet (fallback), add it as an extra seed (always), "
                    "or ignore it (never).")
     p.add_argument("--style", default=DEFAULT_STYLE,
-                   help="Matplotlib style of the rmse_vs_config figure (path, or a "
-                   "name searched in the cwd, this dir and its parents); 'none' "
-                   "for the house style. The other figures keep the house style.")
+                   help="Matplotlib style of every figure (path, or a name "
+                   "searched in the cwd, this dir and its parents); 'none' for "
+                   "the house style.")
     p.add_argument("--font_dir", default=DEFAULT_FONT_DIR,
                    help="Extra .otf/.ttf fonts to register (the style's font).")
     p.add_argument("--runs_root", default="runs")
@@ -693,7 +820,6 @@ def main() -> None:
         p.error("--seeds must be in 0-99")
     labels = args.labels or [CONFIG_LABELS.get(c, f"Study {c}") for c in args.configs]
 
-    set_style()
     cfgs = load_configs(args.configs, labels, args.seeds, args.runs_root,
                         args.config_run)
     if not cfgs:
@@ -725,13 +851,19 @@ def main() -> None:
                                                              args.font_dir)
     # Drawn AND saved inside the style: savefig.* (dpi, padding) and the fonts
     # are read at save time.
+    styled = style is not None
+    if not styled:
+        set_style()
     with pub_context(style):
         pub_figs = (
             ("rmse_vs_config", fig_rmse_vs_config(cfgs, ref, args.center,
-                                                  args.metric,
-                                                  styled=style is not None)),
+                                                  args.metric, styled=styled)),
             ("rmse_bias_vs_config", fig_rmse_bias_vs_config(
-                cfgs, args.center, styled=style is not None)),
+                cfgs, args.center, styled=styled)),
+            ("overview", fig_overview(cfgs, ref, args.center, styled=styled)),
+            ("by_band", fig_by_band(cfgs, args.center, styled=styled)),
+            ("rmse_vs_lead", fig_vs_lead(cfgs, lead_edges(runs), boot,
+                                         args.center, styled=styled)),
         )
         for name, (fig, _) in pub_figs:
             save(fig, outdir, name, fmts)
@@ -744,11 +876,6 @@ def main() -> None:
         with open(path, "w") as fh:
             fh.write(caption + "\n")
         print(f"Wrote {path}")
-    for name, fig in (("overview", fig_overview(cfgs, ref, args.center)),
-                      ("by_band", fig_by_band(cfgs)),
-                      ("rmse_vs_lead", fig_vs_lead(cfgs, lead_edges(runs), boot,
-                                                  args.center))):
-        save(fig, outdir, name, fmts)
     write_tables(cfgs, ref, args.center, boot.n_obj, outdir)
 
 

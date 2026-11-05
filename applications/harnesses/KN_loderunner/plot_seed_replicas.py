@@ -8,7 +8,8 @@ them with one shared set of object-bootstrap resamples, so the seed-to-seed
 differences are not test-sample noise: the test set is fixed, only the seed
 changes. The original config study (e.g. 213) is drawn in gray for reference.
 
-Figures (PDF + PNG, 7.0 in two-column width) in ``--outdir``:
+Figures (PDF + PNG, in ``--style``: default ``publication.mplstyle``, ``none``
+= the house style) in ``--outdir``:
 
   1. ``overview``       (a) overall uniform RMSE per seed (90% CI whisker, dense
                         RMSE overlaid), (b) pooled bias; the seed mean and +-1
@@ -51,35 +52,38 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_compare_runs import GRID_SEP, common_objects  # noqa: E402
+from plot_compare_runs import band_separators, common_objects  # noqa: E402
 from plot_run_report import (  # noqa: E402
-    AXIS,
     BAND_NAMES,
-    FULL_W,
     GROUP_LABELS,
     GROUP_NAMES,
-    INK,
-    INK_2,
-    MUTED,
+    LOOK,
+    MARKERS,
     N_BANDS,
-    SERIES,
     ObjectBootstrap,
+    add_style_args,
+    apply_style,
     band_axis,
+    category_ticks,
+    color,
     dodge,
     errorbar,
+    figsize,
     fmt,
     lead_edges,
     lead_grid,
     lead_panels,
     load_run,
     metrics_table,
+    note,
     panel_letter,
     restrict_to,
     save,
     series_style,
-    set_style,
     summarize,
+    sup_labels,
     top_legend,
+    value_grid,
     write_tex,
 )
 
@@ -93,14 +97,14 @@ SUMMARY_METRICS = ("uniform_rmse", "uniform_bias", "within_rmse", "beyond_rmse",
 
 def seed_style(i: int, n: int) -> dict:
     """Seed ``i`` of ``n``: its own slot up to 8 seeds, one shared slot past that."""
-    if n <= len(SERIES):
+    if n <= len(MARKERS):
         return series_style(i)
-    return {"color": SERIES[0], "marker": "o", "ls": "-"}
+    return {"color": color(0), "marker": "o", "ls": "-"}
 
 
 def ref_style(j: int) -> dict:
     """Reference study ``j``: hollow gray marker, dashed gray line."""
-    return {"color": INK_2, "marker": REF_MARKERS[j % len(REF_MARKERS)], "ls": "--",
+    return {"color": LOOK["ink2"], "marker": REF_MARKERS[j % len(REF_MARKERS)], "ls": "--",
             "mfc": "white"}
 
 
@@ -109,21 +113,21 @@ def legend_handles(seeds: list, refs: list, lines: bool = True,
     """Proxy artists: each seed (or one entry past 8), the seed mean, the refs."""
     n = len(seeds)
     handles, labels = [], []
-    shown = seeds if n <= len(SERIES) else seeds[:1]
+    shown = seeds if n <= len(MARKERS) else seeds[:1]
     for i, r in enumerate(shown):
         st = seed_style(i, n)
         handles.append(plt.Line2D([], [], color=st["color"], marker=st["marker"],
-                                  ls=st["ls"] if lines else "none", lw=1.0,
-                                  markersize=4))
-        labels.append(r["label"] if n <= len(SERIES) else f"{n} seeds")
+                                  ls=st["ls"] if lines else "none",
+                                  lw=LOOK["lw_thin"], markersize=LOOK["ms"]))
+        labels.append(r["label"] if n <= len(MARKERS) else f"{n} seeds")
     if mean:
-        handles.append(plt.Line2D([], [], color=INK, lw=1.4))
+        handles.append(plt.Line2D([], [], color=LOOK["ink"], lw=LOOK["lw"]))
         labels.append(f"Mean of {n} seeds")
     for j, r in enumerate(refs):
         st = ref_style(j)
         handles.append(plt.Line2D([], [], color=st["color"], marker=st["marker"],
                                   mfc="white", ls=st["ls"] if lines else "none",
-                                  lw=0.9, markersize=4))
+                                  lw=LOOK["lw_thin"], markersize=LOOK["ms"]))
         labels.append(r["label"])
     return handles, labels
 
@@ -162,13 +166,6 @@ def detectable_delta(sd: float, n: int, alpha: float = 0.05,
     return float(q * sd * np.sqrt(2.0 / n))
 
 
-def band_separators(ax: plt.Axes) -> None:
-    """Hairlines between band categories; a darker one before 'All'."""
-    for gx in np.arange(len(GROUP_NAMES) - 2) + 0.5:
-        ax.axvline(gx, color=GRID_SEP, lw=0.4, zorder=0)
-    ax.axvline(N_BANDS - 0.5, color=AXIS, lw=0.6)
-
-
 def seed_scatter(ax: plt.Axes, vals: np.ndarray, ref_vals: np.ndarray) -> None:
     """Per-group dodged marker per seed, a short ink tick at the seed mean,
     and each reference study as a hollow gray marker at the category's edge."""
@@ -177,13 +174,13 @@ def seed_scatter(ax: plt.Axes, vals: np.ndarray, ref_vals: np.ndarray) -> None:
     for i in range(n):
         st = seed_style(i, n)
         ax.plot(x + dodge(n, i, 0.66), vals[i], ls="none", marker=st["marker"],
-                color=st["color"], markersize=3.5)
-    ax.hlines(np.nanmean(vals, axis=0), x - 0.36, x + 0.36, color=INK, lw=1.1,
-              zorder=3)
+                color=st["color"], markersize=LOOK["ms"])
+    ax.hlines(np.nanmean(vals, axis=0), x - 0.36, x + 0.36, color=LOOK["ink"],
+              lw=LOOK["lw"], zorder=3)
     for j, rv in enumerate(ref_vals):
         st = ref_style(j)
         ax.plot(x + 0.43, rv, ls="none", marker=st["marker"], mfc="white",
-                mec=st["color"], mew=0.8, markersize=3.2)
+                mec=st["color"], mew=LOOK["mew"], markersize=0.9 * LOOK["ms"])
 
 
 # --------------------------------------------------------------------- figures
@@ -197,35 +194,36 @@ def fig_overview(seeds: list, refs: list, boot: ObjectBootstrap) -> plt.Figure:
     bias = [summarize(boot, r["uniform"], "bias", "all") for r in runs]
     y = np.arange(n, dtype=float)[::-1]
     y[:ns] += 0.6 if refs else 0.0  # gap between the seeds and the references
-    fig, axes = plt.subplots(1, 2, figsize=(FULL_W, 0.34 * n + 1.3), sharey=True)
-    panels = ((axes[0], rmse, "Uniform-truth RMSE, all bands (mag)", False),
-              (axes[1], bias, "Uniform-truth bias, all bands (mag; + = too faint)",
+    fig, axes = plt.subplots(1, 2, figsize=figsize("full_w", 0.34 * n + 1.3),
+                             sharey=True)
+    sep = "\n" if LOOK["styled"] else " "
+    panels = ((axes[0], rmse, f"Uniform-truth RMSE,{sep}all bands (mag)", False),
+              (axes[1], bias, f"Uniform-truth bias, all bands{sep}(mag; + = too faint)",
                True))
     for (ax, stats, xlabel, signed), letter in zip(panels, "ab"):
-        ax.grid(axis="x")
-        ax.grid(axis="y", visible=False)
-        ax.tick_params(axis="y", length=0)
+        value_grid(ax, "x")
+        category_ticks(ax, "y")
         vals = np.array([s["point"][0] for s in stats[:ns]])
         mean, sd = vals.mean(), vals.std(ddof=1)
-        ax.axvspan(mean - sd, mean + sd, color=AXIS, alpha=0.35, lw=0)
-        ax.axvline(mean, color=INK, lw=0.8)
+        ax.axvspan(mean - sd, mean + sd, color=LOOK["axis"], alpha=0.35, lw=0)
+        ax.axvline(mean, color=LOOK["ink"], lw=LOOK["lw_thin"])
         if signed:
-            ax.axvline(0.0, color=AXIS, lw=0.6)
+            ax.axvline(0.0, color=LOOK["axis"], lw=LOOK["hair"])
         ax.set_title(f"seed mean {mean:.3f} ± {sd:.3f} (1σ, {ns} seeds)",
-                     loc="right", color=INK_2, fontsize=7)
+                     loc="right", color=LOOK["ink2"], fontsize=LOOK["note"])
         for i, r in enumerate(runs):
             st = seed_style(i, ns) if i < ns else ref_style(i - ns)
-            kw = {"mfc": "white", "mew": 0.9} if i >= ns else {}
+            kw = {"mfc": "white", "mew": LOOK["mew"]} if i >= ns else {}
             errorbar(ax, [y[i]], stats[i], horizontal=True, fmt=st["marker"],
-                     color=st["color"], markersize=5, **kw)
+                     color=st["color"], markersize=LOOK["ms_big"], **kw)
             v = stats[i]["point"][0]
-            ax.annotate(f"{v:+.3f}" if signed else f"{v:.3f}", (stats[i]["hi"][0], y[i]),
-                        xytext=(4, 0), textcoords="offset points", va="center",
-                        fontsize=7)
+            note(ax, f"{v:+.3f}" if signed else f"{v:.3f}", (stats[i]["hi"][0], y[i]),
+                 xytext=(4, 0), textcoords="offset points", va="center",
+                 color=LOOK["ink"])
             if not signed and r["dense"] is not None:
                 d = summarize(boot, r["dense"], "rmse", "all")["point"][0]
-                ax.plot(d, y[i] - 0.25, ls="none", marker="D", markersize=3.5,
-                        mfc="white", mec=INK, mew=0.8, zorder=3)
+                ax.plot(d, y[i] - 0.25, ls="none", marker="D", markersize=LOOK["ms"],
+                        mfc="white", mec=LOOK["ink"], mew=LOOK["mew"], zorder=3)
         lo = min(min(s["lo"][0] for s in stats), mean - sd)
         hi = max(max(s["hi"][0] for s in stats), mean + sd)
         if not signed:
@@ -235,51 +233,53 @@ def fig_overview(seeds: list, refs: list, boot: ObjectBootstrap) -> plt.Figure:
         if signed:
             lo, hi = min(lo, 0.0), max(hi, 0.0)
         pad = 0.08 * (hi - lo)
-        ax.set_xlim(lo - pad, hi + 2.5 * pad)
+        ax.set_xlim(lo - pad, hi + (4.0 if LOOK["styled"] else 2.5) * pad)
         ax.set_xlabel(xlabel)
         panel_letter(ax, letter)
     labels = [r["label"] for r in runs]
     axes[0].set_yticks(y, labels)
-    handles = [plt.Line2D([], [], color=MUTED, marker="o", ls="-", lw=0.8,
-                          markersize=4),
-               plt.Line2D([], [], color=INK, lw=0.8),
-               plt.Rectangle((0, 0), 1, 1, color=AXIS, alpha=0.35, lw=0)]
+    handles = [plt.Line2D([], [], color=LOOK["muted"], marker="o", ls="-",
+                          lw=LOOK["lw_thin"], markersize=LOOK["ms"]),
+               plt.Line2D([], [], color=LOOK["ink"], lw=LOOK["lw_thin"]),
+               plt.Rectangle((0, 0), 1, 1, color=LOOK["axis"], alpha=0.35, lw=0)]
     names = ["Uniform truth (90% CI, test sample)", "Seed mean", "±1σ across seeds"]
     if any(r["dense"] is not None for r in runs):
-        handles.insert(1, plt.Line2D([], [], ls="none", marker="D", markersize=3.5,
-                                     mfc="white", mec=INK, mew=0.8))
+        handles.insert(1, plt.Line2D([], [], ls="none", marker="D",
+                                     markersize=LOOK["ms"], mfc="white",
+                                     mec=LOOK["ink"], mew=LOOK["mew"]))
         names.insert(1, "Dense truth RMSE")
-    top_legend(fig, handles, names, ncol=len(names))
+    top_legend(fig, handles, names,
+               ncol=2 if LOOK["styled"] else len(names))
     return fig
 
 
 def fig_band_spread(seeds: list, refs: list, boot: ObjectBootstrap) -> plt.Figure:
     """Per-band RMSE / bias per seed, and seed sigma vs test-sample sigma."""
-    fig, axes = plt.subplots(4, 1, figsize=(FULL_W, 6.4), sharex=True,
+    fig, axes = plt.subplots(4, 1, figsize=figsize("full_w", 6.4), sharex=True,
                              height_ratios=(1.3, 1.1, 0.8, 0.8))
     x = np.arange(len(GROUP_NAMES))
     for ax, kind, ylabel in ((axes[0], "rmse", "Uniform RMSE (mag)"),
                              (axes[1], "bias", "Bias (mag)\n+ = too faint")):
         if kind == "bias":
-            ax.axhline(0.0, color=AXIS, lw=0.6)
+            ax.axhline(0.0, color=LOOK["axis"], lw=LOOK["hair"])
         seed_scatter(ax, points(seeds, boot, kind), points(refs, boot, kind))
         band_separators(ax)
         ax.set_ylabel(ylabel)
     for ax, kind, name in ((axes[2], "rmse", "RMSE"), (axes[3], "bias", "bias")):
         s_seed = seed_sd(points(seeds, boot, kind))
         s_test = test_sd(seeds, boot, kind)
-        ax.bar(x - 0.19, s_seed, width=0.34, color=INK_2, lw=0)
-        ax.bar(x + 0.19, s_test, width=0.34, color=AXIS, lw=0)
+        ax.bar(x - 0.19, s_seed, width=0.34, color=LOOK["ink2"], lw=0)
+        ax.bar(x + 0.19, s_test, width=0.34, color=LOOK["axis"], lw=0)
         band_separators(ax)
         ax.set_ylabel(f"σ of {name} (mag)")
     for ax, letter in zip(axes, "abcd"):
         panel_letter(ax, letter)
     band_axis(axes[-1])
     handles, labels = legend_handles(seeds, refs, lines=False)
-    handles += [plt.Rectangle((0, 0), 1, 1, color=INK_2, lw=0),
-                plt.Rectangle((0, 0), 1, 1, color=AXIS, lw=0)]
+    handles += [plt.Rectangle((0, 0), 1, 1, color=LOOK["ink2"], lw=0),
+                plt.Rectangle((0, 0), 1, 1, color=LOOK["axis"], lw=0)]
     labels += ["σ across seeds (c, d)", "σ test sample, one run (c, d)"]
-    top_legend(fig, handles, labels, ncol=min(len(labels), 5))
+    top_legend(fig, handles, labels, ncol=min(len(labels), 3 if LOOK["styled"] else 5))
     return fig
 
 
@@ -295,14 +295,14 @@ def fig_vs_lead(seeds: list, boot: ObjectBootstrap, edges: np.ndarray,
     fig, axes = lead_panels()
     for g, ax in enumerate(axes):
         if kind == "bias":
-            ax.axhline(0.0, color=AXIS, lw=0.5)
+            ax.axhline(0.0, color=LOOK["axis"], lw=LOOK["hair"])
         for i, grid in enumerate(grids):
             st = seed_style(i, n)
-            ax.plot(centers, grid[g], color=st["color"], ls=st["ls"], lw=0.8)
-        ax.plot(centers, mean[g], color=INK, lw=1.4)
-    fig.supxlabel("Lead time (days)")
-    fig.supylabel("Uniform RMSE (mag)" if kind == "rmse"
-                  else "Uniform bias (mag; + = too faint)")
+            ax.plot(centers, grid[g], color=st["color"], ls=st["ls"],
+                    lw=LOOK["lw_thin"])
+        ax.plot(centers, mean[g], color=LOOK["ink"], lw=LOOK["lw"])
+    sup_labels(fig, "Lead time (days)", "Uniform RMSE (mag)" if kind == "rmse"
+               else "Uniform bias (mag; + = too faint)")
     handles, labels = legend_handles(seeds, [])
     for h in handles[:-1]:
         h.set_marker("none")
@@ -322,15 +322,15 @@ def fig_coverage(seeds: list, refs: list, boot: ObjectBootstrap) -> plt.Figure |
                                    "hit_cal" if r["calibrated"] else "hit_raw")["point"]
                          for r in runs]).reshape(len(runs), len(GROUP_NAMES))
 
-    fig, ax = plt.subplots(figsize=(FULL_W, 2.4))
-    ax.axhline(nominal, color=INK, lw=0.6, ls=":")
+    fig, ax = plt.subplots(figsize=figsize("full_w", 2.4))
+    ax.axhline(nominal, color=LOOK["ink"], lw=LOOK["hair"], ls=":")
     seed_scatter(ax, cov(seeds), cov([r for r in refs if r["has_band"]]))
     band_separators(ax)
     band_axis(ax)
     raw = [r["label"] for r in seeds if not r["calibrated"]]
-    note = f"  (raw band: {', '.join(raw)})" if raw else ""
+    raw_note = f"  (raw band: {', '.join(raw)})" if raw else ""
     ax.set_ylabel(f"Coverage of calibrated\n{nominal:.0%} band (uniform truth)")
-    ax.set_title(note, loc="right", color=INK_2, fontsize=7)
+    ax.set_title(raw_note, loc="right", color=LOOK["ink2"], fontsize=LOOK["note"])
     handles, labels = legend_handles(seeds, [r for r in refs if r["has_band"]],
                                      lines=False)
     top_legend(fig, handles, labels, ncol=int(np.ceil(len(labels) / 2)))
@@ -346,7 +346,8 @@ def fig_loss(seeds: list, refs: list) -> plt.Figure | None:
     n = len(seeds)
     last = max(r["val_loss"]["epoch"].max() for r in runs if r["val_loss"] is not None)
     zoom_from = int(last * 2 / 3)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(FULL_W, 2.5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize("full_w", 2.5))
+    star = 2.2 * LOOK["ms"]
     for i, r in enumerate(runs):
         v = r["val_loss"]
         if v is None:
@@ -355,26 +356,28 @@ def fig_loss(seeds: list, refs: list) -> plt.Figure | None:
         late = v[v["epoch"] >= zoom_from]
         for ax, d in ((ax1, v), (ax2, late)):
             ax.plot(d["epoch"], d["median"], color=st["color"], ls=st["ls"],
-                    lw=1.0 if i < n else 0.8)
+                    lw=LOOK["lw_thin"])
         if r["epoch"] is not None:
             s = v.set_index("epoch")["median"]
             if r["epoch"] in s.index:
                 for ax in (ax1, ax2):
-                    ax.plot(r["epoch"], s[r["epoch"]], marker="*", markersize=8,
+                    ax.plot(r["epoch"], s[r["epoch"]], marker="*", markersize=star,
                             color=st["color"], mec="white", mew=0.6, ls="none",
                             zorder=4)
     ax1.set_yscale("log")
-    ax1.axvspan(zoom_from, last, color=AXIS, alpha=0.25, lw=0)
-    ax1.set_ylabel("Validation loss (per-epoch median)")
-    ax2.set_title(f"epochs ≥ {zoom_from}", loc="right", color=INK_2, fontsize=7)
+    ax1.axvspan(zoom_from, last, color=LOOK["axis"], alpha=0.25, lw=0)
+    ax1.set_ylabel("Validation loss\n(per-epoch median)" if LOOK["styled"]
+                   else "Validation loss (per-epoch median)")
+    ax2.set_title(f"epochs ≥ {zoom_from}", loc="right", color=LOOK["ink2"],
+                  fontsize=LOOK["note"])
     for ax, letter in zip((ax1, ax2), "ab"):
         ax.set_xlabel("Epoch")
         panel_letter(ax, letter)
     handles, labels = legend_handles(seeds, refs, mean=False)
     for h in handles:
         h.set_marker("none")
-    handles.append(plt.Line2D([], [], color=MUTED, marker="*", ls="none",
-                              markersize=7))
+    handles.append(plt.Line2D([], [], color=LOOK["muted"], marker="*", ls="none",
+                              markersize=0.9 * star))
     labels.append("Evaluated checkpoint")
     top_legend(fig, handles, labels, ncol=int(np.ceil(len(labels) / 2)))
     return fig
@@ -506,6 +509,7 @@ def main() -> None:
     p.add_argument("--formats", nargs="+", default=["pdf", "png"])
     p.add_argument("--n_boot", type=int, default=500)
     p.add_argument("--boot_seed", type=int, default=0)
+    add_style_args(p)
     args = p.parse_args()
 
     if args.studies is None:
@@ -521,7 +525,7 @@ def main() -> None:
     refs_in = (args.reference_studies if args.reference_studies is not None
                else [args.config] if args.config is not None else [])
 
-    set_style()
+    apply_style(args.style, args.font_dir)
     seeds = load_available(studies, args.runs_root,
                            [f"Seed {s % 100}" for s in studies])
     if len(seeds) < 2:
