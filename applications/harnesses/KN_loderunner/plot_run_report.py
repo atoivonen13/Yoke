@@ -24,8 +24,7 @@ Figures (PDF + PNG) in ``runs/study_NNN/figures``, drawn in ``--style``
   3. ``error_vs_lead``  RMSE and bias vs lead time, per band + all bands;
   4. ``pred_vs_truth``  predicted median vs uniform truth (2-D histogram) per
                         band, with the median prediction at fixed truth (and the
-                        median calibrated 90% bounds), the 1:1 line and the
-                        dense depth;
+                        median calibrated 90% bounds) and the 1:1 line;
   5. ``coverage``       raw vs calibrated 90% coverage per band and vs lead;
   6. ``examples``       forecast + calibrated band vs truth for the 5th / 50th /
                         95th percentile object by per-object uniform RMSE
@@ -826,10 +825,6 @@ def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figur
             for k in (1, 2):
                 ax.plot(c, med[:, k], color=LOOK["ink"], lw=0.75 * LOOK["lw"],
                         ls=":", label=band_label)
-        depth = run["depth"][b]
-        if lims[0] < depth < lims[1]:
-            ax.axvline(depth, color=color(1), ls=":", lw=LOOK["lw"],
-                       label="Dense depth")
         ax.set_xlim(lims)
         ax.set_ylim(lims)
         ax.set_aspect("equal")
