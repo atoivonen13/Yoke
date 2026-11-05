@@ -23,8 +23,9 @@ Figures (PDF + PNG) in ``runs/study_NNN/figures``, drawn in ``--style``
   2. ``band_metrics``   uniform RMSE (dense RMSE overlaid) and bias per band;
   3. ``error_vs_lead``  RMSE and bias vs lead time, per band + all bands;
   4. ``pred_vs_truth``  predicted median vs uniform truth (2-D histogram) per
-                        band, with the median prediction at fixed truth, the
-                        1:1 line and the dense depth;
+                        band, with the median prediction at fixed truth (and the
+                        median calibrated 90% bounds), the 1:1 line and the
+                        dense depth;
   5. ``coverage``       raw vs calibrated 90% coverage per band and vs lead;
   6. ``examples``       forecast + calibrated band vs truth for the 5th / 50th /
                         95th percentile object by per-object uniform RMSE
@@ -766,7 +767,8 @@ def fig_error_vs_lead(run: dict, boot: ObjectBootstrap, edges: np.ndarray,
     return fig
 
 
-def _median_given_truth(true: np.ndarray, pred: np.ndarray, lims: tuple) -> tuple:
+def _median_given_truth(true: np.ndarray, preds: np.ndarray, lims: tuple) -> tuple:
+    """Bin centers and the median of each column of ``preds`` [N, k] per truth bin."""
     edges = np.arange(lims[0], lims[1] + TRUTH_BIN_MAG, TRUTH_BIN_MAG)
     idx = np.digitize(true, edges) - 1
     centers, meds = [], []
@@ -774,15 +776,23 @@ def _median_given_truth(true: np.ndarray, pred: np.ndarray, lims: tuple) -> tupl
         m = idx == i
         if m.sum() >= MIN_TRUTH_BIN_POINTS:
             centers.append(0.5 * (edges[i] + edges[i + 1]))
-            meds.append(np.median(pred[m]))
-    return np.asarray(centers), np.asarray(meds)
+            meds.append(np.median(preds[m], axis=0))
+    return np.asarray(centers), np.asarray(meds).reshape(len(centers), preds.shape[1])
 
 
 def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figure:
-    """2-D histogram of predicted median vs uniform truth, per band."""
+    """2-D histogram of predicted median vs uniform truth, per band.
+
+    Lines at fixed truth: the median of the predicted medians and (with a
+    quantile head) the medians of the calibrated interval's low / high bounds,
+    i.e. the typical band the model reports for an object that bright.
+    """
     u = run["uniform"]
     fig, axes = plt.subplots(3, 3, figsize=(LOOK["full_w"], LOOK["full_w"] * 0.92))
     axes = axes.ravel()
+    cols = ["med", "low_cal", "high_cal"] if run["has_band"] else ["med"]
+    band_label = (f"{'Calibrated' if run['calibrated'] else 'Raw'} "
+                  f"{run['interval']:.0%} band (median)") if run["has_band"] else None
     hists = []
     for b in range(N_BANDS):
         m = (u["b"] == b).to_numpy()
@@ -795,7 +805,7 @@ def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figur
         pad = 0.04 * (hi - lo)
         lims = (lo - pad, hi + pad)
         h, xe, ye = np.histogram2d(t, p, bins=bins, range=(lims, lims))
-        hists.append((t, p, lims, h, xe, ye))
+        hists.append((t, u[cols].to_numpy()[m], lims, h, xe, ye))
     vmax = max(h[3].max() for h in hists if h is not None)
     norm = LogNorm(vmin=1, vmax=vmax)
     mesh = None
@@ -811,7 +821,12 @@ def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figur
         ax.plot(lims, lims, color=LOOK["muted"], ls="--", lw=LOOK["lw_thin"],
                 label="1:1")
         c, med = _median_given_truth(t, p, lims)
-        ax.plot(c, med, color=LOOK["ink"], lw=LOOK["lw"], label="Median prediction")
+        ax.plot(c, med[:, 0], color=LOOK["ink"], lw=LOOK["lw"], label="Median prediction")
+        if band_label is not None:
+            for k in (1, 2):
+                # Thin solid: the 1:1 is dashed and the depth dotted.
+                ax.plot(c, med[:, k], color=LOOK["ink"], lw=0.5 * LOOK["lw"],
+                        label=band_label)
         depth = run["depth"][b]
         if lims[0] < depth < lims[1]:
             ax.axvline(depth, color=color(1), ls=":", lw=LOOK["lw"],
@@ -824,7 +839,8 @@ def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figur
     for ax in axes:
         for h, lab in zip(*ax.get_legend_handles_labels()):
             handles.setdefault(lab, h)
-    top_legend(fig, list(handles.values()), list(handles), ncol=3, title=title)
+    top_legend(fig, list(handles.values()), list(handles),
+               ncol=3 if len(handles) <= 3 else 2, title=title)
     if mesh is not None:
         fig.colorbar(mesh, ax=axes.tolist(), shrink=0.5, aspect=30, pad=0.02,
                      label="Points per bin")
