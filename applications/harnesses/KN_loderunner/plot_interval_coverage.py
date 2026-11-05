@@ -62,6 +62,8 @@ Calibration scales are read from ``<eval_dir>/interval_calibration.json`` (the
 eval writes it there by default); without it only the raw band is plotted.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -77,11 +79,27 @@ import pandas as pd  # noqa: E402
 from scipy.special import ndtr  # noqa: E402
 from scipy.stats import binom  # noqa: E402
 
+from pub_style import (  # noqa: E402
+    add_style_args,
+    pub_band_colors,
+    pub_colors,
+    pub_dpi,
+    pub_fs,
+    pub_layout,
+    pub_size,
+    pub_text,
+    pub_title,
+    rc_lw,
+    rc_ms,
+    use_pub_style,
+)
+
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
-BAND_COLORS = (
+# Lists, restyled in place by apply_style so importing scripts see the change.
+BAND_COLORS = [
     "#2A9D8F", "#E63946", "#F4A261", "#457B9D", "#1B9E77",
     "#D62828", "#E9C46A", "#8338EC", "#264653",
-)
+]
 # Quantile levels the head learns (study 131 on); the outer pair is the band.
 Q_LO, Q_MED, Q_HI = 0.05, 0.5, 0.95
 Z_HI = NormalDist().inv_cdf(Q_HI)
@@ -97,7 +115,15 @@ OBJ_COV_EDGES = np.linspace(0.0, 1.0, 11)
 # Objects with fewer points than this in a band are left out of per-object coverage.
 MIN_OBJ_POINTS = 5
 # One color per study in --studies mode, in this fixed order.
-STUDY_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300")
+STUDY_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
+
+
+def apply_style(style: str, font_dir: str) -> None:
+    """Publication style (``use_pub_style``), with the band / study colors and
+    figure sizes switched to the style's; ``style='none'`` = the house look."""
+    use_pub_style(style, font_dir)
+    BAND_COLORS[:] = pub_band_colors(BAND_COLORS)
+    STUDY_COLORS[:] = pub_colors(STUDY_COLORS)
 
 
 def load_points(csv_path: str, extra_cols: tuple = ()) -> pd.DataFrame:
@@ -197,14 +223,15 @@ def band_bounds(df: pd.DataFrame, variant: str) -> tuple:
 
 
 def _band_grid(title: str, sharey: bool = True, sharex: bool = True):
-    fig, axes = plt.subplots(3, 3, figsize=(12, 10.5), sharex=sharex, sharey=sharey)
-    fig.suptitle(title)
+    fig, axes = plt.subplots(3, 3, figsize=pub_size((12, 10.5)), sharex=sharex,
+                             sharey=sharey)
+    fig.suptitle(pub_title(title), fontsize=pub_fs(None, "axes.titlesize"))
     return fig, axes.ravel()
 
 
 def _save(fig, path: str) -> None:
-    fig.tight_layout()
-    fig.savefig(path, dpi=130)
+    pub_layout(fig)
+    fig.savefig(path, dpi=pub_dpi(130))
     plt.close(fig)
     print(f"Wrote {path}")
 
@@ -217,7 +244,7 @@ def plot_pp(df, variants, boot, truth, out_path) -> list:
     for b, name in enumerate(BAND_NAMES):
         ax = axes[b]
         m = (df["band"] == name).to_numpy()
-        ax.plot([0, 1], [0, 1], color="k", lw=0.8)
+        ax.plot([0, 1], [0, 1], color="k", lw=rc_lw(0.8))
         if not m.any():
             ax.set_title(f"{name} (no points)")
             continue
@@ -225,11 +252,11 @@ def plot_pp(df, variants, boot, truth, out_path) -> list:
         for v in variants:
             style = dict(color=BAND_COLORS[b]) if v == "cal" else dict(
                 color="0.5", ls="--")
-            ax.plot(PP_TAUS, _pp_curve(sub, v), lw=1.4, label=v, **style)
+            ax.plot(PP_TAUS, _pp_curve(sub, v), lw=rc_lw(1.4), label=v, **style)
             row = {"truth": truth, "band": name, "variant": v, "n": int(m.sum())}
             for tau, r, c_lo, c_hi in _exact_pp(df, m, v, boot):
                 ax.errorbar(tau, r, yerr=[[r - c_lo], [c_hi - r]], fmt="o",
-                            ms=4, capsize=2, **style)
+                            ms=rc_ms(4), capsize=2, **style)
                 row[f"F({tau})"] = r
             rows.append(row)
         ax.set_title(f"{name} (n={int(m.sum())})")
@@ -237,8 +264,9 @@ def plot_pp(df, variants, boot, truth, out_path) -> list:
     for ax in axes[6:]:
         ax.set_xlabel("nominal quantile level")
     for ax in axes[::3]:
-        ax.set_ylabel("fraction truth <= predicted quantile")
-    axes[0].legend(loc="upper left", fontsize=8)
+        ax.set_ylabel(pub_text("fraction truth <= predicted quantile",
+                                "empirical level"))
+    axes[0].legend(loc="upper left", fontsize=pub_fs(8))
     _save(fig, out_path)
     return rows
 
@@ -269,21 +297,24 @@ def _pp_axes(title: str):
 
     Deviations of a few hundredths are invisible on the full-range PP axes.
     """
-    fig, (ax, ax_d) = plt.subplots(1, 2, figsize=(13, 6))
-    fig.suptitle(title)
-    ax.plot([0, 1], [0, 1], color="k", lw=0.8)
-    ax_d.axhline(0.0, color="k", lw=0.8)
+    fig, (ax, ax_d) = plt.subplots(1, 2, figsize=pub_size((13, 6)))
+    fig.suptitle(pub_title(title), fontsize=pub_fs(None, "axes.titlesize"))
+    ax.plot([0, 1], [0, 1], color="k", lw=rc_lw(0.8))
+    ax_d.axhline(0.0, color="k", lw=rc_lw(0.8))
     for tau in (Q_LO, Q_MED, Q_HI):
-        ax_d.axvline(tau, color="0.85", lw=0.8, zorder=0)
+        ax_d.axvline(tau, color="0.85", lw=rc_lw(0.8), zorder=0)
     ax.set_aspect("equal")
     ax.set_xlabel("nominal quantile level")
-    ax.set_ylabel("fraction truth <= predicted quantile")
+    ax.set_ylabel(pub_text("fraction truth <= predicted quantile",
+                                "empirical level"))
     ax_d.set_xlabel("nominal quantile level")
-    ax_d.set_ylabel("empirical - nominal  (> 0: truth brighter than predicted)")
+    ax_d.set_ylabel(pub_text("empirical - nominal  (> 0: truth brighter than "
+                             "predicted)", "empirical $-$ nominal"))
     return fig, ax, ax_d
 
 
 def _pp_draw(ax, ax_d, curve, exact, label, lw=1.5, errorbars=True, **style):
+    lw = rc_lw(lw)
     ax.plot(PP_TAUS, curve, lw=lw, label=label, **style)
     ax_d.plot(PP_TAUS, curve - PP_TAUS, lw=lw, label=label, **style)
     if not errorbars:
@@ -291,7 +322,7 @@ def _pp_draw(ax, ax_d, curve, exact, label, lw=1.5, errorbars=True, **style):
     for tau, r, c_lo, c_hi in exact:
         for a, off in ((ax, 0.0), (ax_d, tau)):
             a.errorbar(tau, r - off, yerr=[[r - c_lo], [c_hi - r]], fmt="o",
-                       ms=5, capsize=3, **style)
+                       ms=rc_ms(5), capsize=3, **style)
 
 
 def plot_pp_combined(df, variants, boot, truth, out_path) -> dict:
@@ -322,7 +353,7 @@ def plot_pp_combined(df, variants, boot, truth, out_path) -> dict:
         style = dict(color="k") if v == v_last else dict(color="0.45", ls=":")
         _pp_draw(ax, ax_d, _pp_curve(df, v), exact[v], f"all bands ({v})",
                  lw=2.4, **style)
-    ax_d.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    ax_d.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=pub_fs(8))
     _save(fig, out_path)
     return exact
 
@@ -343,7 +374,7 @@ def plot_pp_combined_compare(entries, truth, out_path) -> None:
                  color=e["color"])
         print(f"  {e['label']:<12}{m.sum():>9d}" + "".join(
             f"{r:>8.3f}{f'[{lo:.3f}, {hi:.3f}]':>16}" for _, r, lo, hi in exact))
-    ax_d.legend(loc="best", fontsize=8)
+    ax_d.legend(loc="best", fontsize=pub_fs(8))
     _save(fig, out_path)
 
 
@@ -355,18 +386,18 @@ def plot_pit(df, variants, truth, out_path) -> None:
     for b, name in enumerate(BAND_NAMES):
         ax = axes[b]
         sub = df[df["band"] == name]
-        ax.axhline(1.0, color="k", lw=0.8)
+        ax.axhline(1.0, color="k", lw=rc_lw(0.8))
         if sub.empty:
             continue
         for v in variants:
-            style = dict(color=BAND_COLORS[b], lw=1.6) if v == "cal" else dict(
-                color="0.5", lw=1.0, ls="--")
+            style = dict(color=BAND_COLORS[b], lw=rc_lw(1.6)) if v == "cal" else dict(
+                color="0.5", lw=rc_lw(1.0), ls="--")
             h, _ = np.histogram(pit(sub, v), bins=edges, density=True)
             ax.stairs(h, edges, label=v, **style)
         ax.set_title(name)
     for ax in axes[6:]:
         ax.set_xlabel("PIT = F(true)")
-    axes[0].legend(loc="upper center", fontsize=8)
+    axes[0].legend(loc="upper center", fontsize=pub_fs(8))
     _save(fig, out_path)
 
 
@@ -419,8 +450,8 @@ def point_scores(df, variants) -> dict:
 def _plot_series(ax, pts, color, ls, label, lw=1.5, marker=None):
     if pts.size == 0:
         return
-    ax.plot(pts[:, 0], pts[:, 1], color=color, ls=ls, lw=lw, label=label,
-            marker=marker, ms=3)
+    ax.plot(pts[:, 0], pts[:, 1], color=color, ls=ls, lw=rc_lw(lw), label=label,
+            marker=marker, ms=rc_ms(3))
     ax.fill_between(pts[:, 0], pts[:, 2], pts[:, 3], color=color, alpha=0.15,
                     lw=0)
 
@@ -435,7 +466,7 @@ def plot_coverage_vs(df, variants, boot, truth, key, edges, xlabel, out_path,
                            f"{title_extra}; shading = object-bootstrap 90% CI")
     for b, name in enumerate(BAND_NAMES):
         ax = axes[b]
-        ax.axhline(0.90, color="k", lw=0.8)
+        ax.axhline(0.90, color="k", lw=rc_lw(0.8))
         for v in variants:
             color = BAND_COLORS[b] if v == "cal" else "0.5"
             _plot_series(ax, res[(name, v, "covered")], color,
@@ -446,7 +477,7 @@ def plot_coverage_vs(df, variants, boot, truth, key, edges, xlabel, out_path,
         ax.set_xlabel(xlabel)
     for ax in axes[::3]:
         ax.set_ylabel("coverage")
-    axes[0].legend(loc="lower left", fontsize=8)
+    axes[0].legend(loc="lower left", fontsize=pub_fs(8))
     _save(fig, out_path)
     return res
 
@@ -457,10 +488,10 @@ def plot_misses_vs_lead(df, variants, boot, truth, out_path, hits) -> None:
                   lambda v: {k: hits[v][k] for k in ("fainter", "brighter")})
     fig, axes = _band_grid(f"Miss rate by side vs lead ({truth} truth): "
                            "fainter = truth below the band (target 0.05 each)")
-    side_color = {"fainter": "#1f4e9c", "brighter": "#c0392b"}
+    side_color = dict(zip(("fainter", "brighter"), pub_colors(("#1f4e9c", "#c0392b"))))
     for b, name in enumerate(BAND_NAMES):
         ax = axes[b]
-        ax.axhline(0.05, color="k", lw=0.8)
+        ax.axhline(0.05, color="k", lw=rc_lw(0.8))
         for v in variants:
             for side in ("fainter", "brighter"):
                 _plot_series(ax, res[(name, v, side)], side_color[side],
@@ -472,7 +503,7 @@ def plot_misses_vs_lead(df, variants, boot, truth, out_path, hits) -> None:
         ax.set_xlabel("lead time (d)")
     for ax in axes[::3]:
         ax.set_ylabel("miss rate")
-    axes[0].legend(loc="upper left", fontsize=7)
+    axes[0].legend(loc="upper left", fontsize=pub_fs(7))
     _save(fig, out_path)
 
 
@@ -491,7 +522,7 @@ def plot_score_vs_lead(df, variants, boot, truth, out_path, sc) -> None:
                          "-" if v == "cal" else "--", f"IS ({v})")
             w = res[(name, v, "width")]
             if w.size:
-                ax.plot(w[:, 0], w[:, 1], color=color, ls=":", lw=1.2,
+                ax.plot(w[:, 0], w[:, 1], color=color, ls=":", lw=rc_lw(1.2),
                         label=f"width ({v})")
         ax.set_title(name)
         ax.set_ylim(bottom=0.0)
@@ -499,7 +530,7 @@ def plot_score_vs_lead(df, variants, boot, truth, out_path, sc) -> None:
         ax.set_xlabel("lead time (d)")
     for ax in axes[::3]:
         ax.set_ylabel("mag")
-    axes[0].legend(loc="upper left", fontsize=7)
+    axes[0].legend(loc="upper left", fontsize=pub_fs(7))
     _save(fig, out_path)
 
 
@@ -541,7 +572,7 @@ def plot_spread_skill(df, variants, boot, truth, sc, cov_path, rms_path) -> dict
                              "per half-width decile; black = half-width / z95 "
                              "(right size if Gaussian)", sharex=False, sharey=False)
     for b, name in enumerate(BAND_NAMES):
-        ax_c[b].axhline(0.90, color="k", lw=0.8)
+        ax_c[b].axhline(0.90, color="k", lw=rc_lw(0.8))
         for v in variants:
             pts = ss[v][name]
             color = BAND_COLORS[b] if v == "cal" else "0.5"
@@ -551,17 +582,18 @@ def plot_spread_skill(df, variants, boot, truth, sc, cov_path, rms_path) -> dict
         xs = np.concatenate([ss[v][name][:, 0] for v in variants])
         if xs.size:
             x = np.array([xs.min() * 0.95, xs.max() * 1.05])
-            ax_r[b].plot(x, x / Z_HI, color="k", lw=0.8, label="half-width / z95")
+            ax_r[b].plot(x, x / Z_HI, color="k", lw=rc_lw(0.8), label="half-width / z95")
         ax_c[b].set_ylim(0.4, 1.02)
         for axes in (ax_c, ax_r):
             axes[b].set_title(name)
     for axes, ylabel in ((ax_c, "coverage"), (ax_r, "RMS residual (mag)")):
         for ax in axes[6:]:
-            ax.set_xlabel("predicted 90% half-width (mag)")
+            ax.set_xlabel(pub_text("predicted 90% half-width (mag)",
+                                   "90% half-width (mag)"))
         for ax in axes[::3]:
             ax.set_ylabel(ylabel)
-    ax_c[0].legend(loc="lower right", fontsize=8)
-    ax_r[0].legend(loc="upper left", fontsize=8)
+    ax_c[0].legend(loc="lower right", fontsize=pub_fs(8))
+    ax_r[0].legend(loc="upper left", fontsize=pub_fs(8))
     _save(fig_c, cov_path)
     _save(fig_r, rms_path)
     return ss
@@ -639,13 +671,15 @@ def plot_object_coverage(df, variants, truth, sc, out_path) -> list:
             ax.stairs(h / n.size, OBJ_COV_EDGES, fill=True, color=BAND_COLORS[b],
                       alpha=0.6, label="observed")
             ax.stairs(binomial_reference(n, st["p"], OBJ_COV_EDGES), OBJ_COV_EDGES,
-                      color="k", lw=1.2, label="binomial")
-            ax.set_title(f"{name} (n_obj={n.size}, overdisp={st['phi']:.2f})")
+                      color="k", lw=rc_lw(1.2), label="binomial")
+            ax.set_title(pub_text(f"{name} (n_obj={n.size}, overdisp={st['phi']:.2f})",
+                                  rf"{name} ($\phi$={st['phi']:.2f})"))
     for ax in axes[6:]:
-        ax.set_xlabel("fraction of the object's points inside the band")
+        ax.set_xlabel(pub_text("fraction of the object's points inside the band",
+                               "object coverage"))
     for ax in axes[::3]:
         ax.set_ylabel("fraction of objects")
-    axes[0].legend(loc="upper left", fontsize=8)
+    axes[0].legend(loc="upper left", fontsize=pub_fs(8))
     _save(fig, out_path)
     return rows
 
@@ -776,7 +810,7 @@ def _compare_grid(entries, title, path, ylabel, xlabel, series_fn, ref=None,
                          marker=marker)
     for b, name in enumerate(BAND_NAMES):
         if ref is not None:
-            axes[b].axhline(ref, color="k", lw=0.8)
+            axes[b].axhline(ref, color="k", lw=rc_lw(0.8))
         if ylim is not None:
             axes[b].set_ylim(*ylim)
         axes[b].set_title(name)
@@ -784,7 +818,7 @@ def _compare_grid(entries, title, path, ylabel, xlabel, series_fn, ref=None,
         ax.set_xlabel(xlabel)
     for ax in axes[::3]:
         ax.set_ylabel(ylabel)
-    axes[0].legend(loc="best", fontsize=8)
+    axes[0].legend(loc="best", fontsize=pub_fs(8))
     _save(fig, path)
 
 
@@ -938,7 +972,9 @@ def main() -> None:
     p.add_argument("--n_boot", type=int, default=200,
                    help="Object-bootstrap resamples for the CIs.")
     p.add_argument("--seed", type=int, default=0)
+    add_style_args(p)
     args = p.parse_args()
+    apply_style(args.style, args.font_dir)
     truths = [t for t in ("dense", "uniform") if args.truth in (t, "both")]
 
     if args.studies:

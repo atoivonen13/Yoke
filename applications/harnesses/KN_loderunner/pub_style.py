@@ -11,6 +11,17 @@ first, since it is not in matplotlib's font cache by default.
 
     with pub_context(load_pub_style(...)):       # one figure only
         ...
+
+Scripts with screen-sized figures keep their house look under ``--style none``
+and switch to the style's through the ``pub_*`` helpers (each returns the
+house value unless ``use_pub_style`` applied a style):
+
+    fig = plt.figure(figsize=pub_size((12, 10.5)))   # -> two columns wide
+    ax.legend(fontsize=pub_fs(8))                    # -> legend.fontsize
+    ax.set_ylabel(pub_text("long label", "short"))   # -> the short one
+    ax.plot(x, y, lw=rc_lw(0.8), ms=rc_ms(3))        # scaled to lines.* sizes
+    fig.savefig(path, dpi=pub_dpi(130))              # -> savefig.dpi
+    pub_layout(fig)                                  # tight_layout if unstyled
 """
 
 from __future__ import annotations
@@ -19,6 +30,7 @@ import argparse
 import contextlib
 import glob
 import os
+import textwrap
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -26,6 +38,13 @@ from matplotlib import font_manager
 
 DEFAULT_STYLE = "publication.mplstyle"
 DEFAULT_FONT_DIR = "/usr/share/fonts/urw-base35"  # Nimbus Roman (Times metrics)
+# Filter of each of the 9 bands (ZTF g r i, LSST u g r i z y) and its slot in
+# the style's color cycle: one hue per filter, shared by ZTF and LSST (slot 5,
+# sky blue, is too close to slot 0 and is left out). plot_dataset_example
+# uses the same mapping.
+BAND_FILTERS = ("g", "r", "i", "u", "g", "r", "i", "z", "y")
+FILTER_SLOT = {"u": 0, "g": 2, "r": 1, "i": 3, "z": 4, "y": 6}
+_STATE = {"styled": False}
 
 
 def find_style(name: str) -> str | None:
@@ -85,7 +104,81 @@ def use_pub_style(style: str = DEFAULT_STYLE,
     path = None if style == "none" else load_pub_style(style, font_dir)
     if path is not None:
         plt.style.use(["default", path])
+    _STATE["styled"] = path is not None
     return path
+
+
+def styled() -> bool:
+    """Whether ``use_pub_style`` applied a style."""
+    return _STATE["styled"]
+
+
+def style_colors() -> list:
+    """The current categorical color cycle."""
+    return plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+
+def pub_size(size: tuple, cols: float = 2) -> tuple:
+    """``size`` unstyled; else ``cols`` style columns wide, same aspect ratio."""
+    if not styled():
+        return size
+    w = cols * plt.rcParams["figure.figsize"][0]
+    return w, w * size[1] / size[0]
+
+
+def pub_fs(size: float, key: str = "legend.fontsize") -> float:
+    """Font size ``size`` unstyled; else the style's ``key`` (in points)."""
+    if not styled():
+        return size
+    return font_manager.FontProperties(size=plt.rcParams[key]).get_size()
+
+
+def rc_lw(lw: float) -> float:
+    """Line width ``lw`` (given at matplotlib's default 1.5) scaled to the style's."""
+    return lw * plt.rcParams["lines.linewidth"] / 1.5
+
+
+def rc_ms(ms: float) -> float:
+    """Marker size ``ms`` (given at matplotlib's default 6) scaled to the style's."""
+    return ms * plt.rcParams["lines.markersize"] / 6.0
+
+
+def pub_title(text: str, width: int = 90) -> str:
+    """``text`` unstyled; else wrapped to lines of at most ``width`` characters
+    (long diagnostic titles overflow the two-column width)."""
+    return textwrap.fill(text, width) if styled() else text
+
+
+def pub_text(house: str, short: str) -> str:
+    """``house`` unstyled; else ``short`` (axis labels sized for a 2 in panel)."""
+    return short if styled() else house
+
+
+def pub_dpi(dpi: float) -> float | None:
+    """``dpi`` unstyled; else None (= the style's savefig.dpi)."""
+    return None if styled() else dpi
+
+
+def pub_layout(fig: plt.Figure) -> None:
+    """tight_layout unstyled (the style uses constrained layout)."""
+    if not styled():
+        fig.tight_layout()
+
+
+def pub_colors(colors: tuple) -> tuple:
+    """``colors`` unstyled; else the style's cycle, as many as ``colors``."""
+    if not styled():
+        return tuple(colors)
+    cyc = style_colors()
+    return tuple(cyc[i % len(cyc)] for i in range(len(colors)))
+
+
+def pub_band_colors(colors: tuple) -> tuple:
+    """The 9 band colors: ``colors`` unstyled; else one style hue per filter."""
+    if not styled():
+        return tuple(colors)
+    cyc = style_colors()
+    return tuple(cyc[FILTER_SLOT[f] % len(cyc)] for f in BAND_FILTERS)
 
 
 def add_style_args(p: argparse.ArgumentParser) -> None:

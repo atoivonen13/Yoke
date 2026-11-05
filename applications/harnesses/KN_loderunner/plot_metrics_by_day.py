@@ -35,6 +35,8 @@ tables are paired.
     #    ..._filter_avg_by_phase_uniform.png, ...
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 
@@ -52,9 +54,19 @@ from plot_interval_coverage import (  # noqa: E402
     _plot_series,
     _save,
     add_variants,
+    apply_style,
     load_points,
     load_scales,
     point_scores,
+)
+from pub_style import (  # noqa: E402
+    add_style_args,
+    pub_fs,
+    pub_size,
+    pub_title,
+    rc_lw,
+    rc_ms,
+    styled,
 )
 
 GROUPS = BAND_NAMES + ("all", "mean")
@@ -70,6 +82,20 @@ CSV_NAMES = {"dense": "latetime_scored_points.csv",
              "uniform": "latetime_uniform_scored_points.csv"}
 X_COLUMNS = {"phase": ("phase_days", "day since first detection", 2.0, 10.0),
              "lead": ("lead_time_days", "lead time (d)", 0.0, 10.0)}
+# Shorter axis labels / panel titles for the publication style's small panels.
+SHORT_LABELS = {"mse": "MSE (mag$^2$)", "pinball": "pinball loss (mag)",
+                "coverage": "90% coverage", "phase": "phase (d)",
+                "all": "all (pooled)", "mean": "filter average"}
+
+
+def shorten_labels() -> None:
+    """Swap in ``SHORT_LABELS`` (the printed tables then use them too)."""
+    for k in METRICS:
+        METRICS[k] = (METRICS[k][0], SHORT_LABELS[k], *METRICS[k][2:])
+    X_COLUMNS["phase"] = (X_COLUMNS["phase"][0], SHORT_LABELS["phase"],
+                          *X_COLUMNS["phase"][2:])
+    for k in GROUP_TITLES:
+        GROUP_TITLES[k] = SHORT_LABELS[k]
 
 
 def day_bins(x: np.ndarray, edges: np.ndarray) -> np.ndarray:
@@ -153,8 +179,9 @@ def by_day(e, edges) -> tuple:
 
 
 def _grid(title: str, sharey: bool):
-    fig, axes = plt.subplots(3, 4, figsize=(15, 10), sharex=True, sharey=sharey)
-    fig.suptitle(title)
+    fig, axes = plt.subplots(3, 4, figsize=pub_size((15, 10)), sharex=True,
+                             sharey=sharey)
+    fig.suptitle(pub_title(title), fontsize=pub_fs(None, "axes.titlesize"))
     axes = axes.ravel()
     for ax in axes[len(GROUPS):]:
         ax.set_visible(False)
@@ -170,7 +197,7 @@ def plot_metric(entries, metric, truth, xlabel, path) -> None:
     for i, g in enumerate(GROUPS):
         ax = axes[i]
         if ref is not None:
-            ax.axhline(ref, color="0.4", lw=0.8)
+            ax.axhline(ref, color="0.4", lw=rc_lw(0.8))
         for e in entries:
             if len(entries) > 1:
                 color = e["color"]
@@ -185,21 +212,39 @@ def plot_metric(entries, metric, truth, xlabel, path) -> None:
         if i + 4 >= len(GROUPS):
             ax.set_xlabel(xlabel)
             ax.xaxis.set_tick_params(labelbottom=True)
-    for ax in axes[::4]:
-        ax.set_ylabel(ylabel)
+    if styled():
+        fig.supylabel(ylabel, fontsize=pub_fs(None, "axes.labelsize"))
+    else:
+        for ax in axes[::4]:
+            ax.set_ylabel(ylabel)
     if len(entries) > 1:
-        axes[0].legend(loc="best", fontsize=8)
+        axes[0].legend(loc="best", fontsize=pub_fs(8))
     _save(fig, path)
+
+
+def _row_size() -> tuple:
+    """Size of the 1 x 3 metric rows (taller than the house aspect when styled)."""
+    return pub_size((17, 7.5)) if styled() else (17, 5.2)
+
+
+def _row_legend(fig, axes) -> None:
+    """Legend right of the row; below it in the style (no room at the side)."""
+    if styled():
+        fig.legend(*axes[-1].get_legend_handles_labels(), ncol=6,
+                   loc="outside lower center")
+    else:
+        axes[-1].legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
 
 
 def plot_overview(e, truth, xlabel, path) -> None:
     """One study: the three metrics side by side, one line per band + pooled."""
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
-    fig.suptitle(f"Study {e['label']} by day ({truth} truth); black = all "
-                 "bands pooled, black dotted = filter average, dashed = ZTF")
+    fig, axes = plt.subplots(1, 3, figsize=_row_size())
+    fig.suptitle(pub_title(f"Study {e['label']} by day ({truth} truth); black = all "
+                           "bands pooled, black dotted = filter average, dashed = ZTF"),
+                 fontsize=pub_fs(None, "axes.titlesize"))
     for ax, (metric, (_, ylabel, ref, _)) in zip(axes, METRICS.items()):
         if ref is not None:
-            ax.axhline(ref, color="0.4", lw=0.8)
+            ax.axhline(ref, color="0.4", lw=rc_lw(0.8))
         for i, g in enumerate(GROUPS):
             pts = e["res"][(g, metric)]
             if pts.size == 0:
@@ -207,40 +252,41 @@ def plot_overview(e, truth, xlabel, path) -> None:
             pooled = g in GROUP_TITLES
             # ZTF dashed: ztfg/ztfr share near-identical hues with g/r.
             ls = ":" if g == "mean" else "--" if g.startswith("ztf") else "-"
-            ax.plot(pts[:, 0], pts[:, 1], marker="o", ms=3,
+            ax.plot(pts[:, 0], pts[:, 1], marker="o", ms=rc_ms(3),
                     color="k" if pooled else BAND_COLORS[i], ls=ls,
-                    lw=2.4 if pooled else 1.3,
+                    lw=rc_lw(2.4 if pooled else 1.3),
                     label={"all": "all (pooled)", "mean": "filter avg"}.get(g, g))
         if ref is None:
             ax.set_ylim(bottom=0.0)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-    axes[-1].legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    _row_legend(fig, axes)
     _save(fig, path)
 
 
 def plot_filter_avg(entries, truth, xlabel, path) -> None:
     """The three metrics averaged over filters; solid = equal weight, dashed = pooled."""
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
-    fig.suptitle(f"Average over all filters by day ({truth} truth); solid = "
-                 "equal-weight filter average, dashed = all points pooled; "
-                 "shading = object-bootstrap 90% CI")
+    fig, axes = plt.subplots(1, 3, figsize=_row_size())
+    fig.suptitle(pub_title(f"Average over all filters by day ({truth} truth); solid = "
+                           "equal-weight filter average, dashed = all points pooled; "
+                           "shading = object-bootstrap 90% CI"),
+                 fontsize=pub_fs(None, "axes.titlesize"))
     for ax, (metric, (_, ylabel, ref, _)) in zip(axes, METRICS.items()):
         if ref is not None:
-            ax.axhline(ref, color="0.4", lw=0.8)
+            ax.axhline(ref, color="0.4", lw=rc_lw(0.8))
         for e in entries:
             color = e["color"] if len(entries) > 1 else "k"
             _plot_series(ax, e["res"][("mean", metric)], color, "-",
                          f"{e['label']} filter avg", lw=2.0, marker="o")
             pts = e["res"][("all", metric)]
             if pts.size:
-                ax.plot(pts[:, 0], pts[:, 1], color=color, ls="--", lw=1.2,
+                ax.plot(pts[:, 0], pts[:, 1], color=color, ls="--", lw=rc_lw(1.2),
                         label=f"{e['label']} pooled")
         if ref is None:
             ax.set_ylim(bottom=0.0)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-    axes[-1].legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8)
+    _row_legend(fig, axes)
     _save(fig, path)
 
 
@@ -321,7 +367,11 @@ def main() -> None:
     p.add_argument("--n_boot", type=int, default=200,
                    help="Object-bootstrap resamples for the CIs.")
     p.add_argument("--seed", type=int, default=0)
+    add_style_args(p)
     args = p.parse_args()
+    apply_style(args.style, args.font_dir)
+    if styled():
+        shorten_labels()
 
     if args.eval_dir is not None:
         dirs, labels = [args.eval_dir], ["eval"]

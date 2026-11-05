@@ -53,6 +53,19 @@ from yoke.datasets.kilonova_dataset import (
 )
 from yoke.utils.context_selection import window_select_positions
 from yoke.utils.ema import ParamEMA
+from pub_style import (
+    add_style_args,
+    pub_band_colors,
+    pub_colors,
+    pub_dpi,
+    pub_fs,
+    pub_layout,
+    pub_size,
+    rc_lw,
+    rc_ms,
+    styled,
+    use_pub_style,
+)
 
 
 matplotlib.rcParams["pdf.fonttype"] = 42
@@ -62,7 +75,8 @@ plt.rcParams["figure.figsize"] = (7, 5)
 
 
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
-BAND_COLORS = (
+# A list, restyled in place by ``main`` (one style hue per filter).
+BAND_COLORS = [
     "#2A9D8F",  # ztfg
     "#E63946",  # ztfr
     "#F4A261",  # ztfi
@@ -72,7 +86,7 @@ BAND_COLORS = (
     "#E9C46A",  # i
     "#8338EC",  # z
     "#264653",  # y
-)
+]
 VALUE_COL = 1
 ERROR_COL = 2
 N_BANDS = len(BAND_NAMES)
@@ -170,6 +184,7 @@ def get_args():
         "set, diagnostics run ONLY on held-out test objects, so plots are not "
         "leaked by training data. Omit to run over every object in --data_glob.",
     )
+    add_style_args(parser)
 
     return parser.parse_args()
 
@@ -990,8 +1005,11 @@ def plot_series_lightcurves(rollout, means, stds, outpath, tf_rollout=None):
     directly: divergence between the two indicates compounding rollout error
     (exposure bias) rather than a failure to learn one-step dynamics.
     """
-    fig, axes = plt.subplots(3, 3, figsize=(14, 12))
+    fig, axes = plt.subplots(3, 3, figsize=pub_size((14, 12)))
     axes = axes.flatten()
+    # Marker areas (s) scale with the marker size squared.
+    area = rc_ms(1) ** 2
+    tf_color = pub_colors(("tab:gray", "tab:purple"))[1]
 
     context = rollout["context"]
     steps = rollout["steps"]
@@ -1011,7 +1029,7 @@ def plot_series_lightcurves(rollout, means, stds, outpath, tf_rollout=None):
             ax.scatter(
                 context["t_rel"][ctx_mask],
                 denorm(context["v_norm"][ctx_mask]),
-                s=30,
+                s=30 * area,
                 color=color,
                 marker="o",
                 label="context",
@@ -1028,7 +1046,7 @@ def plot_series_lightcurves(rollout, means, stds, outpath, tf_rollout=None):
                 fixed_forecast["preds_mag"][:, band_idx],
                 "-",
                 color="k",
-                linewidth=1.8,
+                linewidth=rc_lw(1.8),
                 alpha=0.85,
                 label="forecast (fixed context)",
             )
@@ -1042,7 +1060,8 @@ def plot_series_lightcurves(rollout, means, stds, outpath, tf_rollout=None):
             ax.scatter(
                 t_all,
                 pred_all,
-                s=22,
+                s=22 * area,
+                linewidths=rc_lw(1.0),
                 facecolors="none",
                 edgecolors="k",
                 alpha=0.6,
@@ -1055,10 +1074,11 @@ def plot_series_lightcurves(rollout, means, stds, outpath, tf_rollout=None):
             ax.scatter(
                 t_tf,
                 pred_tf,
-                s=22,
+                s=22 * area,
+                linewidths=rc_lw(1.0),
                 marker="^",
                 facecolors="none",
-                edgecolors="tab:purple",
+                edgecolors=tf_color,
                 alpha=0.6,
                 label="per-step pred (teacher-forced)",
             )
@@ -1074,32 +1094,46 @@ def plot_series_lightcurves(rollout, means, stds, outpath, tf_rollout=None):
             true_mag = true_mag[order]
 
             ax.plot(
-                t, true_mag, "-o", color=color, alpha=0.8, label="truth (obs)"
+                t, true_mag, "-o", color=color, alpha=0.8, label="truth (obs)",
+                ms=rc_ms(6), lw=rc_lw(1.5),
             )
 
-        ax.axvline(0.0, color="gray", linewidth=1, linestyle=":", alpha=0.7)
+        ax.axvline(0.0, color="gray", linewidth=rc_lw(1), linestyle=":", alpha=0.7)
         ax.invert_yaxis()
-        ax.set_xlabel("Relative time (days)")
-        ax.set_ylabel("Magnitude")
+        if not styled():
+            ax.set_xlabel("Relative time (days)")
+            ax.set_ylabel("Magnitude")
         ax.set_title(BAND_NAMES[band_idx])
 
-        # Only add a legend if this band actually plotted labeled artists.
-        if ax.get_legend_handles_labels()[1]:
+        # Only add a legend if this band actually plotted labeled artists
+        # (styled: one shared legend below the grid instead).
+        if ax.get_legend_handles_labels()[1] and not styled():
             ax.legend(fontsize=7, loc="best")
 
-    fig.suptitle(
-        f"Autoregressive forecast (start_idx={rollout['start_idx']}, "
-        f"{rollout['n_steps']} steps)",
-        y=1.01,
-    )
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=200, bbox_inches="tight")
+    title = (f"Autoregressive forecast (start_idx={rollout['start_idx']}, "
+             f"{rollout['n_steps']} steps)")
+    if styled():
+        # Legend entries from every band (a band lacks e.g. context), de-duplicated
+        # by label; the band's own color stands for all bands' context/truth.
+        handles = {}
+        for ax in axes:
+            for h, lab in zip(*ax.get_legend_handles_labels()):
+                handles.setdefault(lab, h)
+        fig.legend(handles.values(), handles.keys(), ncol=3, loc="outside lower center")
+        fig.supxlabel("Relative time (days)", fontsize=pub_fs(None, "axes.labelsize"))
+        fig.supylabel("Magnitude", fontsize=pub_fs(None, "axes.labelsize"))
+        fig.suptitle(title, fontsize=pub_fs(None, "axes.titlesize"))
+    else:
+        fig.suptitle(title, y=1.01)
+    pub_layout(fig)
+    fig.savefig(outpath, dpi=pub_dpi(200), bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_residuals_vs_step(rollouts, outpath):
     """Residual vs autoregressive step, colored by band, across all series."""
-    plt.figure(figsize=(10, 6))
+    # Styled: one column and a half wide (a 9-entry legend sits below).
+    plt.figure(figsize=pub_size((10, 6), cols=1.5))
 
     for band_idx in range(N_BANDS):
         xs = []
@@ -1113,19 +1147,24 @@ def plot_residuals_vs_step(rollouts, outpath):
             plt.scatter(
                 xs,
                 ys,
-                s=20,
+                s=20 * rc_ms(1) ** 2,
                 alpha=0.6,
+                # Styled, ZTF and LSST share a hue per filter: ZTF as triangles.
+                marker="^" if styled() and BAND_NAMES[band_idx].startswith("ztf") else "o",
                 color=BAND_COLORS[band_idx],
                 label=BAND_NAMES[band_idx],
             )
 
-    plt.axhline(0.0, linestyle="--", linewidth=1, color="k")
+    plt.axhline(0.0, linestyle="--", linewidth=rc_lw(1), color="k")
     plt.xlabel("Autoregressive step")
     plt.ylabel("pred - truth (normalized)")
     plt.title("Autoregressive residuals vs step, by band")
-    plt.legend(fontsize=7, ncol=3, loc="best")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200, bbox_inches="tight")
+    if styled():
+        plt.gcf().legend(ncol=5, loc="outside lower center")
+    else:
+        plt.legend(fontsize=7, ncol=3, loc="best")
+    pub_layout(plt.gcf())
+    plt.savefig(outpath, dpi=pub_dpi(200), bbox_inches="tight")
     plt.close()
 
 
@@ -1149,30 +1188,34 @@ def plot_band_mse_bar(rollouts, outpath, tf_rollouts=None):
     """
     mses = _per_band_mse(rollouts)
 
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=pub_size((10, 5), cols=1.5))
     x = np.arange(N_BANDS)
 
     if tf_rollouts is not None:
         tf_mses = _per_band_mse(tf_rollouts)
         width = 0.4
-        plt.bar(x - width / 2, mses, width, color="tab:gray", label="free-run")
+        c_free, c_tf = pub_colors(("tab:gray", "tab:purple"))
+        plt.bar(x - width / 2, mses, width, color=c_free, label="free-run")
         plt.bar(
             x + width / 2,
             tf_mses,
             width,
-            color="tab:purple",
+            color=c_tf,
             label="teacher-forced",
         )
-        plt.legend(fontsize=9)
+        plt.legend(fontsize=pub_fs(9))
     else:
         plt.bar(x, mses, color=list(BAND_COLORS))
 
     plt.xticks(x, list(BAND_NAMES))
+    if styled():
+        # Categorical axis: no minor ticks between the bands.
+        plt.tick_params(axis="x", which="minor", bottom=False, top=False)
     plt.ylabel("Autoregressive MSE (normalized)")
     plt.xlabel("Band")
     plt.title("Per-band autoregressive rollout MSE")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    pub_layout(plt.gcf())
+    plt.savefig(outpath, dpi=pub_dpi(200))
     plt.close()
 
 
@@ -1232,6 +1275,8 @@ def save_step_csv(rollouts, outpath):
 
 def main():
     args = get_args()
+    use_pub_style(args.style, args.font_dir)
+    BAND_COLORS[:] = pub_band_colors(BAND_COLORS)
     run_id = resolve_paths(args)
 
     os.makedirs(args.outdir, exist_ok=True)

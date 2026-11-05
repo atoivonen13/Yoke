@@ -44,9 +44,19 @@ from plot_interval_coverage import (  # noqa: E402
     MIN_BIN_POINTS,
     _save,
     dense_depths,
+    apply_style,
     load_points,
 )
 from plot_metrics_by_day import X_COLUMNS, day_bins  # noqa: E402
+from pub_style import (  # noqa: E402
+    add_style_args,
+    pub_dpi,
+    pub_fs,
+    pub_size,
+    pub_text,
+    rc_lw,
+    rc_ms,
+)
 
 TRUTH_BIN_MAG = 0.5
 MIN_TRUTH_BIN_POINTS = 20
@@ -81,13 +91,14 @@ def scatter_by_day(ax, df, idx, edges, colors, lims, depth, max_points,
                    rng) -> list:
     """All day bins on ``ax``; returns rows ``(bin center, n, rmse, bias)``."""
     true, pred = df["true"].to_numpy(), df["med"].to_numpy()
-    ax.plot(lims, lims, color="k", lw=0.8, zorder=1)
+    ax.plot(lims, lims, color="k", lw=rc_lw(0.8), zorder=1)
     if depth is not None:
-        ax.axvline(depth, color="0.3", ls=":", lw=1.0, zorder=1)
+        ax.axvline(depth, color="0.3", ls=":", lw=rc_lw(1.0), zorder=1)
     inwin = np.flatnonzero(idx >= 0)
     draw = (rng.choice(inwin, max_points, replace=False)
             if inwin.size > max_points else rng.permutation(inwin))
-    ax.scatter(true[draw], pred[draw], s=3, c=colors[idx[draw]], alpha=0.4,
+    # s is an area: scale with the marker size squared.
+    ax.scatter(true[draw], pred[draw], s=3 * rc_ms(1) ** 2, c=colors[idx[draw]], alpha=0.4,
                lw=0, rasterized=True, zorder=2)
     rows = []
     for k in range(len(edges) - 1):
@@ -100,8 +111,8 @@ def scatter_by_day(ax, df, idx, edges, colors, lims, depth, max_points,
         med = _median_given_truth(true[m], pred[m], lims)
         if med.size:
             # White underlay keeps the day's line readable over its own points.
-            ax.plot(med[:, 0], med[:, 1], color="white", lw=3.2, zorder=3)
-            ax.plot(med[:, 0], med[:, 1], color=colors[k], lw=1.8, zorder=4)
+            ax.plot(med[:, 0], med[:, 1], color="white", lw=rc_lw(3.2), zorder=3)
+            ax.plot(med[:, 0], med[:, 1], color=colors[k], lw=rc_lw(1.8), zorder=4)
     ax.set_xlim(*lims)
     ax.set_ylim(*lims)
     ax.set_aspect("equal")
@@ -140,10 +151,11 @@ def run_study(eval_dir, label, args) -> None:
 
     stats = {}
     # Constrained layout: leaves room for the shared colorbar.
-    fig, axes = plt.subplots(3, 3, figsize=(13.5, 12), sharex=True, sharey=True,
-                             layout="constrained")
+    fig, axes = plt.subplots(3, 3, figsize=pub_size((13.5, 12)), sharex=True,
+                             sharey=True, layout="constrained")
     fig.suptitle(f"{tag}predicted median vs uniform truth, colored by {xlabel};"
-                 f"\n{lines}; dotted = dense depth")
+                 f"\n{lines}; dotted = dense depth",
+                 fontsize=pub_fs(None, "axes.titlesize"))
     axes = axes.ravel()
     lims = _limits(df)
     for b, name in enumerate(BAND_NAMES):
@@ -156,18 +168,20 @@ def run_study(eval_dir, label, args) -> None:
             ax, df[bm].reset_index(drop=True), idx[bm], edges, colors, lims,
             depths.get(name), args.max_points, rng)
     for ax in axes[6:]:
-        ax.set_xlabel("uniform truth (mag)")
+        ax.set_xlabel(pub_text("uniform truth (mag)", "truth (mag)"))
     for ax in axes[::3]:
-        ax.set_ylabel("predicted median (mag)")
+        ax.set_ylabel(pub_text("predicted median (mag)", "median (mag)"))
     _colorbar(fig, axes, norm, edges, xlabel)
     out = os.path.join(outdir, f"{prefix}pred_vs_truth_by_{args.x}_bands.png")
-    fig.savefig(out, dpi=130)
+    fig.savefig(out, dpi=pub_dpi(130))
     plt.close(fig)
     print(f"Wrote {out}")
 
-    fig, ax = plt.subplots(figsize=(8.6, 7.4))
-    fig.suptitle(f"{tag}all bands, predicted median vs uniform truth, colored "
-                 f"by {xlabel}\n{lines}")
+    # Styled: one column wide, the title shortened to fit.
+    fig, ax = plt.subplots(figsize=pub_size((8.6, 7.4), cols=1.3))
+    fig.suptitle(pub_text(f"{tag}all bands, predicted median vs uniform truth, colored "
+                          f"by {xlabel}\n{lines}", f"{tag}all bands"),
+                 fontsize=pub_fs(None, "axes.titlesize"))
     stats["all"] = scatter_by_day(ax, df, idx, edges, colors, lims, None,
                                   4 * args.max_points, rng)
     ax.set_xlabel("uniform truth (mag)")
@@ -210,7 +224,9 @@ def main() -> None:
     p.add_argument("--outdir", default=None,
                    help="Default: <eval_dir>/pred_vs_truth.")
     p.add_argument("--seed", type=int, default=0)
+    add_style_args(p)
     args = p.parse_args()
+    apply_style(args.style, args.font_dir)
 
     if args.eval_dir is not None:
         run_study(args.eval_dir, "", args)

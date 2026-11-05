@@ -4,6 +4,19 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, LogLocator
+from pub_style import (
+    add_style_args,
+    pub_colors,
+    pub_dpi,
+    pub_fs,
+    pub_layout,
+    pub_size,
+    rc_lw,
+    rc_ms,
+    styled,
+    use_pub_style,
+)
 
 
 DEFAULT_STUDY = 24
@@ -197,10 +210,11 @@ def shade_tf_regimes(ax, ramp_start, ramp_epochs):
     anneal_lo, anneal_hi = max(ramp_start, xmin), min(anneal_end, xmax)
     free_lo, free_hi = max(anneal_end, xmin), xmax
 
+    colors = pub_colors(("tab:blue", "tab:orange", "tab:green"))
     regimes = [
-        (warmup_lo, warmup_hi, "tab:blue", "warmup (p=1)"),
-        (anneal_lo, anneal_hi, "tab:orange", "anneal (p:1→0)"),
-        (free_lo, free_hi, "tab:green", "free-run (p=0)"),
+        (warmup_lo, warmup_hi, colors[0], "warmup (p=1)"),
+        (anneal_lo, anneal_hi, colors[1], "anneal (p:1→0)"),
+        (free_lo, free_hi, colors[2], "free-run (p=0)"),
     ]
 
     for lo, hi, color, label in regimes:
@@ -215,7 +229,7 @@ def shade_tf_regimes(ax, ramp_start, ramp_epochs):
             transform=ax.get_xaxis_transform(),
             ha="center",
             va="top",
-            fontsize=8,
+            fontsize=pub_fs(8),
             color=color,
             alpha=0.9,
         )
@@ -223,7 +237,7 @@ def shade_tf_regimes(ax, ramp_start, ramp_epochs):
     for boundary in (ramp_start, anneal_end):
         if xmin < boundary < xmax:
             ax.axvline(
-                boundary, color="gray", linewidth=1, linestyle=":", alpha=0.6
+                boundary, color="gray", linewidth=rc_lw(1), linestyle=":", alpha=0.6
             )
 
 
@@ -297,9 +311,12 @@ def plot_epoch_curves(train, val, args, diag=None):
     else:
         diag_ep = diag_central = None
 
-    plt.figure(figsize=(9, 5.5))
+    # Styled: one column wide.
+    plt.figure(figsize=pub_size((9, 5.5), cols=1))
 
     band_label = f"{pct_lo:g}-{pct_hi:g} pct"
+    # Styled: markers sized for one point per epoch on a column-wide axis.
+    ms = rc_ms(3) if styled() else None
 
     for idx, label in enumerate(loss_labels):
         suffix = "" if n_loss_cols == 1 else f" {label}"
@@ -308,6 +325,7 @@ def plot_epoch_curves(train, val, args, diag=None):
             train_ep,
             train_mean[:, idx],
             marker="o",
+            ms=ms,
             label=f"Train{suffix}",
         )
 
@@ -333,6 +351,7 @@ def plot_epoch_curves(train, val, args, diag=None):
                 val_ep,
                 val_mean[:, idx],
                 marker="s",
+                ms=ms,
                 linestyle="--",
                 label=f"Validation{suffix}",
             )
@@ -359,19 +378,29 @@ def plot_epoch_curves(train, val, args, diag=None):
                 diag_ep,
                 diag_central[:, idx],
                 marker="^",
+                ms=ms,
                 linestyle="-.",
-                color="tab:green",
+                color=pub_colors(("tab:blue", "tab:orange", "tab:green"))[2],
                 label=f"Train (free-run diag){suffix}",
             )
 
     plt.xlabel("Epoch")
     plt.ylabel(f"{central.capitalize()} loss")
     plt.title(args.title)
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+    if not styled():
+        plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=pub_fs(None))
 
     if args.logy:
         plt.yscale("log")
+        if styled():
+            # The loss spans ~1 decade: label the 2..9 minor ticks too (plain
+            # decimals), else the short axis has a single labeled tick.
+            fmt = FuncFormatter(lambda v, _: f"{v:g}")
+            ax = plt.gca()
+            ax.yaxis.set_major_formatter(fmt)
+            ax.yaxis.set_minor_locator(LogLocator(subs=(2, 3, 5)))
+            ax.yaxis.set_minor_formatter(fmt)
 
     # Optionally shade the scheduled-sampling teacher-forcing regimes. Gated on
     # attributes that only the 9-band wrapper sets, so g/r/i runs (and any caller
@@ -383,8 +412,8 @@ def plot_epoch_curves(train, val, args, diag=None):
             ramp_epochs=getattr(args, "tf_ramp_epochs", 20),
         )
 
-    plt.tight_layout()
-    plt.savefig(args.out, dpi=args.dpi)
+    pub_layout(plt.gcf())
+    plt.savefig(args.out, dpi=pub_dpi(args.dpi))
     print(f"Saved {args.out}")
 
 
@@ -473,8 +502,10 @@ def main():
         action="store_true",
         help="Fail instead of continuing when validation records are missing or invalid.",
     )
+    add_style_args(parser)
 
     args = parser.parse_args()
+    use_pub_style(args.style, args.font_dir)
 
     defaults = default_patterns(args.study, args.runs_root)
 

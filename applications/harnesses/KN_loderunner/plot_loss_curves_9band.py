@@ -149,8 +149,10 @@ def main():
         "match --tf_ramp_epochs in training_START.input / training_input.tmpl. "
         "Default 12.",
     )
+    base.add_style_args(parser)
 
     args = parser.parse_args()
+    base.use_pub_style(args.style, args.font_dir)
 
     defaults = base.default_patterns(args.study, args.runs_root)
 

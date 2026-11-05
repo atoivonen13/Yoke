@@ -48,6 +48,18 @@ import matplotlib.pyplot as plt
 # Reuse the canonical band ordering / keys and column conventions from the
 # dataset so "observation" here means exactly what the model trains on.
 from yoke.datasets.kilonova_dataset import detect_band_keys
+from pub_style import (
+    add_style_args,
+    pub_band_colors,
+    pub_colors,
+    pub_dpi,
+    pub_fs,
+    pub_size,
+    pub_text,
+    rc_lw,
+    styled,
+    use_pub_style,
+)
 
 
 # Default to the same data the 9-band pipeline trains and computes norm stats on
@@ -61,6 +73,23 @@ DEFAULT_ERROR_COL = 2
 # Short display labels for the bands, in the 9-band key order (same for the
 # PS1/SDSS and LSST filter sets).
 BAND_LABELS = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
+# House colors, swapped for the style's cycle by ``apply_style``:
+# detections, upper limits, totals, training windows, curves kept, p95/p99.
+COLORS = ["tab:blue", "tab:gray", "tab:green", "tab:purple", "tab:red"]
+BAND_COLORS = [plt.get_cmap("tab10")(b % 10) for b in range(len(BAND_LABELS))]
+
+
+def apply_style(style, font_dir):
+    """Apply the publication style and restyle the module colors in place."""
+    use_pub_style(style, font_dir)
+    COLORS[:] = pub_colors(COLORS)
+    BAND_COLORS[:] = pub_band_colors(BAND_COLORS)
+
+
+def _grid(ax, **kw):
+    """The house grid (the style has none)."""
+    if not styled():
+        ax.grid(True, alpha=0.3, **kw)
 
 
 def collect_counts(files, band_keys, error_col):
@@ -156,23 +185,31 @@ def plot_band_totals(ax, counts, include_upper_limits):
 
     if include_upper_limits:
         lim = counts["lim_totals"]
-        ax.bar(x, det, color="tab:blue", label="detections")
-        ax.bar(x, lim, bottom=det, color="tab:gray", alpha=0.6, label="upper limits")
+        ax.bar(x, det, color=COLORS[0], label="detections")
+        ax.bar(x, lim, bottom=det, color=COLORS[1], alpha=0.6, label="upper limits")
         ax.legend()
         title_extra = " (detections + upper limits)"
     else:
-        ax.bar(x, det, color="tab:blue")
+        ax.bar(x, det, color=COLORS[0])
         title_extra = " (detections only)"
 
     # Annotate each bar with its detection count.
     for xi, di in zip(x, det):
-        ax.text(xi, di, f"{int(di)}", ha="center", va="bottom", fontsize=8)
+        # Styled bars are too narrow for a horizontal count.
+        ax.text(xi, di, f"{int(di)}", ha="center", va="bottom",
+                fontsize=pub_fs(8, "xtick.labelsize"), rotation=90 if styled() else 0)
 
     ax.set_xticks(x)
     ax.set_xticklabels(BAND_LABELS, rotation=45, ha="right")
-    ax.set_ylabel("Number of observations")
-    ax.set_title(f"Total observations per band{title_extra}")
-    ax.grid(True, axis="y", alpha=0.3)
+    if styled():
+        # Categorical axis: no minor ticks between the bands; headroom for the
+        # rotated counts.
+        ax.tick_params(axis="x", which="minor", bottom=False, top=False)
+        ax.set_ylim(0, 1.2 * (det + (lim if include_upper_limits else 0)).max())
+    ax.set_ylabel(pub_text("Number of observations", "Observations"))
+    ax.set_title(pub_text(f"Total observations per band{title_extra}",
+                          "Observations per band"))
+    _grid(ax, axis="y")
 
 
 def plot_total_hist(ax, counts):
@@ -186,19 +223,20 @@ def plot_total_hist(ax, counts):
     # One bin per integer count up to the max, capped so very long tails stay
     # readable.
     bins = np.arange(0, hi + 2) - 0.5 if hi <= 60 else 50
-    ax.hist(totals, bins=bins, color="tab:green", alpha=0.8)
+    ax.hist(totals, bins=bins, color=COLORS[2], alpha=0.8)
     ax.axvline(
         totals.mean(),
         color="k",
         linestyle="--",
-        linewidth=1,
+        linewidth=rc_lw(1),
         label=f"mean {totals.mean():.1f}",
     )
-    ax.set_xlabel("Detections per light curve (all bands)")
-    ax.set_ylabel("Number of light curves")
+    ax.set_xlabel(pub_text("Detections per light curve (all bands)",
+                           "Detections per curve (all bands)"))
+    ax.set_ylabel(pub_text("Number of light curves", "Light curves"))
     ax.set_title("Total detections per light curve")
     ax.legend()
-    ax.grid(True, alpha=0.3)
+    _grid(ax)
 
 
 def plot_per_band_hist(ax, counts):
@@ -210,7 +248,6 @@ def plot_per_band_hist(ax, counts):
     hi = int(hi)
     bins = np.arange(0, max(hi, 1) + 2) - 0.5
 
-    cmap = plt.get_cmap("tab10")
     for b, label in enumerate(BAND_LABELS):
         c = per_curve[b]
         if c.size == 0:
@@ -219,16 +256,18 @@ def plot_per_band_hist(ax, counts):
             c,
             bins=bins,
             histtype="step",
-            linewidth=1.5,
-            color=cmap(b % 10),
+            linewidth=rc_lw(1.5),
+            color=BAND_COLORS[b],
+            # Styled, ZTF and LSST share a hue per filter: dash the ZTF bands.
+            linestyle="--" if styled() and label.startswith("ztf") else "-",
             label=label,
         )
 
-    ax.set_xlabel("Detections per light curve")
-    ax.set_ylabel("Number of light curves")
+    ax.set_xlabel(pub_text("Detections per light curve", "Detections per curve"))
+    ax.set_ylabel(pub_text("Number of light curves", "Light curves"))
     ax.set_title("Detections per light curve, by band")
-    ax.legend(fontsize=8, ncol=2)
-    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=pub_fs(8), ncol=2)
+    _grid(ax)
 
 
 def context_len_sweep(events_per_file, sweep_max):
@@ -275,32 +314,45 @@ def plot_context_sweep(ax, events_per_file, sweep_max):
 
     # Samples on the left axis (can be large); fraction of curves kept on the
     # right axis so both trends are readable together.
-    ax.plot(context_lens, n_samples, marker="o", color="tab:purple",
+    ax.plot(context_lens, n_samples, marker="o", color=COLORS[3],
             label="training windows")
     ax.set_xlabel("context_len")
-    ax.set_ylabel("Total training windows", color="tab:purple")
-    ax.tick_params(axis="y", labelcolor="tab:purple")
+    ax.set_ylabel(pub_text("Total training windows", "Training windows"), color=COLORS[3])
+    ax.tick_params(axis="y", which="both", labelcolor=COLORS[3])
     ax.set_title("Data cost of context length")
-    ax.grid(True, alpha=0.3)
+    _grid(ax)
 
     ax2 = ax.twinx()
     frac_curves = n_curves / n_total
-    ax2.plot(context_lens, frac_curves, marker="s", color="tab:red",
+    ax2.plot(context_lens, frac_curves, marker="s", color=COLORS[4],
              linestyle="--", label="fraction of curves kept")
-    ax2.set_ylabel("Fraction of light curves kept", color="tab:red")
-    ax2.tick_params(axis="y", labelcolor="tab:red")
+    ax2.set_ylabel(pub_text("Fraction of light curves kept", "Fraction of curves kept"),
+                   color=COLORS[4])
+    ax2.tick_params(axis="y", which="both", labelcolor=COLORS[4])
     ax2.set_ylim(0, 1.02)
+    if styled():
+        # The twin owns the right spine: no left-axis ticks mirrored onto it;
+        # plain counts, since a x10^n offset label would sit on the title.
+        ax.tick_params(axis="y", which="both", right=False)
+        ax.ticklabel_format(axis="y", style="plain")
 
     # Mark the current default context_len=5 for reference.
     if context_lens[0] <= 5 <= context_lens[-1]:
-        ax.axvline(5, color="gray", linestyle=":", linewidth=1, alpha=0.7)
-        ax.text(5, ax.get_ylim()[1], " default 5", ha="left", va="top",
-                fontsize=8, color="gray")
+        ax.axvline(5, color="gray", linestyle=":", linewidth=rc_lw(1), alpha=0.7)
+        if styled():
+            # Along the line, between the legend and the curves.
+            ax.text(5, 0.3, "default 5 ", rotation=90, ha="right", va="bottom",
+                    transform=ax.get_xaxis_transform(), fontsize=pub_fs(8),
+                    color="gray")
+        else:
+            ax.text(5, ax.get_ylim()[1], " default 5", ha="left", va="top",
+                    fontsize=pub_fs(8), color="gray")
 
-    # Combined legend from both axes.
+    # Combined legend from both axes (styled: in the empty lower left).
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="center right")
+    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=pub_fs(8),
+              loc="lower left" if styled() else "center right")
 
 
 def time_window_counts(event_times_per_file, window_days):
@@ -391,11 +443,17 @@ def plot_time_window_sweep(ax, event_times_per_file, window_grid):
     ax.plot(window_grid, stats["p99"], marker="d", label="99th pct")
     ax.plot(window_grid, stats["max"], linestyle=":", color="gray", label="max")
 
-    ax.set_xlabel("Context window length W (days)")
-    ax.set_ylabel("Real detections in window")
-    ax.set_title("Context size vs time window\n(pick max_context_len from a high pct)")
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel(pub_text("Context window length W (days)", "Window W (days)"))
+    ax.set_ylabel(pub_text("Real detections in window", "Detections in window"))
+    ax.set_title(pub_text("Context size vs time window\n(pick max_context_len from a high pct)",
+                          "Context size vs time window"))
+    if styled():
+        # Headroom above the curves for a two-column legend.
+        ax.set_ylim(0, 1.45 * np.max(stats["max"]))
+        ax.legend(fontsize=pub_fs(8), ncol=2, loc="upper left")
+    else:
+        ax.legend(fontsize=pub_fs(8))
+    _grid(ax)
 
 
 def dt_horizon_stats(event_times_per_file, horizons):
@@ -461,7 +519,7 @@ def plot_dt_horizon(ax, event_times_per_file, horizons):
             xs,
             ys,
             color=cmap(j / max(1, len(horizons) - 1)),
-            linewidth=2.0 if h == 1 else 1.3,
+            linewidth=rc_lw(2.0 if h == 1 else 1.3),
             label=label,
         )
 
@@ -470,7 +528,7 @@ def plot_dt_horizon(ax, event_times_per_file, horizons):
     if base.size:
         for q in (95, 99):
             pv = float(np.percentile(base, q))
-            ax.axvline(pv, color="tab:red", linestyle=":", linewidth=1, alpha=0.7)
+            ax.axvline(pv, color=COLORS[4], linestyle=":", linewidth=rc_lw(1), alpha=0.7)
             ax.text(
                 pv,
                 0.02,
@@ -478,19 +536,20 @@ def plot_dt_horizon(ax, event_times_per_file, horizons):
                 rotation=90,
                 va="bottom",
                 ha="right",
-                fontsize=7,
-                color="tab:red",
+                fontsize=pub_fs(7),
+                color=COLORS[4],
             )
 
     ax.set_xlabel("Lead time Δt (days)")
-    ax.set_ylabel("Cumulative fraction of samples")
+    ax.set_ylabel(pub_text("Cumulative fraction of samples", "Cumulative fraction"))
     ax.set_ylim(0, 1.02)
-    ax.set_title(
+    ax.set_title(pub_text(
         "Supervised Δt vs forecast horizon\n"
-        "(h=1 is training Δt; right tail = uncovered)"
-    )
-    ax.legend(fontsize=8, loc="lower right")
-    ax.grid(True, alpha=0.3)
+        "(h=1 is training Δt; right tail = uncovered)",
+        "Supervised Δt vs forecast horizon",
+    ))
+    ax.legend(fontsize=pub_fs(8), loc="lower right")
+    _grid(ax)
 
 
 def print_dt_horizon(event_times_per_file, horizons):
@@ -662,9 +721,12 @@ def main():
         default="observation_histograms.png",
         help="Output PNG path.",
     )
-    parser.add_argument("--dpi", type=int, default=200)
+    parser.add_argument("--dpi", type=int, default=200,
+                        help="Unstyled only; the style sets its own savefig.dpi.")
+    add_style_args(parser)
 
     args = parser.parse_args()
+    apply_style(args.style, args.font_dir)
 
     files = sorted(glob.glob(args.data_glob))
     if len(files) == 0:
@@ -685,7 +747,8 @@ def main():
     print_time_window_sweep(counts["event_times_per_file"], window_grid)
     print_dt_horizon(counts["event_times_per_file"], args.dt_horizons)
 
-    fig, axes = plt.subplots(2, 3, figsize=(21, 11))
+    # Styled: three columns wide, so each panel is about one column.
+    fig, axes = plt.subplots(2, 3, figsize=pub_size((21, 11), cols=3))
     plot_band_totals(axes[0, 0], counts, args.include_upper_limits)
     plot_total_hist(axes[0, 1], counts)
     plot_per_band_hist(axes[0, 2], counts)
@@ -695,10 +758,11 @@ def main():
 
     fig.suptitle(
         f"KN light-curve observations ({counts['n_files']} light curves)",
-        fontsize=13,
+        fontsize=pub_fs(13, "axes.titlesize"),
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    fig.savefig(args.out, dpi=args.dpi)
+    if not styled():
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(args.out, dpi=pub_dpi(args.dpi))
     print(f"Saved {os.path.abspath(args.out)}")
 
 

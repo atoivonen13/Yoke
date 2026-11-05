@@ -48,8 +48,19 @@ from plot_interval_coverage import (  # noqa: E402
     STUDY_COLORS,
     ObjectBootstrap,
     _band_masks,
+    apply_style,
     band_bounds,
     load_study,
+)
+from pub_style import (  # noqa: E402
+    add_style_args,
+    pub_colors,
+    pub_dpi,
+    pub_fs,
+    pub_size,
+    rc_lw,
+    rc_ms,
+    styled,
 )
 
 TAUS = (Q_LO, Q_MED, Q_HI)
@@ -92,21 +103,25 @@ def _groups(res) -> list:
 
 def _band_axis(ax, groups) -> None:
     """Band x-axis: zero line, ZTF | other separator, pooled group set apart."""
-    ax.axhline(0.0, color="k", lw=0.8, zorder=1)
+    ax.axhline(0.0, color="k", lw=rc_lw(0.8), zorder=1)
     ax.set_xticks(range(len(groups)), [GROUP_LABELS.get(g, g) for g in groups])
+    if styled():
+        # Categorical axis: no minor ticks between the bands.
+        ax.tick_params(axis="x", which="minor", bottom=False, top=False)
     n_ztf = sum(g.startswith("ztf") for g in groups)
     if 0 < n_ztf < len(groups) - 1:
-        ax.axvline(n_ztf - 0.5, color="0.8", lw=0.8, ls=":", zorder=0)
+        ax.axvline(n_ztf - 0.5, color="0.8", lw=rc_lw(0.8), ls=":", zorder=0)
     if groups[-1] == "all":
-        ax.axvline(len(groups) - 1.5, color="0.5", lw=0.8, zorder=0)
+        ax.axvline(len(groups) - 1.5, color="0.5", lw=rc_lw(0.8), zorder=0)
     ax.set_xlim(-0.6, len(groups) - 0.4)
-    ax.grid(axis="y", color="0.92", lw=0.6, zorder=0)
+    if not styled():
+        ax.grid(axis="y", color="0.92", lw=0.6, zorder=0)
 
 
 def _point(ax, x, tau, r, bt, level, filled=True, **style) -> None:
     c_lo, c_hi = _ci(bt, level)
-    ax.errorbar(x, r - tau, yerr=[[r - c_lo], [c_hi - r]], ms=5, capsize=2,
-                lw=1.0, ls="none", mfc=style["color"] if filled else "white",
+    ax.errorbar(x, r - tau, yerr=[[r - c_lo], [c_hi - r]], ms=rc_ms(5), capsize=2,
+                lw=rc_lw(1.0), ls="none", mfc=style["color"] if filled else "white",
                 zorder=3, **style)
 
 
@@ -114,11 +129,12 @@ def plot_single(results, label, truth, level, title, out_base, exts) -> None:
     """One axis; three markers per band (filled = calibrated, open = raw)."""
     final = list(results)[-1]
     groups = _groups(results[final])
-    fig, ax = plt.subplots(figsize=(7.2, 3.6), layout="constrained")
+    fig, ax = plt.subplots(figsize=pub_size((7.2, 3.6)), layout="constrained")
     if title:
         cal = "calibrated" if final == "cal" else "raw (no calibration)"
         fig.suptitle(f"{label}{truth} truth, {cal} quantiles; bars = "
-                     f"object-bootstrap {level:g}% CI", fontsize=10)
+                     f"object-bootstrap {level:g}% CI",
+                     fontsize=pub_fs(10, "axes.titlesize"))
     _band_axis(ax, groups)
     for x, g in enumerate(groups):
         for tau in TAUS:
@@ -134,7 +150,7 @@ def plot_single(results, label, truth, level, title, out_base, exts) -> None:
     ax.set_ylabel(YLABEL)
     ax.set_xlabel("band")
     # Below the axes, so it never covers a point.
-    fig.legend(fontsize=8, ncol=len(TAUS) + (len(results) > 1),
+    fig.legend(fontsize=pub_fs(8), ncol=len(TAUS) + (len(results) > 1),
                loc="outside lower center", frameon=False)
     _save_all(fig, out_base, exts)
 
@@ -142,11 +158,12 @@ def plot_single(results, label, truth, level, title, out_base, exts) -> None:
 def plot_compare(entries, truth, level, title, out_base, exts) -> None:
     """One row per quantile; one marker per study per band."""
     groups = _groups(entries[0]["res"])
-    fig, axes = plt.subplots(len(TAUS), 1, figsize=(7.2, 7.4), sharex=True,
+    fig, axes = plt.subplots(len(TAUS), 1, figsize=pub_size((7.2, 7.4)), sharex=True,
                              layout="constrained")
     if title:
         fig.suptitle(f"{truth} truth, " + " / ".join(e["label"] for e in entries)
-                     + f"; bars = object-bootstrap {level:g}% CI", fontsize=10)
+                     + f"; bars = object-bootstrap {level:g}% CI",
+                     fontsize=pub_fs(10, "axes.titlesize"))
     width = 0.6
     offs = (np.linspace(-width / 2, width / 2, len(entries)) if len(entries) > 1
             else np.zeros(1))
@@ -160,10 +177,11 @@ def plot_compare(entries, truth, level, title, out_base, exts) -> None:
                        marker=TAU_STYLE[tau]["marker"], color=e["color"],
                        label=e["label"] if x == 0 else None)
         ax.set_ylabel(f"F({tau:g}) - {tau:g}")
-        ax.set_title(f"tau = {TAU_STYLE[tau]['label']}", fontsize=9, loc="left")
-    axes[0].set_title("> 0: truth brighter than predicted", fontsize=8,
+        ax.set_title(rf"$\tau$ = {TAU_STYLE[tau]['label']}" if styled() else
+                     f"tau = {TAU_STYLE[tau]['label']}", fontsize=pub_fs(9), loc="left")
+    axes[0].set_title("> 0: truth brighter than predicted", fontsize=pub_fs(8),
                       loc="right", color="0.35")
-    fig.legend(*axes[0].get_legend_handles_labels(), fontsize=8,
+    fig.legend(*axes[0].get_legend_handles_labels(), fontsize=pub_fs(8),
                ncol=len(entries), loc="outside lower center", frameon=False)
     axes[-1].set_xlabel("band")
     _save_all(fig, out_base, exts)
@@ -171,7 +189,7 @@ def plot_compare(entries, truth, level, title, out_base, exts) -> None:
 
 def _save_all(fig, out_base, exts) -> None:
     for ext in exts:
-        fig.savefig(f"{out_base}.{ext}", dpi=200)
+        fig.savefig(f"{out_base}.{ext}", dpi=pub_dpi(200))
         print(f"Wrote {out_base}.{ext}")
     plt.close(fig)
 
@@ -241,7 +259,11 @@ def main() -> None:
     p.add_argument("--outdir", default=None,
                    help="Default <eval_dir>/interval_diagnostics; "
                    "<runs_dir>/interval_compare with several studies.")
+    add_style_args(p)
     args = p.parse_args()
+    apply_style(args.style, args.font_dir)
+    TAU_STYLE[Q_LO]["color"], TAU_STYLE[Q_HI]["color"] = pub_colors(
+        (TAU_STYLE[Q_LO]["color"], TAU_STYLE[Q_HI]["color"]))
     truths = [t for t in ("uniform", "dense") if args.truth in (t, "both")]
 
     if args.eval_dir is not None:

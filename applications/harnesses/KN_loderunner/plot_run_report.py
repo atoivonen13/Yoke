@@ -14,7 +14,9 @@ Reads what ``eval_dense_latetime_9band.py`` and the training loop leave in
   * ``training_study*_epoch*.csv`` / ``validation_study*_epoch*.csv`` -- loss
     records (``epoch, batch, loss``).
 
-Figures (PDF + PNG, 7.0 in = two-column page width) in ``runs/study_NNN/figures``:
+Figures (PDF + PNG) in ``runs/study_NNN/figures``, drawn in ``--style``
+(default the repo's ``publication.mplstyle``: widths 1x / 2x its figure width;
+``none`` = the house 8 pt sans style, 3.4 / 7.0 in):
 
   1. ``loss``           train / validation loss (per-epoch median) vs epoch,
                         the evaluated checkpoint marked;
@@ -24,10 +26,11 @@ Figures (PDF + PNG, 7.0 in = two-column page width) in ``runs/study_NNN/figures`
                         band, with the median prediction at fixed truth, the
                         1:1 line and the dense depth;
   5. ``coverage``       raw vs calibrated 90% coverage per band and vs lead;
-  6. ``examples``       forecast + calibrated band vs truth for the 10th / 50th /
-                        90th percentile object by per-object uniform RMSE (the
+  6. ``examples``       forecast + calibrated band vs truth for the 5th / 50th /
+                        95th percentile object by per-object uniform RMSE
+                        (``--example_percentiles``; the picks are printed). The
                         CSVs hold only the scored late-time window, so the
-                        realistic context is not drawn).
+                        realistic context is not drawn.
   7. ``median_example_truth`` / ``median_example_forecast``  a pair for the
                         median object by per-object uniform RMSE, all 9 bands:
                         the realistic context the model saw and the uniform
@@ -71,6 +74,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap, LogNorm  # noqa: E402
+from matplotlib.font_manager import FontProperties  # noqa: E402
+from matplotlib.ticker import NullLocator  # noqa: E402
+from pub_style import (  # noqa: E402
+    DEFAULT_FONT_DIR,
+    DEFAULT_STYLE,
+    add_style_args,
+    use_pub_style,
+)
 
 BAND_NAMES = ("ztfg", "ztfr", "ztfi", "u", "g", "r", "i", "z", "y")
 BAND_LABELS = ("ZTF g", "ZTF r", "ZTF i", "LSST u", "LSST g", "LSST r",
@@ -93,7 +104,7 @@ MIN_BIN_POINTS = 50
 # Pred-vs-truth: truth bin width and minimum count for the median-given-truth line.
 TRUTH_BIN_MAG = 0.25
 MIN_TRUTH_BIN_POINTS = 20
-EXAMPLE_PERCENTILES = (10, 50, 90)
+EXAMPLE_PERCENTILES = (5, 50, 95)
 # Median-example pair: days of uniform truth drawn before the first detection.
 EXAMPLE_PRE_DAYS = 1.0
 
@@ -134,6 +145,56 @@ SEQ_CMAP = LinearSegmentedColormap.from_list("kn_seq_blue", (
 FULL_W = 7.0   # two-column figure width (in)
 HALF_W = 3.4   # one-column figure width (in)
 
+# What every figure draws with: the house values above, or (``apply_style``)
+# the publication style's rcParams. Mutated in place, so ``from plot_run_report
+# import LOOK`` in the sibling scripts sees the active one.
+LOOK: dict = {}
+
+
+def _house_look() -> dict:
+    return {"styled": False, "ink": INK, "ink2": INK_2, "muted": MUTED,
+            "axis": AXIS, "sep": "#efeee9", "series": SERIES, "cmap": SEQ_CMAP,
+            "full_w": FULL_W, "half_w": HALF_W, "h": 1.0,
+            "lw": 1.2, "lw_thin": 0.9, "hair": 0.6, "elw": 0.8, "ms": 3.5,
+            "ms_big": 4.5, "ms_small": 2.4, "mew": 0.9, "note": 7.0, "tiny": 6.0}
+
+
+def _style_look() -> dict:
+    """``LOOK`` from the current rcParams (sizes relative to the style's own)."""
+    rc = plt.rcParams
+
+    def pt(key: str) -> float:
+        return FontProperties(size=rc[key]).get_size_in_points()
+
+    lw, ms, tick = rc["lines.linewidth"], rc["lines.markersize"], pt("xtick.labelsize")
+    w = rc["figure.figsize"][0]
+    return {"styled": True, "ink": rc["text.color"], "ink2": "0.3", "muted": "0.5",
+            "axis": "0.6", "sep": rc["grid.color"],
+            "series": tuple(rc["axes.prop_cycle"].by_key().get("color", SERIES)),
+            "cmap": rc["image.cmap"], "full_w": 2 * w, "half_w": w,
+            # heights grow with the tick font (the house figures are 7 pt)
+            "h": tick / 7.0, "lw": lw, "lw_thin": 0.65 * lw,
+            "hair": rc["axes.linewidth"], "elw": rc["axes.linewidth"], "ms": ms,
+            "ms_big": 1.3 * ms, "ms_small": 0.6 * ms,
+            "mew": rc["lines.markeredgewidth"], "note": tick, "tiny": 0.8 * tick}
+
+
+LOOK.update(_house_look())
+
+
+def apply_style(style: str = DEFAULT_STYLE, font_dir: str = DEFAULT_FONT_DIR) -> bool:
+    """Draw every following figure in ``style`` ('none' = the house style).
+
+    Returns whether the publication style is active.
+    """
+    LOOK.clear()
+    if style == "none" or use_pub_style(style, font_dir) is None:
+        set_style()
+        LOOK.update(_house_look())
+        return False
+    LOOK.update(_style_look())
+    return True
+
 
 def set_style() -> None:
     """Matplotlib defaults for print: 8 pt sans, hairline chrome, vector fonts."""
@@ -171,7 +232,32 @@ def save(fig: plt.Figure, outdir: str, name: str, formats: tuple) -> None:
 
 def series_style(i: int) -> dict:
     """Color / marker / dash of categorical series ``i`` (fixed order)."""
-    return {"color": SERIES[i], "marker": MARKERS[i], "ls": DASHES[i]}
+    colors = LOOK["series"]
+    return {"color": colors[i % len(colors)], "marker": MARKERS[i], "ls": DASHES[i]}
+
+
+def color(i: int) -> str:
+    """Categorical color slot ``i`` of the active look."""
+    return LOOK["series"][i % len(LOOK["series"])]
+
+
+def figsize(width: str, height: float) -> tuple:
+    """``(full_w | half_w, height)``; the height scales with the style's fonts."""
+    return LOOK[width], height * LOOK["h"]
+
+
+def category_ticks(ax: plt.Axes, axis: str = "x") -> None:
+    """A category axis: labels only, no major or minor tick marks."""
+    (ax.xaxis if axis == "x" else ax.yaxis).set_minor_locator(NullLocator())
+    ax.tick_params(axis=axis, which="both", length=0)
+
+
+def value_grid(ax: plt.Axes, axis: str) -> None:
+    """House style: a light grid along ``axis`` only (the style has no grid)."""
+    if LOOK["styled"]:
+        return
+    ax.grid(axis=axis)
+    ax.grid(axis="y" if axis == "x" else "x", visible=False)
 
 
 # --------------------------------------------------------------------- loading
@@ -505,11 +591,13 @@ def write_tex(path: str, header: list, rows: list, caption: str,
 def band_axis(ax: plt.Axes, with_all: bool = True) -> None:
     """Band category ticks; a hairline separates the pooled 'All' group."""
     labels = GROUP_LABELS if with_all else BAND_LABELS
+    if LOOK["styled"]:  # survey over filter: the larger tick font collides otherwise
+        labels = [lab.replace(" ", "\n") for lab in labels]
     ax.set_xticks(np.arange(len(labels)), labels)
     ax.set_xlim(-0.6, len(labels) - 0.4)
-    ax.tick_params(axis="x", length=0)
+    category_ticks(ax, "x")
     if with_all:
-        ax.axvline(N_BANDS - 0.5, color=AXIS, lw=0.6)
+        ax.axvline(N_BANDS - 0.5, color=LOOK["axis"], lw=LOOK["hair"])
 
 
 def dodge(n: int, i: int, span: float = 0.8) -> float:
@@ -527,10 +615,11 @@ def errorbar(ax: plt.Axes, x: np.ndarray, stat: dict, horizontal: bool = False,
     ok = np.isfinite(p)
     err = np.vstack([p - stat["lo"], stat["hi"] - p])[:, ok]
     pos = np.asarray(x)[ok]
+    kw.setdefault("elinewidth", LOOK["elw"])
     if horizontal:
-        ax.errorbar(p[ok], pos, xerr=err, elinewidth=0.8, **kw)
+        ax.errorbar(p[ok], pos, xerr=err, **kw)
     else:
-        ax.errorbar(pos, p[ok], yerr=err, elinewidth=0.8, **kw)
+        ax.errorbar(pos, p[ok], yerr=err, **kw)
 
 
 def lead_line(ax: plt.Axes, centers: np.ndarray, grid: dict, row: int,
@@ -541,12 +630,12 @@ def lead_line(ax: plt.Axes, centers: np.ndarray, grid: dict, row: int,
         ax.fill_between(centers, grid["lo"][row], grid["hi"][row], color=color,
                         alpha=0.15, lw=0)
     ax.plot(centers, grid["point"][row], color=color, ls=ls, marker=marker,
-            markersize=2.5, markevery=2, lw=1.2, label=label)
+            markersize=LOOK["ms_small"], markevery=2, lw=LOOK["lw"], label=label)
 
 
 def lead_panels(height: float = 3.3) -> tuple:
     """2 x 5 grid: nine bands then 'All', shared axes."""
-    fig, axes = plt.subplots(2, 5, figsize=(FULL_W, height), sharex=True,
+    fig, axes = plt.subplots(2, 5, figsize=figsize("full_w", height), sharex=True,
                              sharey=True)
     axes = axes.ravel()
     for g, ax in enumerate(axes):
@@ -554,10 +643,21 @@ def lead_panels(height: float = 3.3) -> tuple:
     return fig, axes
 
 
+def sup_labels(fig: plt.Figure, xlabel: str | None, ylabel: str | None) -> None:
+    """Figure-level axis labels in the axes-label font."""
+    kw = {"fontsize": plt.rcParams["axes.labelsize"]}
+    if xlabel:
+        fig.supxlabel(xlabel, **kw)
+    if ylabel:
+        fig.supylabel(ylabel, **kw)
+
+
 def top_legend(fig: plt.Figure, handles: list, labels: list, ncol: int,
                title: str | None = None) -> None:
     """One legend above the panels; ``title`` sits on top of it (no suptitle clash)."""
-    kw = {"ncol": ncol, "title": title, "title_fontsize": 8}
+    kw = {"ncol": ncol, "title": title}
+    if not LOOK["styled"]:
+        kw["title_fontsize"] = 8
     try:
         fig.legend(handles, labels, loc="outside upper center", **kw)
     except ValueError:  # matplotlib < 3.7 has no 'outside' locations
@@ -566,8 +666,16 @@ def top_legend(fig: plt.Figure, handles: list, labels: list, ncol: int,
 
 
 def panel_letter(ax: plt.Axes, letter: str) -> None:
-    """Bold (a), (b), ... at the top left of a panel."""
-    ax.set_title(f"({letter})", loc="left", fontweight="bold")
+    """(a), (b), ... at the top left of a panel (bold in the house style)."""
+    ax.set_title(f"({letter})", loc="left",
+                 fontweight="normal" if LOOK["styled"] else "bold")
+
+
+def note(ax: plt.Axes, text: str, xy: tuple, **kw: object) -> None:
+    """A small annotation in the look's note font and color."""
+    kw.setdefault("fontsize", LOOK["note"])
+    kw.setdefault("color", LOOK["ink2"])
+    ax.annotate(text, xy, **kw)
 
 
 # --------------------------------------------------------------------- figures
@@ -579,25 +687,25 @@ def fig_loss(run: dict, title: str | None) -> plt.Figure | None:
     if tr is None and va is None:
         print(f"{run['label']}: no loss records in {run['run_dir']}; skipping loss.")
         return None
-    fig, ax = plt.subplots(figsize=(HALF_W, 2.4))
+    fig, ax = plt.subplots(figsize=figsize("half_w", 2.4))
     if tr is not None:
-        ax.fill_between(tr["epoch"], tr["p05"], tr["p95"], color=SERIES[0],
+        ax.fill_between(tr["epoch"], tr["p05"], tr["p95"], color=color(0),
                         alpha=0.15, lw=0)
-        ax.plot(tr["epoch"], tr["median"], color=SERIES[0], lw=1.0,
+        ax.plot(tr["epoch"], tr["median"], color=color(0), lw=LOOK["lw_thin"],
                 label="Train (median, 5–95% of batches)")
     if va is not None:
-        ax.plot(va["epoch"], va["median"], color=SERIES[1], ls="--", marker="s",
-                markersize=2.5, lw=1.2, label="Validation (median)")
+        ax.plot(va["epoch"], va["median"], color=color(1), ls="--", marker="s",
+                markersize=LOOK["ms_small"], markevery=max(1, len(va) // 15),
+                lw=LOOK["lw"], label="Validation (median)")
     if run["epoch"] is not None:
-        ax.axvline(run["epoch"], color=MUTED, ls=":", lw=0.9)
-        ax.annotate(f"evaluated\nepoch {run['epoch']}", (run["epoch"], 1.0),
-                    xycoords=("data", "axes fraction"), xytext=(-3, -2),
-                    textcoords="offset points", ha="right", va="top",
-                    color=INK_2, fontsize=7)
+        ax.axvline(run["epoch"], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"])
+        note(ax, f"evaluated\nepoch {run['epoch']}", (run["epoch"], 1.0),
+             xycoords=("data", "axes fraction"), xytext=(-3, -2),
+             textcoords="offset points", ha="right", va="top")
     ax.set_yscale("log")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
-    ax.legend(loc="lower left")
+    ax.legend(loc="center right")  # loss curves drop fast then plateau low
     if title:
         ax.set_title(title, loc="left")
     return fig
@@ -610,28 +718,28 @@ def fig_band_metrics(run: dict, boot: ObjectBootstrap,
     rmse = summarize(boot, u, "rmse")
     bias = summarize(boot, u, "bias")
     x = np.arange(len(GROUP_NAMES))
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(FULL_W, 3.8), sharex=True,
-                                   height_ratios=(1.4, 1))
-    ax1.bar(x, rmse["point"], width=0.62, color=SERIES[0], edgecolor="white",
-            lw=0.6, label="Uniform truth (headline)",
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize("full_w", 3.8),
+                                   sharex=True, height_ratios=(1.4, 1))
+    ax1.bar(x, rmse["point"], width=0.62, color=color(0), edgecolor="white",
+            lw=LOOK["hair"], label="Uniform truth (headline)",
             yerr=np.vstack([rmse["point"] - rmse["lo"], rmse["hi"] - rmse["point"]]),
-            error_kw={"elinewidth": 0.8, "ecolor": INK_2})
+            error_kw={"elinewidth": LOOK["elw"], "ecolor": LOOK["ink2"]})
     if run["dense"] is not None:
         dense = summarize(boot, run["dense"], "rmse")
-        ax1.plot(x, dense["point"], ls="none", marker="D", markersize=4,
-                 mfc="white", mec=INK, mew=0.9,
+        ax1.plot(x, dense["point"], ls="none", marker="D", markersize=LOOK["ms"],
+                 mfc="white", mec=LOOK["ink"], mew=LOOK["mew"],
                  label="Dense truth (within survey depth)")
-    ax1.annotate(f"{rmse['point'][-1]:.3f}", (x[-1], rmse["hi"][-1]),
-                 xytext=(0, 2), textcoords="offset points", ha="center",
-                 va="bottom", fontsize=7)
+    note(ax1, f"{rmse['point'][-1]:.3f}", (x[-1], rmse["hi"][-1]),
+         xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
+         color=LOOK["ink"])
     ax1.set_ylabel("RMSE (mag)")
-    ax1.set_ylim(bottom=0, top=1.12 * np.nanmax(rmse["hi"]))
-    ax1.axvline(N_BANDS - 0.5, color=AXIS, lw=0.6)
+    ax1.set_ylim(bottom=0, top=1.15 * np.nanmax(rmse["hi"]))
+    ax1.axvline(N_BANDS - 0.5, color=LOOK["axis"], lw=LOOK["hair"])
     panel_letter(ax1, "a")
     top_legend(fig, *ax1.get_legend_handles_labels(), ncol=2, title=title)
 
-    ax2.axhline(0.0, color=INK, lw=0.6)
-    errorbar(ax2, x, bias, fmt="o", color=SERIES[0], markersize=4)
+    ax2.axhline(0.0, color=LOOK["ink"], lw=LOOK["hair"])
+    errorbar(ax2, x, bias, fmt="o", color=color(0), markersize=LOOK["ms"])
     ax2.set_ylabel("Bias (mag)\n+ = too faint")
     panel_letter(ax2, "b")
     band_axis(ax2)
@@ -646,11 +754,10 @@ def fig_error_vs_lead(run: dict, boot: ObjectBootstrap, edges: np.ndarray,
     bias = lead_grid(boot, run["uniform"], "bias", edges)
     fig, axes = lead_panels()
     for g, ax in enumerate(axes):
-        ax.axhline(0.0, color=INK, lw=0.5)
-        lead_line(ax, centers, rmse, g, SERIES[0], label="RMSE")
-        lead_line(ax, centers, bias, g, SERIES[1], ls="--", label="Bias (+ = too faint)")
-    fig.supxlabel("Lead time (days)")
-    fig.supylabel("Uniform-truth error (mag)")
+        ax.axhline(0.0, color=LOOK["ink"], lw=LOOK["hair"])
+        lead_line(ax, centers, rmse, g, color(0), label="RMSE")
+        lead_line(ax, centers, bias, g, color(1), ls="--", label="Bias (+ = too faint)")
+    sup_labels(fig, "Lead time (days)", "Uniform-truth error (mag)")
     handles, labels = axes[0].get_legend_handles_labels()
     top_legend(fig, handles, labels, ncol=2, title=title)
     return fig
@@ -671,7 +778,7 @@ def _median_given_truth(true: np.ndarray, pred: np.ndarray, lims: tuple) -> tupl
 def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figure:
     """2-D histogram of predicted median vs uniform truth, per band."""
     u = run["uniform"]
-    fig, axes = plt.subplots(3, 3, figsize=(FULL_W, FULL_W * 0.92))
+    fig, axes = plt.subplots(3, 3, figsize=(LOOK["full_w"], LOOK["full_w"] * 0.92))
     axes = axes.ravel()
     hists = []
     for b in range(N_BANDS):
@@ -696,19 +803,20 @@ def fig_pred_vs_truth(run: dict, title: str | None, bins: int = 70) -> plt.Figur
             ax.set_axis_off()
             continue
         t, p, lims, h, xe, ye = hists[b]
-        mesh = ax.pcolormesh(xe, ye, np.ma.masked_less(h.T, 1), cmap=SEQ_CMAP,
+        mesh = ax.pcolormesh(xe, ye, np.ma.masked_less(h.T, 1), cmap=LOOK["cmap"],
                              norm=norm, rasterized=True)
-        ax.plot(lims, lims, color=MUTED, ls="--", lw=0.8, label="1:1")
+        ax.plot(lims, lims, color=LOOK["muted"], ls="--", lw=LOOK["lw_thin"],
+                label="1:1")
         c, med = _median_given_truth(t, p, lims)
-        ax.plot(c, med, color=INK, lw=1.2, label="Median prediction")
+        ax.plot(c, med, color=LOOK["ink"], lw=LOOK["lw"], label="Median prediction")
         depth = run["depth"][b]
         if lims[0] < depth < lims[1]:
-            ax.axvline(depth, color=SERIES[1], ls=":", lw=1.1, label="Dense depth")
+            ax.axvline(depth, color=color(1), ls=":", lw=LOOK["lw"],
+                       label="Dense depth")
         ax.set_xlim(lims)
         ax.set_ylim(lims)
         ax.set_aspect("equal")
-    fig.supxlabel("Uniform truth (mag)")
-    fig.supylabel("Predicted median (mag)")
+    sup_labels(fig, "Uniform truth (mag)", "Predicted median (mag)")
     handles = {}
     for ax in axes:
         for h, lab in zip(*ax.get_legend_handles_labels()):
@@ -733,19 +841,19 @@ def fig_coverage(run: dict, boot: ObjectBootstrap, edges: np.ndarray,
     nominal = run["interval"]
     centers = 0.5 * (edges[1:] + edges[:-1])
     x = np.arange(len(GROUP_NAMES))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(FULL_W, 2.6),
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize("full_w", 2.6),
                                    width_ratios=(1.6, 1), sharey=True)
     for ax in (ax1, ax2):
-        ax.axhline(nominal, color=INK, lw=0.6, ls=":")
+        ax.axhline(nominal, color=LOOK["ink"], lw=LOOK["hair"], ls=":")
     for i, (kind, label, slot, marker, ls) in enumerate(variants):
         errorbar(ax1, x + dodge(len(variants), i, 0.5), summarize(boot, u, kind),
-                 fmt=marker, color=SERIES[slot], markersize=3.5, label=label)
+                 fmt=marker, color=color(slot), markersize=LOOK["ms"], label=label)
         grid = lead_grid(boot, u, kind, edges)
-        lead_line(ax2, centers, grid, N_BANDS, SERIES[slot], ls=ls, label=label)
+        lead_line(ax2, centers, grid, N_BANDS, color(slot), ls=ls, label=label)
     band_axis(ax1)
     ax1.set_ylabel(f"Coverage of {nominal:.0%} band\n(uniform truth)")
     handles, labels = ax1.get_legend_handles_labels()
-    handles.append(plt.Line2D([], [], color=INK, lw=0.6, ls=":"))
+    handles.append(plt.Line2D([], [], color=LOOK["ink"], lw=LOOK["hair"], ls=":"))
     labels.append(f"Nominal {nominal:.0%}")
     panel_letter(ax1, "a")
     ax2.set_xlabel("Lead time (days)")
@@ -761,29 +869,48 @@ def per_object_rmse(run: dict) -> pd.Series:
     return np.sqrt((u["r"] ** 2).groupby(u["stem"]).mean())
 
 
-def pick_examples(run: dict, stems: list | None) -> list:
-    """``(stem, caption)`` per example row: given stems, or RMSE percentiles."""
+def _ordinal(q: float) -> str:
+    q = f"{q:g}"
+    if q.endswith(("11", "12", "13")):
+        return q + "th"
+    return q + {"1": "st", "2": "nd", "3": "rd"}.get(q[-1], "th")
+
+
+def pick_examples(run: dict, stems: list | None,
+                  percentiles: tuple = EXAMPLE_PERCENTILES) -> list:
+    """``(stem, caption)`` per example row: given stems, or RMSE percentiles.
+
+    Prints each pick with its per-object uniform RMSE and percentile rank.
+    """
     per_obj = per_object_rmse(run)
+    vals = per_obj.to_numpy()
     if stems:
         missing = [s for s in stems if s not in per_obj.index]
         if missing:
             raise ValueError(f"examples not in the scored set: {missing}")
-        return [(s, f"RMSE {per_obj[s]:.2f}") for s in stems]
-    out = []
-    for q in EXAMPLE_PERCENTILES:
-        target = np.percentile(per_obj.to_numpy(), q)
-        stem = (per_obj - target).abs().idxmin()
-        out.append((stem, f"{q}th pct, RMSE {per_obj[stem]:.2f}"))
+        out = [(s, f"RMSE {per_obj[s]:.2f}") for s in stems]
+    else:
+        out = []
+        for q in percentiles:
+            target = np.percentile(vals, q)
+            stem = (per_obj - target).abs().idxmin()
+            out.append((stem, f"{_ordinal(q)} pct., RMSE {per_obj[stem]:.2f}"))
+    print(f"{run['label']}: example objects ({len(vals)} scored, per-object "
+          "uniform RMSE)")
+    for stem, _ in out:
+        rank = float((vals < per_obj[stem]).mean() * 100)
+        print(f"  {stem}: RMSE {per_obj[stem]:.3f} ({rank:.1f}th pct)")
     return out
 
 
 def fig_examples(run: dict, bands: list, stems: list | None,
-                 title: str | None) -> plt.Figure:
+                 title: str | None,
+                 percentiles: tuple = EXAMPLE_PERCENTILES) -> plt.Figure:
     """Late-time forecast + calibrated band vs truth for a few objects."""
     u, d = run["uniform"], run["dense"]
-    picks = pick_examples(run, stems)
+    picks = pick_examples(run, stems, percentiles)
     fig, axes = plt.subplots(len(picks), len(bands),
-                             figsize=(FULL_W, 1.75 * len(picks) + 0.4),
+                             figsize=figsize("full_w", 1.75 * len(picks) + 0.4),
                              sharex=True, squeeze=False)
     band_label = "Calibrated" if run["calibrated"] else "Raw"
     for i, (stem, caption) in enumerate(picks):
@@ -793,15 +920,16 @@ def fig_examples(run: dict, bands: list, stems: list | None,
             su = u[(u["stem"] == stem) & (u["b"] == b)].sort_values("phase")
             if run["has_band"]:
                 ax.fill_between(su["phase"], su["low_cal"], su["high_cal"],
-                                color=SERIES[0], alpha=0.2, lw=0,
+                                color=color(0), alpha=0.2, lw=0,
                                 label=f"{band_label} {run['interval']:.0%} band")
-            ax.plot(su["phase"], su["true"], color=INK_2, lw=1.0,
+            ax.plot(su["phase"], su["true"], color=LOOK["ink2"], lw=LOOK["lw_thin"],
                     label="Uniform truth")
             if d is not None:
                 sd = d[(d["stem"] == stem) & (d["b"] == b)]
                 ax.plot(sd["phase"], sd["true"], ls="none", marker="o",
-                        markersize=2.2, color=MUTED, label="Dense truth")
-            ax.plot(su["phase"], su["med"], color=SERIES[0], lw=1.3,
+                        markersize=LOOK["ms_small"], color=LOOK["muted"],
+                        label="Dense truth")
+            ax.plot(su["phase"], su["med"], color=color(0), lw=LOOK["lw"],
                     label="Forecast median")
             ax.invert_yaxis()
             if i == 0:
@@ -809,10 +937,10 @@ def fig_examples(run: dict, bands: list, stems: list | None,
             if j == 0:
                 ax.set_ylabel(f"{caption}\nmag")
             if j == len(bands) - 1:
-                ax.annotate(stem, (1.0, 0.0), xycoords="axes fraction",
-                            xytext=(-2, 2), textcoords="offset points",
-                            ha="right", va="bottom", fontsize=6, color=MUTED)
-    fig.supxlabel("Days since first realistic detection")
+                note(ax, stem, (1.0, 0.0), xycoords="axes fraction",
+                     xytext=(-4, 3), textcoords="offset points", ha="right",
+                     va="bottom", fontsize=LOOK["tiny"], color=LOOK["muted"])
+    sup_labels(fig, "Days since first realistic detection", None)
     handles, labels = axes[0, 0].get_legend_handles_labels()
     top_legend(fig, handles, labels, ncol=len(labels), title=title)
     return fig
@@ -958,13 +1086,14 @@ def fig_median_example(run: dict, ex: dict, with_forecast: bool,
     """
     if bands is None:
         band_idx = list(range(N_BANDS))
-        fig, axes = plt.subplots(3, 3, figsize=(FULL_W, FULL_W * 0.78),
+        fig, axes = plt.subplots(3, 3, figsize=(LOOK["full_w"],
+                                                LOOK["full_w"] * 0.78 * LOOK["h"]),
                                  sharex=True)
         ncol = None
     else:
         band_idx = [BAND_INDEX[name] for name in bands]
         fig, axes = plt.subplots(len(bands), 1,
-                                 figsize=(HALF_W, 1.55 * len(bands) + 0.9),
+                                 figsize=figsize("half_w", 1.55 * len(bands) + 0.9),
                                  sharex=True, squeeze=False)
         ncol = 2
     axes = axes.ravel()
@@ -972,32 +1101,33 @@ def fig_median_example(run: dict, ex: dict, with_forecast: bool,
     band_label = "Calibrated" if run["calibrated"] else "Raw"
     for b, ax in zip(band_idx, axes):
         ax.set_title(BAND_LABELS[b])
-        ax.axvline(ex["cutoff"], color=MUTED, ls=":", lw=0.9,
+        ax.axvline(ex["cutoff"], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"],
                    label=f"Context cutoff ({ex['cutoff']:g} d)")
         m = t_b == b
-        ax.plot(t_ph[m], t_mag[m], color=INK_2, lw=1.0, label="Uniform truth")
-        note = f"{int(np.sum(ctx['b'] == b))} in context"
+        ax.plot(t_ph[m], t_mag[m], color=LOOK["ink2"], lw=LOOK["lw_thin"],
+                label="Uniform truth")
+        text = f"{int(np.sum(ctx['b'] == b))} in context"
         if with_forecast:
             f = fc[fc["b"] == b].sort_values("phase")
             if run["has_band"]:
                 ax.fill_between(f["phase"], f["low_cal"], f["high_cal"],
-                                color=SERIES[0], alpha=0.2, lw=0,
+                                color=color(0), alpha=0.2, lw=0,
                                 label=f"{band_label} {run['interval']:.0%} band")
-            ax.plot(f["phase"], f["med"], color=SERIES[0], lw=1.3,
+            ax.plot(f["phase"], f["med"], color=color(0), lw=LOOK["lw"],
                     label="Forecast median")
             if len(f):
-                note += f", RMSE {np.sqrt(np.mean(f['r'] ** 2)):.2f}"
+                text += f", RMSE {np.sqrt(np.mean(f['r'] ** 2)):.2f}"
         m = ctx["b"] == b
         ax.plot(ctx["phase"][m], ctx["mag"][m], ls="none", marker="o",
-                markersize=3.5, mfc=SERIES[1], mec=INK, mew=0.4, zorder=3,
-                label="Realistic context")
-        ax.annotate(note, (0.02, 0.03), xycoords="axes fraction", ha="left",
-                    va="bottom", fontsize=6, color=MUTED)
+                markersize=LOOK["ms"], mfc=color(1), mec=LOOK["ink"],
+                mew=0.5 * LOOK["mew"], zorder=3, label="Realistic context")
+        note(ax, text, (0.02, 0.03), xycoords="axes fraction", ha="left",
+             va="bottom", fontsize=LOOK["tiny"], color=LOOK["muted"],
+             bbox={"fc": "white", "ec": "none", "alpha": 0.8, "pad": 0.5})
         ax.set_xlim(ex["x_lim"])
         if ex["y_lim"][b] is not None:
             ax.set_ylim(ex["y_lim"][b])
-    fig.supxlabel("Days since first realistic detection")
-    fig.supylabel("Magnitude")
+    sup_labels(fig, "Days since first realistic detection", "Magnitude")
     handles = {}
     for ax in axes:
         for h, lab in zip(*ax.get_legend_handles_labels()):
@@ -1064,8 +1194,12 @@ def main() -> None:
     p.add_argument("--example_bands", nargs="+", default=["ztfg", "u", "r"],
                    choices=BAND_NAMES)
     p.add_argument("--example_stems", nargs="+", default=None,
-                   help="Objects for the examples figure (default: the 10th / "
-                   "50th / 90th percentile object by uniform RMSE).")
+                   help="Objects for the examples figure (default: the "
+                   "--example_percentiles objects by uniform RMSE).")
+    p.add_argument("--example_percentiles", type=float, nargs="+",
+                   default=list(EXAMPLE_PERCENTILES),
+                   help="Per-object uniform-RMSE percentiles of the examples "
+                   "rows (the object nearest each one is drawn and printed).")
     p.add_argument("--median_example_stem", default=None,
                    help="Object for the median-example pair (default: the "
                    "median object by uniform RMSE).")
@@ -1088,9 +1222,10 @@ def main() -> None:
     p.add_argument("--n_boot", type=int, default=500,
                    help="Object-bootstrap resamples for the CIs.")
     p.add_argument("--seed", type=int, default=0)
+    add_style_args(p)
     args = p.parse_args()
 
-    set_style()
+    apply_style(args.style, args.font_dir)
     run = load_run(args.study, args.runs_root, args.label, args.eval_dir)
     outdir = args.outdir or os.path.join(run["run_dir"], "figures")
     os.makedirs(outdir, exist_ok=True)
@@ -1118,7 +1253,7 @@ def main() -> None:
         ("pred_vs_truth", fig_pred_vs_truth(run, title)),
         ("coverage", fig_coverage(run, boot, edges, title)),
         ("examples", fig_examples(run, args.example_bands, args.example_stems,
-                                  title)),
+                                  title, tuple(args.example_percentiles))),
         ("median_example_truth", example and fig_median_example(
             run, example, False, title)),
         ("median_example_forecast", example and fig_median_example(

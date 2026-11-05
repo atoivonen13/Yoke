@@ -6,7 +6,8 @@ compared on the objects COMMON to every run, and every CI uses one shared set of
 object-bootstrap resamples, so the run-vs-reference differences are PAIRED (the
 same objects drawn in every resample) and much tighter than the per-run CIs.
 
-Figures (PDF + PNG, 7.0 in two-column width) in ``--outdir``:
+Figures (PDF + PNG, in ``--style``: default ``publication.mplstyle``, ``none``
+= the house style) in ``--outdir``:
 
   1. ``overview``       (a) overall uniform RMSE per run (dense RMSE overlaid),
                         (b) paired difference vs the reference run, with the
@@ -46,22 +47,21 @@ import pandas as pd  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_run_report import (  # noqa: E402
-    AXIS,
     BAND_INDEX,
     BAND_LABELS,
     BAND_NAMES,
-    FULL_W,
     GROUP_NAMES,
-    HALF_W,
-    INK,
-    INK_2,
-    MUTED,
+    LOOK,
     N_BANDS,
     SERIES,
     ObjectBootstrap,
+    add_style_args,
+    apply_style,
+    category_ticks,
     band_axis,
     dodge,
     errorbar,
+    figsize,
     fmt,
     fmt_ci,
     lead_edges,
@@ -70,20 +70,20 @@ from plot_run_report import (  # noqa: E402
     lead_panels,
     load_run,
     metrics_table,
+    note,
     panel_letter,
     restrict_to,
     save,
     series_style,
-    set_style,
     summarize,
+    sup_labels,
     top_legend,
+    value_grid,
     write_tex,
 )
 
 MAX_RUNS = len(SERIES)
 SEED_NOISE = 0.05
-# Hairline between band categories on the dodged per-band panels.
-GRID_SEP = "#efeee9"
 
 
 def common_objects(runs: list) -> set:
@@ -117,9 +117,16 @@ def legend_handles(runs: list, lines: bool = True) -> tuple:
     for i in range(len(runs)):
         st = series_style(i)
         handles.append(plt.Line2D([], [], color=st["color"], marker=st["marker"],
-                                  ls=st["ls"] if lines else "none", lw=1.2,
-                                  markersize=4))
+                                  ls=st["ls"] if lines else "none", lw=LOOK["lw"],
+                                  markersize=LOOK["ms"]))
     return handles, [r["label"] for r in runs]
+
+
+def band_separators(ax: plt.Axes) -> None:
+    """Hairlines between band categories; a darker one before 'All'."""
+    for gx in np.arange(len(GROUP_NAMES) - 2) + 0.5:
+        ax.axvline(gx, color=LOOK["sep"], lw=0.5 * LOOK["hair"], zorder=0)
+    ax.axvline(N_BANDS - 0.5, color=LOOK["axis"], lw=LOOK["hair"])
 
 
 # --------------------------------------------------------------------- figures
@@ -132,57 +139,59 @@ def fig_overview(runs: list, boot: ObjectBootstrap, ref: int,
     delta = paired_delta(rmse, ref)
     n = len(runs)
     y = np.arange(n)[::-1]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(FULL_W, 0.42 * n + 1.0),
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize("full_w", 0.42 * n + 1.0),
                                    sharey=True)
     for ax in (ax1, ax2):
-        ax.grid(axis="x")
-        ax.grid(axis="y", visible=False)
-        ax.tick_params(axis="y", length=0)
+        value_grid(ax, "x")
+        category_ticks(ax, "y")
+    big = LOOK["ms_big"]
     for i, r in enumerate(runs):
         st = series_style(i)
         errorbar(ax1, [y[i]], rmse[i], horizontal=True, fmt=st["marker"],
-                 color=st["color"], markersize=5)
+                 color=st["color"], markersize=big)
         if r["dense"] is not None:
             d = summarize(boot, r["dense"], "rmse", "all")["point"][0]
             # offset below the row so it never hides the uniform marker
-            ax1.plot(d, y[i] - 0.22, ls="none", marker="D", markersize=4, mfc="white",
-                     mec=INK, mew=0.9, zorder=3,
+            ax1.plot(d, y[i] - 0.22, ls="none", marker="D", markersize=LOOK["ms"],
+                     mfc="white", mec=LOOK["ink"], mew=LOOK["mew"], zorder=3,
                      label="Dense truth (within survey depth)" if i == 0 else None)
-        ax1.annotate(f"{rmse[i]['point'][0]:.3f}", (rmse[i]["hi"][0], y[i]),
-                     xytext=(4, 0), textcoords="offset points", va="center",
-                     fontsize=7)
+        note(ax1, f"{rmse[i]['point'][0]:.3f}", (rmse[i]["hi"][0], y[i]),
+             xytext=(4, 0), textcoords="offset points", va="center",
+             color=LOOK["ink"])
         if i != ref:
             errorbar(ax2, [y[i]], delta[i], horizontal=True, fmt=st["marker"],
-                     color=st["color"], markersize=5)
-            ax2.annotate(f"{delta[i]['point'][0]:+.3f}", (delta[i]["hi"][0], y[i]),
-                         xytext=(4, 0), textcoords="offset points", va="center",
-                         fontsize=7)
+                     color=st["color"], markersize=big)
+            note(ax2, f"{delta[i]['point'][0]:+.3f}", (delta[i]["hi"][0], y[i]),
+                 xytext=(4, 0), textcoords="offset points", va="center",
+                 color=LOOK["ink"])
     ax1.set_yticks(y, [r["label"] for r in runs])
-    ax1.set_xlabel("Uniform-truth RMSE, all bands (mag)")
+    ax1.set_xlabel("Uniform-truth RMSE,\nall bands (mag)" if LOOK["styled"]
+                   else "Uniform-truth RMSE, all bands (mag)")
     xmax = max(s["hi"][0] for s in rmse)
-    ax1.set_xlim(0, xmax * 1.15)
+    ax1.set_xlim(0, xmax * (1.25 if LOOK["styled"] else 1.15))
     panel_letter(ax1, "a")
     if any(r["dense"] is not None for r in runs):
-        handles = [plt.Line2D([], [], color=MUTED, marker="o", ls="-", lw=0.8,
-                              markersize=4),
+        handles = [plt.Line2D([], [], color=LOOK["muted"], marker="o", ls="-",
+                              lw=LOOK["lw_thin"], markersize=LOOK["ms"]),
                    *ax1.get_legend_handles_labels()[0]]
         top_legend(fig, handles, ["Uniform truth (headline, 90% CI)",
                                   "Dense truth (within survey depth)"], ncol=2)
 
     if seed_noise > 0:
-        ax2.axvspan(-seed_noise, seed_noise, color=AXIS, alpha=0.35, lw=0)
-        ax2.annotate(f"seed noise ±{seed_noise:.2f}", (0, 1.0),
-                     xycoords=("data", "axes fraction"), xytext=(0, 1),
-                     textcoords="offset points", ha="center", va="bottom",
-                     color=INK_2, fontsize=7)
-    ax2.axvline(0.0, color=INK, lw=0.6)
+        ax2.axvspan(-seed_noise, seed_noise, color=LOOK["axis"], alpha=0.35, lw=0)
+        note(ax2, f"seed noise ±{seed_noise:.2f}", (0, 1.0),
+             xycoords=("data", "axes fraction"), xytext=(0, 1),
+             textcoords="offset points", ha="center", va="bottom")
+    ax2.axvline(0.0, color=LOOK["ink"], lw=LOOK["hair"])
     ax2.plot([0], [y[ref]], ls="none", marker=series_style(ref)["marker"],
-             color=series_style(ref)["color"], markersize=5)
-    ax2.annotate("reference", (0, y[ref]), xytext=(5, 0), textcoords="offset points",
-                 va="center", fontsize=7, color=INK_2)
+             color=series_style(ref)["color"], markersize=big)
+    note(ax2, "reference", (0, y[ref]), xytext=(5, 0), textcoords="offset points",
+         va="center")
     span = max([abs(d[k][0]) for d in delta for k in ("lo", "hi")] + [seed_noise])
     ax2.set_xlim(-1.3 * span, 1.3 * span)
-    ax2.set_xlabel(f"Δ RMSE vs {runs[ref]['label']} (mag; − = better)")
+    ax2.set_xlabel(f"Δ RMSE vs {runs[ref]['label']}\n(mag; − = better)"
+                   if LOOK["styled"] else
+                   f"Δ RMSE vs {runs[ref]['label']} (mag; − = better)")
     panel_letter(ax2, "b")
     return fig
 
@@ -191,19 +200,17 @@ def fig_band_metrics(runs: list, boot: ObjectBootstrap) -> plt.Figure:
     """Per-band uniform RMSE and bias, one dodged marker + CI per run."""
     n = len(runs)
     x = np.arange(len(GROUP_NAMES))
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(FULL_W, 4.0), sharex=True,
-                                   height_ratios=(1.3, 1))
-    ax2.axhline(0.0, color=INK, lw=0.6)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize("full_w", 4.0),
+                                   sharex=True, height_ratios=(1.3, 1))
+    ax2.axhline(0.0, color=LOOK["ink"], lw=LOOK["hair"])
     for i, r in enumerate(runs):
         st = series_style(i)
-        kw = {"fmt": st["marker"], "color": st["color"], "markersize": 3.5}
+        kw = {"fmt": st["marker"], "color": st["color"], "markersize": LOOK["ms"]}
         off = x + dodge(n, i, 0.72)
         errorbar(ax1, off, summarize(boot, r["uniform"], "rmse"), **kw)
         errorbar(ax2, off, summarize(boot, r["uniform"], "bias"), **kw)
-    for gx in x[:-2] + 0.5:
-        for ax in (ax1, ax2):
-            ax.axvline(gx, color=GRID_SEP, lw=0.4, zorder=0)
-    ax1.axvline(N_BANDS - 0.5, color=AXIS, lw=0.6)
+    for ax in (ax1, ax2):
+        band_separators(ax)
     ax1.set_ylabel("Uniform RMSE (mag)")
     ax2.set_ylabel("Bias (mag)\n+ = too faint")
     band_axis(ax2)
@@ -221,14 +228,13 @@ def fig_vs_lead(runs: list, boot: ObjectBootstrap, edges: np.ndarray, kind: str,
     fig, axes = lead_panels()
     for g, ax in enumerate(axes):
         if kind == "bias":
-            ax.axhline(0.0, color=INK, lw=0.5)
+            ax.axhline(0.0, color=LOOK["ink"], lw=LOOK["hair"])
         for i, grid in enumerate(grids):
             st = series_style(i)
             lead_line(ax, centers, grid, g, st["color"], ls=st["ls"],
                       marker=st["marker"], band=ci)
-    fig.supxlabel("Lead time (days)")
-    fig.supylabel("Uniform RMSE (mag)" if kind == "rmse"
-                  else "Uniform bias (mag; + = too faint)")
+    sup_labels(fig, "Lead time (days)", "Uniform RMSE (mag)" if kind == "rmse"
+               else "Uniform bias (mag; + = too faint)")
     top_legend(fig, *legend_handles(runs), ncol=min(len(runs), 4))
     return fig
 
@@ -243,15 +249,15 @@ def fig_coverage(runs: list, boot: ObjectBootstrap,
     nominal = runs[keep[0]]["interval"]
     centers = 0.5 * (edges[1:] + edges[:-1])
     x = np.arange(len(GROUP_NAMES))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(FULL_W, 2.7),
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize("full_w", 2.7),
                                    width_ratios=(1.7, 1), sharey=True)
     for ax in (ax1, ax2):
-        ax.axhline(nominal, color=INK, lw=0.6, ls=":")
+        ax.axhline(nominal, color=LOOK["ink"], lw=LOOK["hair"], ls=":")
     for j, i in enumerate(keep):
         r, st = runs[i], series_style(i)
         kind = "hit_cal" if r["calibrated"] else "hit_raw"
         errorbar(ax1, x + dodge(len(keep), j, 0.72), summarize(boot, r["uniform"],
-                 kind), fmt=st["marker"], color=st["color"], markersize=3.5)
+                 kind), fmt=st["marker"], color=st["color"], markersize=LOOK["ms"])
         lead_line(ax2, centers, lead_grid(boot, r["uniform"], kind, edges), N_BANDS,
                   st["color"], ls=st["ls"], marker=st["marker"], band=False)
     raw = [runs[i]["label"] for i in keep if not runs[i]["calibrated"]]
@@ -277,31 +283,34 @@ def fig_loss(runs: list, train: bool) -> plt.Figure | None:
     if all(r["val_loss"] is None and r["train_loss"] is None for r in runs):
         print("No loss records found; skipping loss.")
         return None
-    fig, ax = plt.subplots(figsize=(HALF_W * 1.35, 2.5))
+    fig, ax = plt.subplots(figsize=(LOOK["half_w"] * 1.35, 2.5 * LOOK["h"]))
+    star = 2.2 * LOOK["ms"]
     for i, r in enumerate(runs):
         st = series_style(i)
         if train and r["train_loss"] is not None:
             t = r["train_loss"]
-            ax.plot(t["epoch"], t["median"], color=st["color"], lw=0.6, alpha=0.45)
+            ax.plot(t["epoch"], t["median"], color=st["color"],
+                    lw=0.5 * LOOK["lw"], alpha=0.45)
         if r["val_loss"] is not None:
             v = r["val_loss"]
             ax.plot(v["epoch"], v["median"], color=st["color"], ls=st["ls"],
                     marker=st["marker"], markevery=max(len(v) // 8, 1),
-                    markersize=3, lw=1.2)
+                    markersize=0.8 * LOOK["ms"], lw=LOOK["lw"])
         if r["epoch"] is not None and r["val_loss"] is not None:
             v = r["val_loss"].set_index("epoch")["median"]
             if r["epoch"] in v.index:
-                ax.plot(r["epoch"], v[r["epoch"]], marker="*", markersize=8,
+                ax.plot(r["epoch"], v[r["epoch"]], marker="*", markersize=star,
                         color=st["color"], mec="white", mew=0.6, ls="none")
     ax.set_yscale("log")
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Validation loss (per-epoch median)")
+    ax.set_ylabel("Validation loss\n(per-epoch median)" if LOOK["styled"]
+                  else "Validation loss (per-epoch median)")
     handles, labels = legend_handles(runs)
-    handles.append(plt.Line2D([], [], color=MUTED, marker="*", ls="none",
-                              markersize=7))
+    handles.append(plt.Line2D([], [], color=LOOK["muted"], marker="*", ls="none",
+                              markersize=0.9 * star))
     labels.append("Evaluated checkpoint")
     if train:
-        handles.append(plt.Line2D([], [], color=MUTED, lw=0.6))
+        handles.append(plt.Line2D([], [], color=LOOK["muted"], lw=0.5 * LOOK["lw"]))
         labels.append("Train (thin)")
     ax.legend(handles, labels, loc="upper right")
     return fig
@@ -313,29 +322,31 @@ def fig_examples(runs: list, ref: int, bands: list, stem: str | None) -> plt.Fig
     if stem is None:
         per_obj = np.sqrt((u_ref["r"] ** 2).groupby(u_ref["stem"]).mean())
         stem = (per_obj - per_obj.median()).abs().idxmin()
-    fig, axes = plt.subplots(1, len(bands), figsize=(FULL_W, 2.3), sharex=True,
-                             squeeze=False)
+    fig, axes = plt.subplots(1, len(bands), figsize=figsize("full_w", 2.3),
+                             sharex=True, squeeze=False)
     for j, name in enumerate(bands):
         ax = axes[0, j]
         b = BAND_INDEX[name]
         su = u_ref[(u_ref["stem"] == stem) & (u_ref["b"] == b)].sort_values("phase")
-        ax.plot(su["phase"], su["true"], color=INK, lw=1.6, label="Uniform truth")
+        ax.plot(su["phase"], su["true"], color=LOOK["ink"], lw=1.3 * LOOK["lw"],
+                label="Uniform truth")
         d = runs[ref]["dense"]
         if d is not None:
             sd = d[(d["stem"] == stem) & (d["b"] == b)]
-            ax.plot(sd["phase"], sd["true"], ls="none", marker="o", markersize=2.2,
-                    color=MUTED, label="Dense truth")
+            ax.plot(sd["phase"], sd["true"], ls="none", marker="o",
+                    markersize=LOOK["ms_small"], color=LOOK["muted"],
+                    label="Dense truth")
         for i, r in enumerate(runs):
             st = series_style(i)
             u = r["uniform"]
             s = u[(u["stem"] == stem) & (u["b"] == b)].sort_values("phase")
-            ax.plot(s["phase"], s["med"], color=st["color"], ls=st["ls"], lw=1.2,
-                    label=r["label"])
+            ax.plot(s["phase"], s["med"], color=st["color"], ls=st["ls"],
+                    lw=LOOK["lw"], label=r["label"])
         ax.invert_yaxis()
         ax.set_title(BAND_LABELS[b])
         if j == 0:
             ax.set_ylabel("Magnitude")
-    fig.supxlabel(f"Days since first realistic detection   (object {stem})")
+    sup_labels(fig, f"Days since first realistic detection   (object {stem})", None)
     handles, labels = axes[0, 0].get_legend_handles_labels()
     top_legend(fig, handles, labels, ncol=min(len(labels), 6))
     return fig
@@ -439,6 +450,7 @@ def main() -> None:
                    "reference run's median-RMSE object).")
     p.add_argument("--n_boot", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
+    add_style_args(p)
     args = p.parse_args()
 
     if not 2 <= len(args.studies) <= MAX_RUNS:
@@ -453,7 +465,7 @@ def main() -> None:
         p.error("--reference must be one of --studies")
     ref = args.studies.index(ref_study)
 
-    set_style()
+    apply_style(args.style, args.font_dir)
     runs = [load_run(s, args.runs_root, lab)
             for s, lab in zip(args.studies, labels)]
     common = common_objects(runs)
