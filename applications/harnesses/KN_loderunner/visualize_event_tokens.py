@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.gridspec import GridSpec
+from matplotlib.lines import Line2D
 
 from yoke.datasets.kilonova_dataset import (
     EPS,
@@ -187,6 +188,8 @@ def get_args() -> argparse.Namespace:
                    help="Query band for the attention lines and attention-vs-Dt "
                         "panel (default: the band with most context events).")
     p.add_argument("--outdir", type=str, default=None)
+    p.add_argument("--formats", nargs="+", default=["pdf", "png"],
+                   help="Formats of the paper figure tokens_paper_<stem>.")
     add_style_args(p)
     return p.parse_args()
 
@@ -379,6 +382,100 @@ def plot_tokens(obj, meta, w_h, dts, ref_i, focus, ref_dt, path, title):
     plt.close(fig)
 
 
+def plot_tokens_paper(meta, w_h, dts, ref_i, focus, ref_dt, canvas, path_stem, formats):
+    """tokens_paper_<stem>.<fmt>: panels (a) and (b) of tokens_<stem>.png, for print.
+
+    (a) The light curve mapped to tokens: each event at (band, tau), the band
+    queries at (band, Dt = ref_dt), and the last-block attention from the focus
+    query. The right axis gives tau as a row of the RoPE canvas.
+    (b) The focus query's last-block attention to every key vs Dt.
+
+    ``canvas`` is ``(H, render_context_days, render_t_span)`` of the model, as
+    in ``_row_of_tau``. Events are numbered 1..n in key order in both panels.
+    """
+    H, c0, span = canvas
+    L = meta["tau"].shape[0]
+    valid_idx = np.nonzero(meta["valid"])[0]
+    n_ev = len(valid_idx)
+    keys = np.concatenate([valid_idx, np.arange(L, L + N_BANDS)])
+    ev_band = meta["band"][valid_idx]
+    ev_tau = meta["tau"][valid_idx]
+    last = w_h[ref_i, -1, L + focus]
+    q_name = BAND_NAMES[focus]
+
+    fig, (ax, axb) = plt.subplots(1, 2, figsize=pub_size((12, 5.2)) if styled()
+                                  else (12, 5.2), width_ratios=[1, 1.15])
+
+    # (a) Token positions.
+    for i in valid_idx:
+        if last[i] > 0.02:
+            ax.plot([focus, meta["band"][i]], [ref_dt, meta["tau"][i]],
+                    color=BAND_COLORS[focus], lw=rc_lw(12 * last[i]), alpha=0.6,
+                    zorder=2, solid_capstyle="round")
+    ax.scatter(ev_band, ev_tau, c=[BAND_COLORS[b] for b in ev_band],
+               s=90 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(1), zorder=3)
+    for j in range(n_ev):
+        ax.annotate(str(j + 1), (ev_band[j], ev_tau[j]), xytext=(6, 0), va="center",
+                    textcoords="offset points", fontsize=pub_fs(8, "xtick.labelsize"))
+    sizes = np.where(np.arange(N_BANDS) == focus, 300, 170) * rc_ms(1) ** 2
+    ax.scatter(np.arange(N_BANDS), np.full(N_BANDS, ref_dt), marker="*", s=sizes,
+               c=BAND_COLORS, edgecolors="k", linewidths=rc_lw(1), zorder=3)
+    ax.axhline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
+    ax.set_xticks(range(N_BANDS), BAND_NAMES, rotation=90 if styled() else 0)
+    if styled():
+        ax.tick_params(axis="x", which="minor", bottom=False, top=False)
+        ax.tick_params(axis="y", which="both", right=False)
+    # Extra room on the right for the event numbers of the y band.
+    ax.set_xlim(-0.6, N_BANDS - 0.15)
+    ax.set_ylim(-c0 - 0.15, ref_dt + 0.45)
+    ax.set_xlabel("band (RoPE column)")
+    ax.set_ylabel(pub_text("tau (d)", r"$\tau$ (d)"))
+    rows = ax.secondary_yaxis(
+        "right", functions=(lambda t: (t + c0) / span * (H - 1),
+                            lambda r: r / (H - 1) * span - c0))
+    rows.set_ylabel("canvas row")
+    ev_share = 100 * last[valid_idx].sum()
+    ax.set_title("(a) Event and query tokens")
+
+    # (b) Focus query attention vs Dt.
+    a_dt = w_h[:, -1, L + focus][:, keys]
+    im = axb.pcolormesh(np.arange(len(keys)), dts, a_dt, cmap="magma", shading="nearest")
+    axb.axvline(n_ev - 0.5, color="w", lw=rc_lw(1))
+    axb.axhline(ref_dt, color="w", ls=":", lw=rc_lw(1))
+    key_band = np.concatenate([ev_band, np.arange(N_BANDS)])
+    axb.set_xticks(range(len(keys)),
+                   [str(j + 1) for j in range(n_ev)] + [f"Q {n}" for n in BAND_NAMES],
+                   rotation=90, fontsize=0.85 * pub_fs(10, "xtick.labelsize"))
+    for tick, b in zip(axb.get_xticklabels(), key_band):
+        tick.set_color(BAND_COLORS[b])
+    if styled():
+        axb.minorticks_off()
+    axb.set_xlabel("key token (events | band queries)")
+    axb.set_ylabel(pub_text("lead time Dt (d)", r"lead time $\Delta t$ (d)"))
+    axb.set_title(f"(b) Attention from Q {q_name}")
+    fig.colorbar(im, ax=axb, pad=0.01, label="attention")
+
+    handles = [
+        Line2D([], [], ls="", marker="o", mfc="w", mec="k", ms=rc_ms(7),
+               label="detection (event token)"),
+        Line2D([], [], ls="", marker="*", mfc="w", mec="k", ms=rc_ms(11),
+               label=pub_text(f"band query at Dt = {ref_dt:g} d",
+                              rf"band query at $\Delta t$ = {ref_dt:g} d")),
+        Line2D([], [], color="0.4", ls="--", lw=rc_lw(0.8),
+               label=pub_text("last detection (tau = 0)", r"last detection ($\tau = 0$)")),
+        Line2D([], [], color=BAND_COLORS[focus], lw=rc_lw(2.5), alpha=0.6,
+               label=f"attention from Q {q_name} ({ev_share:.0f}% on events)"),
+    ]
+    if styled():
+        fig.legend(handles=handles, ncol=2, loc="outside lower center")
+    else:
+        ax.legend(handles=handles, loc="center left", fontsize=7)
+        fig.tight_layout()
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_forecast(obj, dts, mag_tok, mag_abl, truth, path, title):
     """forecast_<stem>.png: per-band forecast with / without the token path."""
     fig, axes = plt.subplots(3, 3, figsize=pub_size((13, 10)), sharex=True)
@@ -514,6 +611,7 @@ def main() -> None:
     ref_i = int(np.argmin(np.abs(dts - args.ref_dt)))
     sum_i = [int(np.argmin(np.abs(dts - d))) for d in SUMMARY_DTS]
 
+    canvas = (model.image_size[0], model.render_context_days, model._render_t_span)
     blocks = model.backbone.backbone.transformer_blocks
     rec = AttentionRecorder(blocks)
     objs, records = {}, []
@@ -556,6 +654,8 @@ def main() -> None:
         title = f"{label}: {stem}, {obj['n_window']} in-window detections"
         plot_tokens(obj, meta, w_h, dts, ref_i, focus, args.ref_dt,
                     os.path.join(outdir, f"tokens_{stem}.png"), title)
+        plot_tokens_paper(meta, w_h, dts, ref_i, focus, args.ref_dt, canvas,
+                          os.path.join(outdir, f"tokens_paper_{stem}"), args.formats)
 
         abl = forward(model, obj["x"], dts, device, ablate=True)
         mag_tok = pred * (stds + EPS) + means
