@@ -23,6 +23,10 @@ q/k projections and checked against its output once per run. It writes:
                         detections as cells of a time x band image (which the
                         code never builds; the tokens carry only its
                         positions), with the band queries at ``--ref_dt``.
+  token_input_<stem>    Paper figure: the per-slot context input table and
+                        the token table (events + band queries at
+                        ``--ref_dt``) the first ViT block receives, with each
+                        token's RoPE position.
   forecast_<stem>.png   Per-band forecast with the token path, and with its
                         readout zeroed (the bypass part of the same weights),
                         against the uniform truth.
@@ -47,6 +51,7 @@ import torch
 from matplotlib import patheffects
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 
 from yoke.datasets.kilonova_dataset import (
     EPS,
@@ -592,6 +597,113 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
     plt.close(fig)
 
 
+def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
+    """token_input_<stem>.{pdf,png}: what enters the ViT for one object.
+
+    (a) The model's per-slot context input, one row per slot: standardized
+    magnitude, anchor-relative time tau, valid flag and filter one-hot. Empty
+    slots are the zero padding. Below them, the 9 band queries, which are not
+    built from this table (a learned vector per filter plus the encoded Dt and
+    phase). (b) The token table the first transformer block receives
+    (``tokens``, [L + 9, D], captured by a hook): row i of (a) embedded by the
+    event MLP, then the queries. The right axis gives each token's RoPE
+    position (filter, time); masked slots are grayed. Rows of (a) and (b) line
+    up. Events are numbered as in tokens_paper.
+    """
+    L = meta["tau"].shape[0]
+    n_tok, dim = tokens.shape
+    if n_tok != L + N_BANDS:
+        raise ValueError(f"expected {L + N_BANDS} tokens, got {n_tok}")
+    valid, band, tau, val = meta["valid"], meta["band"], meta["tau"], meta["value"]
+    number = np.cumsum(valid)  # event number of each valid slot
+    fs = pub_fs(7, "xtick.labelsize")
+    cell_fs = 0.8 * fs  # numbers inside the table cells
+    rows = np.arange(n_tok)
+
+    fig, (ax, axb) = plt.subplots(
+        1, 2, width_ratios=[1.5, 1.4], constrained_layout=True,
+        figsize=pub_size((13, 7.6)) if styled() else (13, 7.6))
+
+    # (a) The input table: columns mag, tau, valid (wide enough for the
+    # numbers), then the filter one-hot (one unit each).
+    widths = np.array([2.4, 2.4, 1.4] + [1.0] * N_BANDS)
+    x_edge = np.concatenate([[0.0], np.cumsum(widths)])
+    x_mid = 0.5 * (x_edge[1:] + x_edge[:-1])
+    x_hot = x_edge[3]  # left edge of the one-hot
+    for i in range(L):
+        if not valid[i]:
+            ax.add_patch(Rectangle((0, i - 0.5), x_edge[-1], 1, color="0.88", lw=0))
+        cells = (f"{val[i]:+.2f}", f"{tau[i]:+.2f}", "1") if valid[i] else ("0", "0", "0")
+        for c, text in enumerate(cells):
+            ax.text(x_mid[c], i, text.replace("-", "−"), ha="center", va="center",
+                    fontsize=cell_fs, color="k" if valid[i] else "0.5")
+        if valid[i]:
+            ax.add_patch(Rectangle((x_hot + band[i] + 0.05, i - 0.45), 0.9, 0.9,
+                                   color=BAND_COLORS[band[i]], lw=0))
+    for b in range(N_BANDS):
+        i = L + b
+        ax.add_patch(Rectangle((0, i - 0.5), x_edge[-1], 1, color="0.95", lw=0))
+        ax.add_patch(Rectangle((x_hot + b + 0.05, i - 0.45), 0.9, 0.9,
+                               color=BAND_COLORS[b], lw=0, alpha=0.5))
+    ax.text(0.5 * x_hot, L + (N_BANDS - 1) / 2,
+            pub_text(f"queries: no data;\nlearned filter vector\n+ encoded Dt = {ref_dt:g} d\n"
+                     "and phase",
+                     "queries: no data;\nlearned filter vector\n"
+                     rf"+ encoded $\Delta t$ = {ref_dt:g} d" "\nand phase"),
+            ha="center", va="center", fontsize=cell_fs, style="italic", color="0.3")
+    for gx in x_edge:
+        ax.axvline(gx, color="0.8", lw=rc_lw(0.4), zorder=0)
+    for gy in np.arange(n_tok + 1) - 0.5:
+        ax.axhline(gy, color="0.8", lw=rc_lw(0.4), zorder=0)
+    ax.axvline(x_hot, color="0.4", lw=rc_lw(0.8))
+    ax.set_xlim(0, x_edge[-1])
+    ax.set_xticks(x_mid, ["mag", pub_text("tau", r"$\tau$"), "valid"]
+                  + list(BAND_NAMES), rotation=90)
+    for tick, b in zip(ax.get_xticklabels()[3:], range(N_BANDS)):
+        tick.set_color(BAND_COLORS[b])
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+    ax.set_xlabel("input per detection (12 numbers)")
+    ax.set_yticks(rows, [str(number[i]) if valid[i] else "–" for i in range(L)]
+                  + [f"Q {n}" for n in BAND_NAMES], fontsize=fs)
+    ax.set_ylabel("slot")
+    ax.set_title("(a) Detections (model input)", loc="left")
+
+    # (b) The token table entering the first ViT block.
+    lim = float(np.percentile(np.abs(tokens), 99)) or 1.0
+    im = axb.imshow(tokens, aspect="auto", cmap="RdBu_r", vmin=-lim, vmax=lim,
+                    interpolation="nearest", extent=(-0.5, dim - 0.5, n_tok - 0.5, -0.5))
+    for i in np.nonzero(~valid)[0]:
+        axb.add_patch(Rectangle((-0.5, i - 0.5), dim, 1, color="0.8", lw=0, alpha=0.9))
+    if (~valid).any():
+        first = int(np.nonzero(~valid)[0][0])
+        axb.text(dim / 2, (first + L - 1) / 2, "empty slots (masked out of attention)",
+                 ha="center", va="center", fontsize=fs, color="0.3")
+    for a in (ax, axb):
+        a.axhline(L - 0.5, color="k", lw=rc_lw(1))
+        a.set_ylim(n_tok - 0.5, -0.5)
+        if styled():
+            a.minorticks_off()
+    for a in (ax, axb):
+        a.tick_params(axis="both", which="both", length=0)
+    axb.yaxis.tick_right()
+    axb.yaxis.set_label_position("right")
+    pos = [f"{BAND_NAMES[band[i]]}, {tau[i]:+.2f} d" if valid[i] else "–"
+           for i in range(L)] + [f"{n}, {ref_dt:+.2f} d" for n in BAND_NAMES]
+    axb.set_yticks(rows, pos, fontsize=fs)
+    for tick, i in zip(axb.get_yticklabels(), rows):
+        b = band[i] if i < L else i - L
+        tick.set_color(BAND_COLORS[b] if i >= L or valid[i] else "0.5")
+    axb.set_ylabel("position (filter, time)")
+    axb.set_xlabel(f"token dimension (1 to {dim})")
+    axb.set_title(f"(b) Tokens entering the ViT ({n_tok} × {dim})", loc="left")
+    fig.colorbar(im, ax=axb, location="bottom", shrink=0.5, aspect=30,
+                 label="token value")
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_forecast(obj, dts, mag_tok, mag_abl, truth, path, title):
     """forecast_<stem>.png: per-band forecast with / without the token path."""
     fig, axes = plt.subplots(3, 3, figsize=pub_size((13, 10)), sharex=True)
@@ -730,6 +842,10 @@ def main() -> None:
     canvas = (model.image_size[0], model.render_context_days, model._render_t_span)
     blocks = model.backbone.backbone.transformer_blocks
     rec = AttentionRecorder(blocks)
+    # The token table entering the first block, [n_dt, N, D] per forward.
+    tok_in = []
+    tok_hook = blocks[0].register_forward_pre_hook(
+        lambda _m, a, _kw: tok_in.append(a[0].detach().float().cpu()), with_kwargs=True)
     objs, records = {}, []
     try:
         for stem in stems:
@@ -741,10 +857,13 @@ def main() -> None:
             meta = token_meta(model, obj["x"])
             pred = forward(model, obj["x"], dts, device)
             w_h = rec.pop().mean(axis=2)  # head mean: [n_dt, n_blocks, N, N]
+            tokens = tok_in.pop()[ref_i].numpy()  # at --ref_dt: [N, D]
+            tok_in.clear()
             records.append((meta, w_h[sum_i]))
-            objs[stem] = (obj, meta, pred, w_h)
+            objs[stem] = (obj, meta, pred, w_h, tokens)
     finally:
         rec.remove()
+        tok_hook.remove()
     if not objs:
         raise RuntimeError("No test object had a pre-cutoff detection.")
     print(f"Attention recompute check: max rel. err {rec.max_check_err:.2e}")
@@ -762,7 +881,7 @@ def main() -> None:
         plot_stems = [by_count[i] for i in np.unique(pick)]
 
     for stem in plot_stems:
-        obj, meta, pred, w_h = objs[stem]
+        obj, meta, pred, w_h, tokens = objs[stem]
         if args.focus_band is not None:
             focus = BAND_NAMES.index(args.focus_band)
         else:
@@ -786,6 +905,8 @@ def main() -> None:
                               args.horizon_days, args.cell_days,
                               os.path.join(outdir, f"lightcurve_image_{stem}"),
                               args.formats)
+        plot_token_input(meta, tokens, args.ref_dt,
+                         os.path.join(outdir, f"token_input_{stem}"), args.formats)
 
         abl = forward(model, obj["x"], dts, device, ablate=True)
         mag_tok = pred * (stds + EPS) + means
