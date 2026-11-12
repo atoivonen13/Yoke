@@ -17,6 +17,12 @@ q/k projections and checked against its output once per run. It writes:
   tokens_<stem>.png     The token set at its RoPE positions; query-to-token
                         attention per block at ``--ref_dt``; and how the focus
                         band's query attention shifts with Dt (last block).
+  tokens_paper_<stem>   Paper version of the first two panels (pdf + png).
+  lightcurve_image_<stem>
+                        Paper figure: the context light curve, and the same
+                        detections as cells of a time x band image (which the
+                        code never builds; the tokens carry only its
+                        positions), with the band queries at ``--ref_dt``.
   forecast_<stem>.png   Per-band forecast with the token path, and with its
                         readout zeroed (the bypass part of the same weights),
                         against the uniform truth.
@@ -38,6 +44,7 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib import patheffects
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 
@@ -189,7 +196,11 @@ def get_args() -> argparse.Namespace:
                         "panel (default: the band with most context events).")
     p.add_argument("--outdir", type=str, default=None)
     p.add_argument("--formats", nargs="+", default=["pdf", "png"],
-                   help="Formats of the paper figure tokens_paper_<stem>.")
+                   help="Formats of the paper figures tokens_paper_<stem> and "
+                        "lightcurve_image_<stem>.")
+    p.add_argument("--cell_days", type=float, default=0.25,
+                   help="Time cell (days) of the conceptual image in "
+                        "lightcurve_image_<stem>.")
     add_style_args(p)
     return p.parse_args()
 
@@ -476,6 +487,111 @@ def plot_tokens_paper(meta, w_h, dts, ref_i, focus, ref_dt, canvas, path_stem, f
     plt.close(fig)
 
 
+def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
+                          cell_days, path_stem, formats):
+    """lightcurve_image_<stem>.{pdf,png}: a light curve and the time x band
+    image it corresponds to.
+
+    (a) The context detections the model gets (magnitude vs anchor-relative
+    time tau), the uniform truth faintly, and the forecast time. (b) The same
+    detections as pixels of a conceptual image: one row per band, one column
+    per ``cell_days`` of time, each detection's cell colored by its
+    standardized magnitude, all other cells empty; stars mark the band queries
+    at the forecast time. The code never builds this image: the tokens only
+    carry these (band, time) positions into attention via RoPE. The top axis
+    gives the canvas row of each time (time is the row axis of the RoPE
+    canvas, drawn horizontally here). Events in (b) are numbered as in
+    tokens_paper.
+    """
+    H, c0, span = canvas
+    valid_idx = np.nonzero(meta["valid"])[0]
+    ev_band = meta["band"][valid_idx]
+    ev_tau = meta["tau"][valid_idx]
+    ev_val = meta["value"][valid_idx]
+    ev_mag = ev_val * (stds[ev_band] + EPS) + means[ev_band]
+    t_hi = min(horizon, span - c0)
+
+    fig, (ax, axb) = plt.subplots(
+        2, 1, sharex=True, height_ratios=[1.4, 1], constrained_layout=True,
+        figsize=pub_size((7, 6.2)) if styled() else (7, 6.2))
+
+    # (a) The light curve.
+    ax.axvspan(0.0, t_hi, color="0.93", lw=0, zorder=0)
+    ax.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
+    ax.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
+    if truth is not None:
+        for b in range(N_BANDS):
+            m = truth[2] == b
+            if m.any():
+                o = np.argsort(truth[0][m])
+                ax.plot(truth[0][m][o], truth[1][m][o], color=BAND_COLORS[b],
+                        lw=rc_lw(0.8), alpha=0.45, zorder=1)
+    ax.scatter(ev_tau, ev_mag, c=[BAND_COLORS[b] for b in ev_band],
+               s=60 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(1), zorder=3)
+    ax.invert_yaxis()
+    ax.set_ylabel("magnitude")
+    ax.set_title("(a) Light curve", loc="left")
+    seen = sorted(set(ev_band.tolist()))
+    handles = [Line2D([], [], ls="", marker="o", mfc=BAND_COLORS[b], mec="k",
+                      ms=rc_ms(6), label=BAND_NAMES[b]) for b in seen]
+    if truth is not None:
+        handles.append(Line2D([], [], color="0.5", lw=rc_lw(0.8), alpha=0.6,
+                              label="true light curve"))
+    handles.append(Line2D([], [], color="0.4", ls=":", lw=rc_lw(0.8),
+                          label=pub_text(f"forecast time Dt = {ref_dt:g} d",
+                                         rf"forecast time $\Delta t$ = {ref_dt:g} d")))
+    ax.legend(handles=handles, loc="lower left", ncol=2,
+              fontsize=pub_fs(7, "legend.fontsize"))
+    ax.text(0.5 * t_hi, 0.96, "forecast window", transform=ax.get_xaxis_transform(),
+            ha="center", va="top", color="0.4", fontsize=pub_fs(8, "xtick.labelsize"))
+
+    # (b) The conceptual image: rows = band, columns = time cells.
+    n_cells = int(round(span / cell_days))
+    edges = -c0 + np.arange(n_cells + 1) * span / n_cells
+    img = np.full((N_BANDS, n_cells), np.nan)
+    cols = np.clip(((ev_tau + c0) / span * n_cells).astype(int), 0, n_cells - 1)
+    img[ev_band, cols] = ev_val
+    axb.set_facecolor("0.96")
+    lim = max(np.nanmax(np.abs(img)), 1e-3) if np.isfinite(img).any() else 1.0
+    im = axb.pcolormesh(edges, np.arange(N_BANDS + 1) - 0.5, img, cmap="RdBu_r",
+                        vmin=-lim, vmax=lim, shading="flat")
+    for gy in np.arange(N_BANDS + 1) - 0.5:
+        axb.axhline(gy, color="0.8", lw=rc_lw(0.5), zorder=1)
+    axb.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=2)
+    axb.scatter(np.full(N_BANDS, ref_dt), np.arange(N_BANDS), marker="*",
+                s=110 * rc_ms(1) ** 2, c=BAND_COLORS, edgecolors="k",
+                linewidths=rc_lw(0.8), zorder=3)
+    # White halo: the numbers stay legible on dark cells.
+    halo = [patheffects.withStroke(linewidth=rc_lw(2), foreground="w")]
+    for j in range(len(valid_idx)):
+        axb.annotate(str(j + 1), (ev_tau[j], ev_band[j]), xytext=(4, 0), va="center",
+                     textcoords="offset points", fontsize=pub_fs(7, "xtick.labelsize"),
+                     path_effects=halo, zorder=4)
+    axb.set_ylim(N_BANDS - 0.5, -0.5)
+    axb.set_yticks(range(N_BANDS), BAND_NAMES)
+    for tick, b in zip(axb.get_yticklabels(), range(N_BANDS)):
+        tick.set_color(BAND_COLORS[b])
+    if styled():
+        axb.tick_params(axis="y", which="minor", left=False, right=False)
+    axb.set_xlim(-c0, t_hi)
+    axb.set_xlabel(pub_text("time from last detection tau (d)",
+                            r"time from last detection $\tau$ (d)"))
+    axb.set_ylabel("band")
+    axb.set_title(pub_text(f"(b) As an image (cells of {cell_days:g} d; "
+                           f"stars = band queries at Dt)",
+                           rf"(b) As an image (cells of {cell_days:g} d; "
+                           r"stars = band queries at $\Delta t$)"), loc="left")
+    top = axb.secondary_xaxis("top", functions=(lambda t: (t + c0) / span * (H - 1),
+                                                lambda r: r / (H - 1) * span - c0))
+    top.set_xlabel("canvas row", fontsize=pub_fs(8, "xtick.labelsize"))
+    top.tick_params(labelsize=pub_fs(7, "xtick.labelsize"))
+    fig.colorbar(im, ax=axb, location="bottom", shrink=0.5, aspect=30,
+                 label="standardized magnitude (+ = fainter)")
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_forecast(obj, dts, mag_tok, mag_abl, truth, path, title):
     """forecast_<stem>.png: per-band forecast with / without the token path."""
     fig, axes = plt.subplots(3, 3, figsize=pub_size((13, 10)), sharex=True)
@@ -657,15 +773,23 @@ def main() -> None:
         plot_tokens_paper(meta, w_h, dts, ref_i, focus, args.ref_dt, canvas,
                           os.path.join(outdir, f"tokens_paper_{stem}"), args.formats)
 
-        abl = forward(model, obj["x"], dts, device, ablate=True)
-        mag_tok = pred * (stds + EPS) + means
-        mag_abl = abl * (stds + EPS) + means
-        truth = None
+        truth = lc_truth = None
         if stem in uni_map:
             u_t, u_v, u_b, _ul, _z = read_merged_stream(uni_map[stem], False)
             lead = u_t - obj["t_anchor"]
-            m = (lead > 0) & (lead <= args.horizon_days) & np.isfinite(u_v)
+            ok = (lead <= args.horizon_days) & np.isfinite(u_v)
+            m = ok & (lead > 0)
             truth = (lead[m], u_v[m], u_b[m])
+            m = ok & (lead >= -canvas[1])
+            lc_truth = (lead[m], u_v[m], u_b[m])
+        plot_lightcurve_image(meta, means, stds, lc_truth, args.ref_dt, canvas,
+                              args.horizon_days, args.cell_days,
+                              os.path.join(outdir, f"lightcurve_image_{stem}"),
+                              args.formats)
+
+        abl = forward(model, obj["x"], dts, device, ablate=True)
+        mag_tok = pred * (stds + EPS) + means
+        mag_abl = abl * (stds + EPS) + means
         plot_forecast(obj, dts, mag_tok, mag_abl, truth,
                       os.path.join(outdir, f"forecast_{stem}.png"), title)
         print(f"  wrote tokens_{stem}.png, forecast_{stem}.png "
