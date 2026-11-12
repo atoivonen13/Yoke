@@ -15,6 +15,10 @@ Figures (PDF + PNG) in ``--outdir``:
                        config: seed center +- 1 sigma;
      ``rmse_bias_vs_config``  (a) uniform-truth RMSE, (b) bias vs config, the
                        same markers, config axis shared;
+     ``bias_cutoff``   panel (b) once per ``--bias_cutoffs`` (default 10 9 8 d),
+                       on the points with ``--cutoff_axis`` (default phase) <=
+                       the cutoff, shared y axis: is the bias from the last
+                       day or two? (bias inside / beyond each cutoff printed);
   1. ``overview``      (a) uniform-truth RMSE, (b) dense-truth RMSE, (c) bias,
                        all bands pooled, one row per config;
   2. ``by_band``       (a) uniform RMSE, (b) bias, (c) calibrated 90% coverage
@@ -90,6 +94,7 @@ from plot_run_report import (  # noqa: E402
     save,
     series_style,
     set_style,
+    summarize,
     top_legend,
     write_tex,
 )
@@ -503,12 +508,14 @@ def config_figure(n: int, n_rows: int, styled: bool) -> tuple:
     return fig, axes
 
 
-def draw_config_metric(ax: plt.Axes, cfgs: list, metric: str, look: dict) -> None:
+def draw_config_metric(ax: plt.Axes, cfgs: list, metric: str, look: dict,
+                       signed: bool | None = None, ylabel: str | None = None) -> None:
     """One metric (all bands pooled) per config: a filled marker at the seed
     center with a +-1 sigma (across seeds) error bar, the value written above.
-    Signed metrics get a zero line, kept inside the y range."""
+    Signed metrics get a zero line, kept inside the y range. ``signed`` /
+    ``ylabel`` default to the metric's entry in SIGNED / PUB_YLABELS."""
     x = np.arange(len(cfgs), dtype=float)
-    signed = metric in SIGNED
+    signed = metric in SIGNED if signed is None else signed
     if signed:
         ax.axhline(0.0, color=look["ref"], lw=0.6, zorder=1)
     lows, highs = ([0.0], [0.0]) if signed else ([], [])
@@ -536,7 +543,7 @@ def draw_config_metric(ax: plt.Axes, cfgs: list, metric: str, look: dict) -> Non
     ax.set_ylim(lo - 0.10 * span, hi + 0.22 * span)  # headroom for the labels
     ax.set_xticks(x, [tick_label(c) for c in cfgs])
     ax.set_xlim(-0.55, len(cfgs) - 0.45)
-    ax.set_ylabel(PUB_YLABELS[metric])
+    ax.set_ylabel(PUB_YLABELS[metric] if ylabel is None else ylabel)
 
 
 def seed_caption(cfgs: list, how: str) -> str:
@@ -589,6 +596,74 @@ def fig_rmse_bias_vs_config(cfgs: list, how: str, styled: bool = False) -> tuple
         f"all bands pooled, on {n_objects(cfgs)} common test objects, for each "
         "model configuration: (a) RMSE; (b) mean residual (predicted minus true; "
         f"positive = forecast too faint). {seed_caption(cfgs, how)}")
+    return fig, caption
+
+
+def add_cutoff_bias(cfgs: list, boot: ObjectBootstrap, how: str, cutoffs: list,
+                    axis: str) -> list:
+    """Uniform-truth bias of every run on the points with ``axis`` (``phase`` or
+    ``lead``, days) <= each cutoff, stored like the other metrics under
+    ``bias_le<cut>``. Prints each config's bias inside and beyond the cutoff,
+    so the share of the last days is read off directly. Returns the keys."""
+    keys = []
+    for cut in cutoffs:
+        key = f"bias_le{cut:g}"
+        keys.append(key)
+        for c in cfgs:
+            inside, beyond = [], []
+            for r in c["runs"]:
+                u = r["uniform"]
+                keep = u[axis] <= cut
+                inside.append(summarize(boot, u[keep], "bias")["point"])
+                beyond.append(summarize(boot, u[~keep], "bias")["point"]
+                              if (~keep).any() else np.full(len(GROUP_NAMES), np.nan))
+            c["stack"][key] = np.stack(inside)
+            c["center"][key] = center_of(c["stack"][key], how)
+            c["sd"][key] = sigma_of(c["stack"][key])
+            c.setdefault("beyond_cut", {})[key] = center_of(np.stack(beyond), how)
+    print(f"\nBias (mag, + = too faint; {how} over seeds, all bands) on points with "
+          f"{axis} <= cutoff | beyond it:")
+    print(f"  {'config':<36}" + "".join(
+        "<= {:g} d".format(c).rjust(11) + "> {:g} d".format(c).rjust(9) for c in cutoffs))
+    for c in cfgs:
+        print(f"  {(str(c['config']) + ' ' + c['label'])[:35]:<36}"
+              + "".join(f"{fmt(c['center'][k][-1], sign=True):>11}"
+                        f"{fmt(c['beyond_cut'][k][-1], sign=True):>9}" for k in keys))
+    return keys
+
+
+def fig_bias_cutoff(cfgs: list, how: str, cutoffs: list, keys: list, axis: str,
+                    styled: bool = False) -> tuple:
+    """Panel (b) of ``rmse_bias_vs_config`` (pooled bias per config) once per
+    cutoff, on the points with ``axis`` <= cutoff, the y range shared so the
+    panels compare directly. Returns (figure, caption)."""
+    fig, axes = config_figure(len(cfgs), len(keys), styled)
+    look = config_axes_look(styled)
+    t_max = max(r["uniform"][axis].max() for c in cfgs for r in c["runs"])
+    sym = r"\phi" if axis == "phase" else r"\Delta t"
+    for ax, key, cut, letter in zip(axes, keys, cutoffs, "abcdefgh"):
+        draw_config_metric(ax, cfgs, key, look, signed=True,
+                           ylabel=PUB_YLABELS["uniform_bias"])
+        window = "full window" if cut >= t_max else f"${sym} \\leq {cut:g}$ d"
+        # As a title: inside the axes it would collide with the value labels.
+        ax.set_title(f"({letter}) {window}", loc="left",
+                     fontsize=look["note_size"], color=look["note_color"])
+    lo = min(ax.get_ylim()[0] for ax in axes)
+    hi = max(ax.get_ylim()[1] for ax in axes)
+    for ax in axes:
+        ax.set_ylim(lo, hi)
+    for ax in axes[:-1]:
+        ax.tick_params(axis="x", labelbottom=False)
+    what = "phase" if axis == "phase" else "lead time"
+    parts = "; ".join(f"({lt}) " + ("all points" if cut >= t_max else
+                                    f"points at {what} ≤ {cut:g} d")
+                      for lt, cut in zip("abcdefgh", cutoffs))
+    caption = (
+        "Mean residual (predicted minus true; positive = forecast too faint) of the "
+        "late-time forecast against the uniformly sampled true light curve, all "
+        f"bands pooled, on {n_objects(cfgs)} common test objects, for each model "
+        f"configuration, with the evaluation window cut at a later {what}: {parts}. "
+        f"Shared y axis. {seed_caption(cfgs, how)}")
     return fig, caption
 
 
@@ -794,6 +869,12 @@ def main() -> None:
                    "residual from its test forecast (see the docstring).")
     p.add_argument("--metric", choices=tuple(METRIC_NAMES), default="uniform_rmse",
                    help="Metric of the rmse_vs_config figure.")
+    p.add_argument("--bias_cutoffs", type=float, nargs="+", default=[10.0, 9.0, 8.0],
+                   help="Cutoffs (days) of the bias_cutoff figure, one panel each; "
+                   "a cutoff at or past the window end is the full window.")
+    p.add_argument("--cutoff_axis", choices=("phase", "lead"), default="phase",
+                   help="Time the bias_cutoff points are cut on: phase (the "
+                   "2-10 d evaluation window) or lead time from the anchor.")
     p.add_argument("--config_run", choices=("fallback", "always", "never"),
                    default="fallback",
                    help="Original study <config> itself: use it when no replica "
@@ -837,6 +918,8 @@ def main() -> None:
     for r in runs:
         boot.attach(r)
     add_stats(cfgs, boot, args.center)
+    cut_keys = add_cutoff_bias(cfgs, boot, args.center, args.bias_cutoffs,
+                               args.cutoff_axis)
     ref_id = args.configs[0] if args.reference is None else args.reference
     ref = next((c for c in cfgs if c["config"] == ref_id), None)
     if ref is None and ref_id != -1:
@@ -860,6 +943,9 @@ def main() -> None:
                                                   args.metric, styled=styled)),
             ("rmse_bias_vs_config", fig_rmse_bias_vs_config(
                 cfgs, args.center, styled=styled)),
+            ("bias_cutoff", fig_bias_cutoff(cfgs, args.center, args.bias_cutoffs,
+                                            cut_keys, args.cutoff_axis,
+                                            styled=styled)),
             ("overview", fig_overview(cfgs, ref, args.center, styled=styled)),
             ("by_band", fig_by_band(cfgs, args.center, styled=styled)),
             ("rmse_vs_lead", fig_vs_lead(cfgs, lead_edges(runs), boot,
