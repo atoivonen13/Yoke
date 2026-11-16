@@ -23,6 +23,9 @@ q/k projections and checked against its output once per run. It writes:
                         detections as cells of a time x band image (which the
                         code never builds; the tokens carry only its
                         positions), with the band queries at ``--ref_dt``.
+  token_plane_<stem>    Paper figure: schematic of the token list (events,
+                        masked slots, band queries) with arrows to each
+                        token's (filter, time) position on the plane.
   token_input_<stem>    Paper figure: the per-slot context input table and
                         the token table (events + band queries at
                         ``--ref_dt``) the first ViT block receives, with each
@@ -51,7 +54,7 @@ import torch
 from matplotlib import patheffects
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle
+from matplotlib.patches import ConnectionPatch, FancyBboxPatch, Rectangle
 
 from yoke.datasets.kilonova_dataset import (
     EPS,
@@ -201,8 +204,8 @@ def get_args() -> argparse.Namespace:
                         "panel (default: the band with most context events).")
     p.add_argument("--outdir", type=str, default=None)
     p.add_argument("--formats", nargs="+", default=["pdf", "png"],
-                   help="Formats of the paper figures tokens_paper_<stem> and "
-                        "lightcurve_image_<stem>.")
+                   help="Formats of the paper figures (tokens_paper, "
+                        "lightcurve_image, token_plane, token_input).")
     p.add_argument("--cell_days", type=float, default=0.25,
                    help="Time cell (days) of the conceptual image in "
                         "lightcurve_image_<stem>.")
@@ -597,6 +600,148 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
     plt.close(fig)
 
 
+def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
+    """token_plane_<stem>.{pdf,png}: schematic of the tokens placed on the
+    time x filter plane.
+
+    Left: the token list, one chip per detection (number, filter, tau,
+    standardized magnitude), the empty slots as one masked chip, and the nine
+    band queries. Right: the plane the RoPE positions span, filter across and
+    anchor-relative time down (the row direction of the RoPE canvas), with the
+    context and forecast windows shaded. Arrows take each token to its
+    position; the queries sit at ``ref_dt``, one of the lead times a forward
+    pass can ask for. Events are numbered as in tokens_paper.
+    """
+    _H, c0, span = canvas
+    t_hi = min(horizon, span - c0)
+    valid_idx = np.nonzero(meta["valid"])[0]
+    ev_band = meta["band"][valid_idx]
+    ev_tau = meta["tau"][valid_idx]
+    ev_val = meta["value"][valid_idx]
+    n_ev, n_empty = len(valid_idx), int((~meta["valid"]).sum())
+    fs = pub_fs(7, "xtick.labelsize")
+    dt_txt = pub_text("Dt", r"$\Delta t$")
+    tau_txt = pub_text("tau", r"$\tau$")
+
+    fig, (axl, ax) = plt.subplots(
+        1, 2, width_ratios=[1.15, 1.4], constrained_layout=True,
+        figsize=pub_size((10, 6.8)) if styled() else (10, 6.8))
+
+    # Left: the token list, top to bottom (events, empty slots, queries).
+    rows, y = [], 0.0
+    head_ev = y
+    y += 1.0
+    for j in range(n_ev):
+        rows.append(("ev", j, y))
+        y += 1.0
+    if n_empty:
+        rows.append(("empty", None, y))
+        y += 1.0
+    y += 0.4
+    head_q = y
+    y += 1.0
+    for b in range(N_BANDS):
+        rows.append(("q", b, y))
+        y += 1.0
+    axl.set_xlim(0, 1)
+    axl.set_ylim(y - 0.3, -0.7)
+    axl.axis("off")
+    axl.text(0.02, head_ev, f"event tokens ({n_ev} detections)", fontsize=fs,
+             weight="bold", va="center")
+    axl.text(0.02, head_q, f"question tokens (one per filter, {dt_txt} = {ref_dt:g} d)",
+             fontsize=fs, weight="bold", va="center")
+    x_chip, x_out = 0.92, 0.97  # chip right edge; marker where arrows start
+    starts = []
+    for kind, k, yr in rows:
+        if kind == "empty":
+            axl.add_patch(FancyBboxPatch((0.04, yr - 0.36), x_chip - 0.04, 0.72,
+                                         boxstyle="round,pad=0,rounding_size=0.15",
+                                         fc="0.93", ec="0.6", ls="--", lw=rc_lw(0.6)))
+            axl.text(0.08, yr, f"{n_empty} empty slots (masked; not placed)",
+                     fontsize=fs, va="center", color="0.45", style="italic")
+            continue
+        b = ev_band[k] if kind == "ev" else k
+        axl.add_patch(FancyBboxPatch((0.04, yr - 0.36), x_chip - 0.04, 0.72,
+                                     boxstyle="round,pad=0,rounding_size=0.15",
+                                     fc=BAND_COLORS[b], alpha=0.18, ec="none"))
+        axl.add_patch(FancyBboxPatch((0.04, yr - 0.36), x_chip - 0.04, 0.72,
+                                     boxstyle="round,pad=0,rounding_size=0.15",
+                                     fc="none", ec=BAND_COLORS[b], lw=rc_lw(0.8)))
+        if kind == "ev":
+            text = (f"{k + 1}  {BAND_NAMES[b]}   {tau_txt} = {ev_tau[k]:+.2f} d   "
+                    f"m = {ev_val[k]:+.2f}").replace("-", "−")
+            axl.plot(x_out, yr, "o", color=BAND_COLORS[b], mec="k", mew=rc_lw(0.6),
+                     ms=rc_ms(5))
+            starts.append((yr, b, ev_tau[k]))
+        else:
+            text = f"Q {BAND_NAMES[b]}"
+            axl.plot(x_out, yr, "*", color=BAND_COLORS[b], mec="k", mew=rc_lw(0.6),
+                     ms=rc_ms(8))
+            starts.append((yr, b, ref_dt))
+        axl.text(0.08, yr, text, fontsize=fs, va="center")
+
+    # Right: the time x filter plane.
+    ax.axhspan(-c0, 0.0, color="#dbe8f5", lw=0, zorder=0)
+    ax.axhspan(0.0, t_hi, color="0.95", lw=0, zorder=0)
+    for gx in np.arange(N_BANDS + 1) - 0.5:
+        ax.axvline(gx, color="0.82", lw=rc_lw(0.5), zorder=1)
+    ax.axhline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
+    ax.axhline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
+    ax.scatter(ev_band, ev_tau, c=[BAND_COLORS[b] for b in ev_band],
+               s=55 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(0.8), zorder=3)
+    halo = [patheffects.withStroke(linewidth=rc_lw(2), foreground="w")]
+    for j in range(n_ev):
+        ax.annotate(str(j + 1), (ev_band[j], ev_tau[j]), xytext=(5, 0), va="center",
+                    textcoords="offset points", fontsize=fs, path_effects=halo, zorder=4)
+    ax.scatter(np.arange(N_BANDS), np.full(N_BANDS, ref_dt), marker="*",
+               s=150 * rc_ms(1) ** 2, c=BAND_COLORS, edgecolors="k",
+               linewidths=rc_lw(0.8), zorder=3)
+    note = dict(transform=ax.get_yaxis_transform(), fontsize=fs, color="0.35",
+                ha="right", va="center")
+    ax.text(0.97, 0.5 * (ref_dt + t_hi) + 1.0,
+            pub_text("forecast window:\nqueries can be placed\nat any Dt here\n"
+                     "(one pass per Dt)",
+                     "forecast window:\nqueries can be placed\n"
+                     r"at any $\Delta t$ here" "\n" r"(one pass per $\Delta t$)"), **note)
+    ax.set_xlim(-0.5, N_BANDS - 0.5)
+    ax.set_ylim(t_hi, -c0)
+    ax.set_xticks(range(N_BANDS), BAND_NAMES)
+    for tick, b in zip(ax.get_xticklabels(), range(N_BANDS)):
+        tick.set_color(BAND_COLORS[b])
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+    # Time axis on the right: the arrows come in from the left.
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position("right")
+    if styled():
+        ax.tick_params(axis="x", which="minor", top=False, bottom=False)
+        ax.tick_params(axis="y", which="both", left=False)
+    ax.set_xlabel("filter")
+    ax.set_ylabel(pub_text("time from last detection tau (d)",
+                           r"time from last detection $\tau$ (d)"))
+    fig.legend(handles=[
+        Rectangle((0, 0), 1, 1, color="#dbe8f5",
+                  label=f"context ({c0:g} d before the last detection)"),
+        Rectangle((0, 0), 1, 1, color="0.95", label="forecast window"),
+        Line2D([], [], color="0.4", ls="--", lw=rc_lw(0.8),
+               label=pub_text("last detection (tau = 0)", r"last detection ($\tau = 0$)")),
+        Line2D([], [], color="0.4", ls=":", lw=rc_lw(0.8),
+               label=pub_text(f"requested lead time Dt = {ref_dt:g} d",
+                              rf"requested lead time $\Delta t$ = {ref_dt:g} d")),
+    ], loc="outside lower right", ncol=2, fontsize=fs, frameon=False)
+
+    # Arrows: each token to its position (drawn once the layout is final).
+    fig.canvas.draw()
+    for yr, b, t in starts:
+        fig.add_artist(ConnectionPatch(
+            (x_out, yr), (b, t), coordsA=axl.transData, coordsB=ax.transData,
+            arrowstyle="-|>", mutation_scale=6, color=BAND_COLORS[b], alpha=0.55,
+            lw=rc_lw(0.6), shrinkA=4, shrinkB=5, zorder=2))
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
     """token_input_<stem>.{pdf,png}: what enters the ViT for one object.
 
@@ -646,10 +791,10 @@ def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
         ax.add_patch(Rectangle((x_hot + b + 0.05, i - 0.45), 0.9, 0.9,
                                color=BAND_COLORS[b], lw=0, alpha=0.5))
     ax.text(0.5 * x_hot, L + (N_BANDS - 1) / 2,
-            pub_text(f"queries: no data;\nlearned filter vector\n+ encoded Dt = {ref_dt:g} d\n"
-                     "and phase",
-                     "queries: no data;\nlearned filter vector\n"
-                     rf"+ encoded $\Delta t$ = {ref_dt:g} d" "\nand phase"),
+            pub_text(f"filter vector\n+ encoded Dt,\nphase\n(Dt = {ref_dt:g} d\nshown)",
+                     "filter vector\n"
+                     r"+ encoded $\Delta t$," "\nphase\n"
+                     rf"($\Delta t$ = {ref_dt:g} d" "\nshown)"),
             ha="center", va="center", fontsize=cell_fs, style="italic", color="0.3")
     for gx in x_edge:
         ax.axvline(gx, color="0.8", lw=rc_lw(0.4), zorder=0)
@@ -905,6 +1050,8 @@ def main() -> None:
                               args.horizon_days, args.cell_days,
                               os.path.join(outdir, f"lightcurve_image_{stem}"),
                               args.formats)
+        plot_token_plane(meta, args.ref_dt, canvas, args.horizon_days,
+                         os.path.join(outdir, f"token_plane_{stem}"), args.formats)
         plot_token_input(meta, tokens, args.ref_dt,
                          os.path.join(outdir, f"token_input_{stem}"), args.formats)
 
