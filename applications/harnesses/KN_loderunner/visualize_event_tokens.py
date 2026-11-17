@@ -217,6 +217,14 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--cell_days", type=float, default=0.25,
                    help="Time cell (days) of the conceptual image in "
                         "lightcurve_image_<stem>.")
+    p.add_argument("--timeline_cell_days", type=float, default=0.25,
+                   help="Display time cell (days) of the token pixels in "
+                        "token_timeline_<stem>. The model itself does not bin: "
+                        "tau and the RoPE time row are continuous (one image row "
+                        "is span/(H-1) ~ 0.011 d, one ViT patch row ~ 0.107 d).")
+    p.add_argument("--mag_limit", type=float, default=26.0,
+                   help="Faint limit (mag) of the light-curve panel of "
+                        "token_timeline_<stem>; truth fainter than this is clipped.")
     add_style_args(p)
     return p.parse_args()
 
@@ -751,16 +759,20 @@ def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
 
 
 def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canvas,
-                        horizon, path_stem, formats):
+                        horizon, path_stem, formats, cell_days=0.25, mag_limit=26.0):
     """token_timeline_<stem>.{pdf,png}: the light curve, its tokens and one
     query's attention, on a shared time axis (anchor-relative). No panel
     titles or letters; those go in the caption.
 
-    Top: the context detections (magnitude vs tau), the uniform truth faintly.
-    Middle: token x time pixels. An event fills the cell at its tau, colored
-    by its magnitude; a band query (no magnitude, gray) fills every forecast
-    cell pale, since its position is the requested Dt (one forward pass per
-    Dt), with the ``ref_dt`` cell dark.
+    Top: the context detections (magnitude vs tau), the uniform truth faintly
+    (ZTF squares / dashed, Rubin circles / solid; the two share a hue per
+    filter), clipped at ``mag_limit``.
+    Middle: token x time pixels of ``cell_days`` (display only; the model's
+    tau and RoPE row are continuous). An event fills the cell at its tau,
+    colored by the standardized magnitude the token actually carries; a band
+    query (no magnitude, gray) fills every forecast cell pale, since its
+    position is the requested Dt (one forward pass per Dt), with the
+    ``ref_dt`` cell dark.
     Bottom: the focus query's last-block, head-mean attention to every token
     vs Dt (tokens_paper (b) transposed). Middle and bottom rows are the same
     tokens, events numbered as in tokens_paper; empty slots are left out.
@@ -773,12 +785,16 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     keys = np.concatenate([valid_idx, np.arange(L, L + N_BANDS)])
     ev_band = meta["band"][valid_idx]
     ev_tau = meta["tau"][valid_idx]
-    ev_mag = meta["value"][valid_idx] * (stds[ev_band] + EPS) + means[ev_band]
+    ev_val = meta["value"][valid_idx]  # standardized: what the token carries
+    ev_mag = ev_val * (stds[ev_band] + EPS) + means[ev_band]
     key_band = np.concatenate([ev_band, np.arange(N_BANDS)])
-    key_lab = [str(j + 1) for j in range(n_ev)] + [f"Q {n}" for n in BAND_NAMES]
+    # Filter names on every row: ZTF and Rubin share a hue per filter.
+    key_lab = ([f"{j + 1} {BAND_NAMES[b]}" for j, b in enumerate(ev_band)]
+               + [f"Q {n}" for n in BAND_NAMES])
     rows = np.arange(len(keys))
     fs = pub_fs(7, "xtick.labelsize")
     q_name = BAND_NAMES[focus]
+    ztf = np.array([n.startswith("ztf") for n in BAND_NAMES])
 
     fig, (ax, axt, axc) = plt.subplots(
         3, 1, sharex=True, height_ratios=[1.15, 1, 1], constrained_layout=True,
@@ -800,55 +816,63 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
 
     # Top: the light curve.
     ax.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
+    shown = set(ev_band.tolist())
+    bright = ev_mag.min() if n_ev else 18.0
     if truth is not None:
         for b in range(N_BANDS):
-            m = truth[2] == b
+            m = (truth[2] == b) & (truth[0] >= -c0) & (truth[0] <= t_hi)
             if m.any():
                 o = np.argsort(truth[0][m])
                 ax.plot(truth[0][m][o], truth[1][m][o], color=BAND_COLORS[b],
-                        lw=rc_lw(0.8), alpha=0.45, zorder=1)
-    ax.scatter(ev_tau, ev_mag, c=[BAND_COLORS[b] for b in ev_band],
-               s=50 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(0.8), zorder=3)
-    ax.invert_yaxis()
+                        ls="--" if ztf[b] else "-", lw=rc_lw(0.8), alpha=0.6, zorder=1)
+                shown.add(b)
+                bright = min(bright, truth[1][m].min())
+    for is_ztf, mk in ((True, "s"), (False, "o")):
+        m = ztf[ev_band] == is_ztf
+        if m.any():
+            ax.scatter(ev_tau[m], ev_mag[m], c=[BAND_COLORS[b] for b in ev_band[m]],
+                       marker=mk, s=(40 if is_ztf else 50) * rc_ms(1) ** 2,
+                       edgecolors="k", linewidths=rc_lw(0.8), zorder=3)
+    faint = max(mag_limit, ev_mag.max() + 0.5) if n_ev else mag_limit
+    ax.set_ylim(faint, bright - 0.4)
     ax.set_ylabel("magnitude")
-    note = dict(transform=ax.get_xaxis_transform(), ha="center", va="top", color="0.35",
-                fontsize=fs)
-    ax.text(-c0 / 2, 0.96, "context", **note)
-    ax.text(0.5 * (ref_dt + t_hi), 0.96, "forecast window", **note)
-    seen = sorted(set(ev_band.tolist()))
-    handles = [Line2D([], [], ls="", marker="o", mfc=BAND_COLORS[b], mec="k",
-                      ms=rc_ms(5), label=BAND_NAMES[b]) for b in seen]
-    if truth is not None:
-        handles.append(Line2D([], [], color="0.5", lw=rc_lw(0.8), alpha=0.6,
-                              label="true light curve"))
-    ax.legend(handles=handles, loc="lower left", ncol=2,
-              fontsize=pub_fs(7, "legend.fontsize"))
+    note = dict(transform=ax.get_xaxis_transform(), ha="center", va="bottom",
+                color="0.35", fontsize=fs)
+    ax.text(-c0 / 2, 1.01, "context", **note)
+    ax.text(0.5 * t_hi, 1.01, "forecast window", **note)
+    handles = [Line2D([], [], color=BAND_COLORS[b], ls="--" if ztf[b] else "-",
+                      lw=rc_lw(0.8), marker="s" if ztf[b] else "o", mfc=BAND_COLORS[b],
+                      mec="k", ms=rc_ms(4.5), label=BAND_NAMES[b])
+               for b in sorted(shown)]
+    ax.legend(handles=handles, loc="lower left", ncol=3, handlelength=1.8,
+              fontsize=pub_fs(7, "legend.fontsize"), framealpha=1)
 
-    # Middle: token x time pixels (cell = 0.25 d, edges on tau = 0).
-    cell = 0.25
+    # Middle: token x time pixels (display cells, edges on tau = 0).
+    cell = cell_days
     edges = np.arange(-c0, t_hi + cell / 2, cell)
     mids = 0.5 * (edges[:-1] + edges[1:])
     shade = np.asarray(to_rgb(CONTEXT_SHADE))
     img = np.where((mids < 0)[None, :, None], shade, np.ones(3) * 0.985)
     img = np.repeat(img, len(keys), axis=0)
     # Events (tau <= 0) take the cell ending at tau, queries (Dt > 0) the one
-    # starting at Dt, so neither crosses tau = 0. Events are colored by their
-    # magnitude (the value the token carries); queries carry none, so gray.
+    # starting at Dt, so neither crosses tau = 0. Events are colored by the
+    # standardized magnitude the token carries; queries carry none, so gray.
     col = lambda t, side: int(np.clip(  # noqa: E731
         np.searchsorted(edges, t, side=side) - 1, 0, len(mids) - 1))
-    half = max(0.5 * np.ptp(ev_mag), 0.5) if n_ev else 0.5
-    mid_mag = 0.5 * (ev_mag.max() + ev_mag.min()) if n_ev else 20.0
-    mag_sm = plt.cm.ScalarMappable(plt.Normalize(mid_mag - half, mid_mag + half),
+    half = max(0.5 * np.ptp(ev_val), 0.25) if n_ev else 0.5
+    mid_val = 0.5 * (ev_val.max() + ev_val.min()) if n_ev else 0.0
+    val_sm = plt.cm.ScalarMappable(plt.Normalize(mid_val - half, mid_val + half),
                                    "viridis_r")
-    for r, (t, m) in enumerate(zip(ev_tau, ev_mag)):
-        img[r, col(t, "left")] = mag_sm.to_rgba(m)[:3]
+    for r, (t, v) in enumerate(zip(ev_tau, ev_val)):
+        img[r, col(t, "left")] = val_sm.to_rgba(v)[:3]
     img[n_ev:, mids > 0] = 0.84
     img[n_ev:, col(ref_dt, "right")] = 0.35
     axt.imshow(img, extent=(edges[0], edges[-1], len(keys) - 0.5, -0.5), aspect="auto",
                interpolation="nearest", zorder=1)
     grid = dict(color="w", lw=rc_lw(0.4), zorder=2)
-    for e in edges[1:-1]:
-        axt.axvline(e, **grid)
+    if len(mids) <= 120:  # finer cells: a cell grid would be solid white
+        for e in edges[1:-1]:
+            axt.axvline(e, **grid)
     for r in rows[1:]:
         axt.axhline(r - 0.5, **grid)
     axt.axhline(n_ev - 0.5, color="0.25", lw=rc_lw(0.8), zorder=3)
@@ -860,7 +884,9 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     ], loc="upper right", fontsize=pub_fs(7, "legend.fontsize"), handlelength=1.0,
         handleheight=1.0, framealpha=1)
     mcax = axt.inset_axes([1.015, 0.0, 0.025, 1.0])
-    mcb = fig.colorbar(mag_sm, cax=mcax, label="magnitude")
+    mcb = fig.colorbar(val_sm, cax=mcax, label=pub_text(
+        "token magnitude (standardized)",
+        r"token magnitude $(m - \mu_b)/\sigma_b$"))
     mcb.ax.invert_yaxis()
     mcb.locator = plt.MaxNLocator(5)
     mcb.update_ticks()
@@ -1199,7 +1225,8 @@ def main() -> None:
                          os.path.join(outdir, f"token_plane_{stem}"), args.formats)
         plot_token_timeline(meta, means, stds, lc_truth, w_h, dts, focus, args.ref_dt,
                             canvas, args.horizon_days,
-                            os.path.join(outdir, f"token_timeline_{stem}"), args.formats)
+                            os.path.join(outdir, f"token_timeline_{stem}"), args.formats,
+                            cell_days=args.timeline_cell_days, mag_limit=args.mag_limit)
         plot_token_input(meta, tokens, args.ref_dt,
                          os.path.join(outdir, f"token_input_{stem}"), args.formats)
 
