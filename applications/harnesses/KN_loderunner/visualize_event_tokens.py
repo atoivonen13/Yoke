@@ -56,6 +56,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib import patheffects
+from matplotlib.colors import to_rgb
 from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from matplotlib.patches import ConnectionPatch, FancyBboxPatch, Rectangle
@@ -752,15 +753,16 @@ def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
 def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canvas,
                         horizon, path_stem, formats):
     """token_timeline_<stem>.{pdf,png}: the light curve, its tokens and one
-    query's attention, on a shared time axis (anchor-relative).
+    query's attention, on a shared time axis (anchor-relative). No panel
+    titles or letters; those go in the caption.
 
-    (a) The context detections (magnitude vs tau), the uniform truth faintly.
-    (b) Each token's time: an event at its tau; a band query along the
-    forecast window, since its position is the requested Dt (one forward pass
-    per Dt; the star marks ``ref_dt``).
-    (c) The focus query's last-block, head-mean attention to every token vs Dt:
-    tokens_paper (b) transposed. Rows of (b) and (c) are the same tokens,
-    events numbered as in tokens_paper; empty slots are left out.
+    Top: the context detections (magnitude vs tau), the uniform truth faintly.
+    Middle: token x time pixels. An event fills the cell at its tau; a band
+    query fills (pale) every forecast cell, since its position is the
+    requested Dt (one forward pass per Dt), with the ``ref_dt`` cell solid.
+    Bottom: the focus query's last-block, head-mean attention to every token
+    vs Dt (tokens_paper (b) transposed). Middle and bottom rows are the same
+    tokens, events numbered as in tokens_paper; empty slots are left out.
     """
     _H, c0, span = canvas
     t_hi = min(horizon, span - c0)
@@ -778,8 +780,8 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     q_name = BAND_NAMES[focus]
 
     fig, (ax, axt, axc) = plt.subplots(
-        3, 1, sharex=True, height_ratios=[1.1, 1, 1], constrained_layout=True,
-        figsize=pub_size((7, 9.5)) if styled() else (7, 9.5))
+        3, 1, sharex=True, height_ratios=[1.15, 1, 1], constrained_layout=True,
+        figsize=pub_size((7, 8.4)) if styled() else (7, 8.4))
 
     def token_axis(a):
         a.set_yticks(rows, key_lab, fontsize=0.85 * fs)
@@ -787,14 +789,15 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
             tick.set_color(BAND_COLORS[b])
         a.set_ylim(len(keys) - 0.5, -0.5)
         a.set_ylabel("token")
-        if styled():
-            a.tick_params(axis="y", which="minor", left=False, right=False)
+        a.tick_params(axis="y", which="both", left=False, right=False)
+        a.tick_params(axis="x", which="both", top=False)
 
+    ax.axvspan(-c0, 0.0, color=CONTEXT_SHADE, lw=0, zorder=0)
+    axc.axvspan(-c0, 0.0, color=CONTEXT_SHADE, lw=0, zorder=0)
     for a in (ax, axt, axc):
-        a.axvspan(-c0, 0.0, color=CONTEXT_SHADE, lw=0, zorder=0)
-        a.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=2)
+        a.axvline(0.0, color="0.25", ls="--", lw=rc_lw(0.8), zorder=3)
 
-    # (a) The light curve.
+    # Top: the light curve.
     ax.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
     if truth is not None:
         for b in range(N_BANDS):
@@ -807,11 +810,10 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
                s=50 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(0.8), zorder=3)
     ax.invert_yaxis()
     ax.set_ylabel("magnitude")
-    ax.set_title("(a) Light curve", loc="left")
     note = dict(transform=ax.get_xaxis_transform(), ha="center", va="top", color="0.35",
                 fontsize=fs)
-    ax.text(-c0 / 2, 0.97, "context", **note)
-    ax.text(0.5 * (ref_dt + t_hi), 0.97, "forecast window", **note)
+    ax.text(-c0 / 2, 0.96, "context", **note)
+    ax.text(0.5 * (ref_dt + t_hi), 0.96, "forecast window", **note)
     seen = sorted(set(ev_band.tolist()))
     handles = [Line2D([], [], ls="", marker="o", mfc=BAND_COLORS[b], mec="k",
                       ms=rc_ms(5), label=BAND_NAMES[b]) for b in seen]
@@ -821,38 +823,56 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     ax.legend(handles=handles, loc="lower left", ncol=2,
               fontsize=pub_fs(7, "legend.fontsize"))
 
-    # (b) Token times.
-    for r in rows:
-        axt.axhline(r, color="0.88", lw=rc_lw(0.4), zorder=0.5)
+    # Middle: token x time pixels (cell = 0.25 d, edges on tau = 0).
+    cell = 0.25
+    edges = np.arange(-c0, t_hi + cell / 2, cell)
+    mids = 0.5 * (edges[:-1] + edges[1:])
+    shade = np.asarray(to_rgb(CONTEXT_SHADE))
+    img = np.where((mids < 0)[None, :, None], shade, np.ones(3) * 0.985)
+    img = np.repeat(img, len(keys), axis=0)
+    # Events (tau <= 0) take the cell ending at tau, queries (Dt > 0) the one
+    # starting at Dt, so neither crosses tau = 0.
+    col = lambda t, side: int(np.clip(  # noqa: E731
+        np.searchsorted(edges, t, side=side) - 1, 0, len(mids) - 1))
+    for r, (b, t) in enumerate(zip(ev_band, ev_tau)):
+        img[r, col(t, "left")] = to_rgb(BAND_COLORS[b])
     for b in range(N_BANDS):
-        axt.plot([0.0, t_hi], [n_ev + b] * 2, color=BAND_COLORS[b], lw=rc_lw(3),
-                 alpha=0.35, solid_capstyle="butt", zorder=1)
-    axt.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
-    axt.scatter(np.full(N_BANDS, ref_dt), rows[n_ev:], marker="*", s=90 * rc_ms(1) ** 2,
-                c=BAND_COLORS, edgecolors="k", linewidths=rc_lw(0.7), zorder=3)
-    axt.scatter(ev_tau, rows[:n_ev], c=[BAND_COLORS[b] for b in ev_band],
-                s=40 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(0.7), zorder=3)
-    axt.axhline(n_ev - 0.5, color="0.4", lw=rc_lw(0.8), zorder=2)
+        c = np.asarray(to_rgb(BAND_COLORS[b]))
+        img[n_ev + b, mids > 0] = 0.3 * c + 0.7
+        img[n_ev + b, col(ref_dt, "right")] = c
+    axt.imshow(img, extent=(edges[0], edges[-1], len(keys) - 0.5, -0.5), aspect="auto",
+               interpolation="nearest", zorder=1)
+    grid = dict(color="w", lw=rc_lw(0.4), zorder=2)
+    for e in edges[1:-1]:
+        axt.axvline(e, **grid)
+    for r in rows[1:]:
+        axt.axhline(r - 0.5, **grid)
+    axt.axhline(n_ev - 0.5, color="0.25", lw=rc_lw(0.8), zorder=3)
+    dt_txt = pub_text("Dt", r"$\Delta t$")
+    axt.legend(handles=[
+        Rectangle((0, 0), 1, 1, fc="0.35", ec="none",
+                  label=f"token position (queries at {dt_txt} = {ref_dt:g} d)"),
+        Rectangle((0, 0), 1, 1, fc="0.8", ec="none", label=f"other query {dt_txt}"),
+    ], loc="upper right", fontsize=pub_fs(7, "legend.fontsize"), handlelength=1.0,
+        handleheight=1.0, framealpha=1)
     token_axis(axt)
-    axt.set_title(pub_text("(b) Token times: events at tau; queries at any Dt "
-                           f"(star: Dt = {ref_dt:g} d)",
-                           r"(b) Token times: events at $\tau$; queries at any "
-                           rf"$\Delta t$ (star: $\Delta t$ = {ref_dt:g} d)"), loc="left")
 
-    # (c) Focus query attention vs Dt.
+    # Bottom: focus query attention vs Dt.
     a_dt = w_h[:, -1, L + focus][:, keys]  # [n_dt, n_keys]
-    im = axc.pcolormesh(dts, rows, a_dt.T, cmap="magma", shading="nearest", zorder=1)
-    axc.axhline(n_ev - 0.5, color="w", lw=rc_lw(1), zorder=2)
-    axc.axvline(ref_dt, color="w", ls=":", lw=rc_lw(1), zorder=2)
-    axc.text(-c0 / 2, (len(keys) - 1) / 2, "no queries\nbefore the\nlast detection",
-             ha="center", va="center", color="0.35", fontsize=fs)
+    im = axc.pcolormesh(dts, rows, a_dt.T, cmap="magma", shading="nearest", zorder=1,
+                        rasterized=True)
+    axc.hlines(n_ev - 0.5, 0.0, t_hi, color="w", lw=rc_lw(0.8), zorder=2)
+    axc.axvline(ref_dt, color="w", ls=":", lw=rc_lw(0.8), zorder=2)
+    axc.text(-c0 / 2, (len(keys) - 1) / 2, f"attention\nfrom Q {q_name}\n(last block)",
+             ha="center", va="center", color="0.25", fontsize=fs)
     token_axis(axc)
     axc.set_xlim(-c0, t_hi)
     axc.set_xlabel(pub_text("time from last detection: tau (events), Dt (queries) (d)",
                             r"time from last detection: $\tau$ (events), "
                             r"$\Delta t$ (queries) (d)"))
-    axc.set_title(f"(c) Attention from Q {q_name} (last block)", loc="left")
-    fig.colorbar(im, ax=axc, location="bottom", shrink=0.5, aspect=30, label="attention")
+    cax = axc.inset_axes([1.015, 0.0, 0.025, 1.0])
+    fig.colorbar(im, cax=cax, label="attention weight")
+    fig.align_ylabels((ax, axt, axc))
     for fmt in formats:
         fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
     plt.close(fig)
