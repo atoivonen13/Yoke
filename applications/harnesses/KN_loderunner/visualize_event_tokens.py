@@ -29,7 +29,12 @@ q/k projections and checked against its output once per run. It writes:
   token_timeline_<stem> Paper figure, on one time axis: the context light
                         curve; each token's time (events at tau, band queries
                         along the forecast window); and the focus query's
-                        last-block attention to every token vs Dt.
+                        attention to every token vs Dt, one last-block head
+                        (``--timeline_head``).
+  token_influence_<stem>
+                        Paper figure: leave-one-event-out change of the
+                        median forecast, per removed event, vs Dt for the
+                        focus band and as an RMS per forecast band.
   token_input_<stem>    Paper figure: the per-slot context input table and
                         the token table (events + band queries at
                         ``--ref_dt``) the first ViT block receives, with each
@@ -212,16 +217,20 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--outdir", type=str, default=None)
     p.add_argument("--formats", nargs="+", default=["pdf", "png"],
                    help="Formats of the paper figures (tokens_paper, "
-                        "lightcurve_image, token_plane, token_timeline, "
+                        "lightcurve_image, token_plane, token_timeline, token_influence, "
                         "token_input).")
     p.add_argument("--cell_days", type=float, default=0.25,
                    help="Time cell (days) of the conceptual image in "
                         "lightcurve_image_<stem>.")
-    p.add_argument("--timeline_cell_days", type=float, default=0.25,
+    p.add_argument("--timeline_cell_days", type=float, default=0.10724,
                    help="Display time cell (days) of the token pixels in "
-                        "token_timeline_<stem>. The model itself does not bin: "
-                        "tau and the RoPE time row are continuous (one image row "
-                        "is span/(H-1) ~ 0.011 d, one ViT patch row ~ 0.107 d).")
+                        "token_timeline_<stem>; default one ViT patch row "
+                        "(10 of the 1120 canvas rows over 12 d). The model itself "
+                        "does not bin: tau and the RoPE time row are continuous.")
+    p.add_argument("--timeline_head", type=str, default="auto",
+                   help="Last-block head shown in token_timeline_<stem>: an index "
+                        "0-11, 'mean' (head mean), or 'auto' (the focus query's "
+                        "most focused head, lowest mean attention entropy).")
     p.add_argument("--mag_limit", type=float, default=26.0,
                    help="Faint limit (mag) of the light-curve panel of "
                         "token_timeline_<stem>; truth fainter than this is clipped.")
@@ -250,8 +259,10 @@ def build_object(real_stream, model, means, stds, cw, max_len, cutoff, device):
 
     Returns None when the object has no pre-cutoff detection. Otherwise a dict
     with ``x`` [1, D], ``t_anchor`` (absolute time of the last context
-    detection), ``n_window`` (in-window detections before the cap) and the raw
-    context (``ctx_tau`` anchor-relative days, ``ctx_mag``, ``ctx_band``).
+    detection), ``n_window`` (in-window detections before the cap), the raw
+    context (``ctx_tau`` anchor-relative days, ``ctx_mag``, ``ctx_band``), the
+    selected window ``win`` = (win_v, win_t, win_b) and ``build`` (window ->
+    ``x``, with this object's phase / redshift), for :func:`event_influence`.
     """
     r_t, r_v, r_b, _r_ul, r_z = real_stream
     if r_t.shape[0] == 0:
@@ -268,19 +279,22 @@ def build_object(real_stream, model, means, stds, cw, max_len, cutoff, device):
         context_window_days=cw,
         max_context_len=max_len,
     )
-    x = build_context_input(
-        win_v=win_v, win_t=win_t, win_b=win_b, context_len=max_len,
-        n_bands=N_BANDS, device=device, window_mode=True,
-        phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
-        phase0=t0,
-        redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
-        redshift=r_z,
-        redshift_pivot_direct=getattr(model, "redshift_pivot_direct", False),
-    )
+    def build(win_v, win_t, win_b):
+        return build_context_input(
+            win_v=win_v, win_t=win_t, win_b=win_b, context_len=max_len,
+            n_bands=N_BANDS, device=device, window_mode=True,
+            phase_fourier_bands=getattr(model, "phase_fourier_bands", 0),
+            phase0=t0,
+            redshift_fourier_bands=getattr(model, "redshift_fourier_bands", 0),
+            redshift=r_z,
+            redshift_pivot_direct=getattr(model, "redshift_pivot_direct", False),
+        )
+
     in_win = c_t >= t_anchor - cw
     return dict(
-        x=x, t_anchor=t_anchor, n_window=int(in_win.sum()),
+        x=build(win_v, win_t, win_b), t_anchor=t_anchor, n_window=int(in_win.sum()),
         ctx_tau=(c_t[in_win] - t_anchor), ctx_mag=c_v[in_win], ctx_band=c_b[in_win],
+        win=(win_v, win_t, win_b), build=build,
     )
 
 
@@ -313,6 +327,41 @@ def forward(model, x, dts, device, ablate=False):
     if pred.dim() == 3:
         pred = pred[:, getattr(model, "median_idx", 0), :]
     return pred.cpu().numpy()
+
+
+def event_influence(model, obj, dts, device, means, stds):
+    """Leave-one-event-out change of the median forecast, in magnitudes.
+
+    For each event of the selected window, rebuild the input without it (the
+    remaining events keep their window; no older detection is pulled back in)
+    and rerun the forecast at the SAME absolute target times: when the dropped
+    event is the anchor (the last detection), the new anchor is earlier, so
+    the lead times grow by the gap. Returns [n_events, len(dts), N_BANDS],
+    removed minus full (positive = the forecast gets fainter without the
+    event), in window order (= the event-token slot order); a lone event's row
+    is NaN (no context would remain).
+    """
+    win_v, win_t, win_b = (np.asarray(a) for a in obj["win"])
+    n = len(win_t)
+    full = forward(model, obj["x"], dts, device) * (stds + EPS) + means
+    out = np.full((n, len(dts), N_BANDS), np.nan, np.float32)
+    for k in range(n if n > 1 else 0):
+        keep = np.arange(n) != k
+        x_k = obj["build"](list(win_v[keep]), list(win_t[keep]), list(win_b[keep]))
+        shift = float(win_t[-1] - win_t[keep][-1])  # > 0 only when k is the anchor
+        pred = forward(model, x_k, np.asarray(dts) + shift, device)
+        out[k] = pred * (stds + EPS) + means - full
+    return out
+
+
+def pick_head(w_q, valid):
+    """Most focused head of one query's attention: lowest mean entropy over Dt.
+
+    ``w_q`` is [n_dt, heads, N] (one query row of one block), ``valid`` the
+    key mask [N]. Returns the head index.
+    """
+    p = np.clip(w_q[..., valid].astype(np.float64), 1e-12, None)
+    return int((-(p * np.log(p)).sum(-1)).mean(0).argmin())
 
 
 def token_labels(meta, valid_idx):
@@ -758,8 +807,9 @@ def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
     plt.close(fig)
 
 
-def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canvas,
-                        horizon, path_stem, formats, cell_days=0.25, mag_limit=26.0):
+def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref_dt,
+                        canvas, horizon, path_stem, formats, cell_days=0.10724,
+                        mag_limit=26.0):
     """token_timeline_<stem>.{pdf,png}: the light curve, its tokens and one
     query's attention, on a shared time axis (anchor-relative). No panel
     titles or letters; those go in the caption.
@@ -773,9 +823,10 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     query (no magnitude, gray) fills every forecast cell pale, since its
     position is the requested Dt (one forward pass per Dt), with the
     ``ref_dt`` cell dark.
-    Bottom: the focus query's last-block, head-mean attention to every token
-    vs Dt (tokens_paper (b) transposed). Middle and bottom rows are the same
-    tokens, events numbered as in tokens_paper; empty slots are left out.
+    Bottom: ``attn`` [n_dt, N], the focus query's attention to every token vs
+    Dt (one head or the head mean, named by ``att_txt``, e.g. "last block,
+    head 3"). Middle and bottom rows are the same tokens, events numbered as in
+    tokens_paper; empty slots are left out.
     """
     _H, c0, span = canvas
     t_hi = min(horizon, span - c0)
@@ -893,12 +944,13 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     token_axis(axt)
 
     # Bottom: focus query attention vs Dt.
-    a_dt = w_h[:, -1, L + focus][:, keys]  # [n_dt, n_keys]
+    a_dt = attn[:, keys].astype(np.float32)  # [n_dt, n_keys]
     im = axc.pcolormesh(dts, rows, a_dt.T, cmap="magma", shading="nearest", zorder=1,
                         rasterized=True)
     axc.hlines(n_ev - 0.5, 0.0, t_hi, color="w", lw=rc_lw(0.8), zorder=2)
     axc.axvline(ref_dt, color="w", ls=":", lw=rc_lw(0.8), zorder=2)
-    axc.text(-c0 / 2, (len(keys) - 1) / 2, f"attention\nfrom Q {q_name}\n(last block)",
+    att_lines = att_txt.replace(", ", "\n")
+    axc.text(-c0 / 2, (len(keys) - 1) / 2, f"attention\nfrom Q {q_name}\n{att_lines}",
              ha="center", va="center", color="0.25", fontsize=fs)
     token_axis(axc)
     axc.set_xlim(-c0, t_hi)
@@ -911,6 +963,83 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     for fmt in formats:
         fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_token_influence(meta, infl, dts, focus, canvas, horizon, path_stem, formats):
+    """token_influence_<stem>.{pdf,png}: what each context event does to the
+    forecast, by leave-one-event-out (``event_influence``). No panel titles.
+
+    Left: the focus band's median forecast change vs Dt when one event is
+    removed (removed minus full, mag; red = fainter without the event).
+    Right: the RMS change over the forecast window, per event and band.
+    Rows are the event tokens, numbered as in token_timeline / tokens_paper.
+    """
+    _H, c0, span = canvas
+    t_hi = min(horizon, span - c0)
+    valid_idx = np.nonzero(meta["valid"])[0]
+    n_ev = len(valid_idx)
+    if n_ev < 2 or infl.shape[0] != n_ev:
+        print(f"  skip {os.path.basename(path_stem)}: {n_ev} events, "
+              f"{infl.shape[0]} influence rows")
+        return
+    ev_band = meta["band"][valid_idx]
+    ev_tau = meta["tau"][valid_idx]
+    tau_txt = pub_text("tau", r"$\tau$")
+    lab = [f"{j + 1} {BAND_NAMES[b]}, {tau_txt} = {t:.2f}"
+           for j, (b, t) in enumerate(zip(ev_band, ev_tau))]
+    rows = np.arange(n_ev)
+    fs = pub_fs(7, "xtick.labelsize")
+    dt_txt = pub_text("Dt", r"$\Delta t$")
+    win = (dts > 0) & (dts <= t_hi)
+    d_f = infl[:, win, focus]  # [n_ev, n_win]
+    rms = np.sqrt(np.nanmean(infl[:, win] ** 2, axis=1))  # [n_ev, N_BANDS]
+
+    fig, (axl, axr) = plt.subplots(
+        1, 2, sharey=True, width_ratios=[2.0, 1.0], constrained_layout=True,
+        figsize=pub_size((7, 0.22 * n_ev + 1.5)) if styled() else (7, 0.22 * n_ev + 1.5))
+    vmax = max(float(np.nanmax(np.abs(d_f))) if np.isfinite(d_f).any() else 0.0, 0.01)
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("0.8")
+    im = axl.pcolormesh(dts[win], rows, d_f, cmap=cmap, vmin=-vmax, vmax=vmax,
+                        shading="nearest", rasterized=True)
+    axl.set_xlim(0.0, t_hi)
+    axl.set_xlabel(f"forecast lead time {dt_txt} (d)")
+    axl.set_yticks(rows, lab, fontsize=0.85 * fs)
+    for tick, b in zip(axl.get_yticklabels(), ev_band):
+        tick.set_color(BAND_COLORS[b])
+    axl.set_ylim(n_ev - 0.5, -0.5)
+    axl.set_ylabel("removed event")
+    axl.tick_params(axis="y", which="both", left=False, right=False)
+    axl.tick_params(axis="x", which="both", top=False)
+    axl.text(0.98, 0.02, f"forecast of {BAND_NAMES[focus]}", transform=axl.transAxes,
+             ha="right", va="bottom", fontsize=fs, color="0.25",
+             bbox=dict(fc="w", ec="none", alpha=0.8, pad=1.5))
+    fig.colorbar(im, ax=axl, location="top", shrink=0.8, aspect=30,
+                 label=pub_text("dm = removed - full (mag)",
+                                r"$\Delta m$ = removed $-$ full (mag)"))
+
+    rmap = plt.get_cmap("magma_r").copy()
+    rmap.set_bad("0.8")
+    im2 = axr.pcolormesh(np.arange(N_BANDS), rows, rms, cmap=rmap, vmin=0.0,
+                         shading="nearest", rasterized=True)
+    axr.set_xticks(np.arange(N_BANDS), BAND_NAMES, rotation=90, fontsize=0.85 * fs)
+    for tick, b in zip(axr.get_xticklabels(), range(N_BANDS)):
+        tick.set_color(BAND_COLORS[b])
+    axr.tick_params(axis="both", which="both", left=False, right=False, top=False,
+                    bottom=False)
+    axr.add_patch(Rectangle((focus - 0.5, -0.5), 1, n_ev, fill=False, ec="0.25",
+                            lw=rc_lw(0.8), zorder=3))
+    axr.set_xlabel("forecast band")
+    fig.colorbar(im2, ax=axr, location="top", shrink=0.8, aspect=15,
+                 label=pub_text(f"RMS dm over Dt <= {t_hi:g} d (mag)",
+                                rf"RMS $\Delta m$, $\Delta t \leq {t_hi:g}$ d (mag)"))
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+    top = np.nanargmax(np.where(np.isfinite(rms), rms, -1), axis=0)
+    print(f"  {os.path.basename(path_stem)}: most influential event per band: "
+          + ", ".join(f"{BAND_NAMES[b]} #{top[b] + 1} ({rms[top[b], b]:.2f})"
+                      for b in range(N_BANDS)))
 
 
 def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
@@ -1172,11 +1301,16 @@ def main() -> None:
                 continue
             meta = token_meta(model, obj["x"])
             pred = forward(model, obj["x"], dts, device)
-            w_h = rec.pop().mean(axis=2)  # head mean: [n_dt, n_blocks, N, N]
+            w_all = rec.pop()  # [n_dt, n_blocks, heads, N, N]
+            w_h = w_all.mean(axis=2)  # head mean: [n_dt, n_blocks, N, N]
+            L = meta["tau"].shape[0]
+            # Last block, query rows only, every head: [n_dt, heads, 9, N].
+            wq_last = w_all[:, -1, :, L:].astype(np.float16)
+            del w_all
             tokens = tok_in.pop()[ref_i].numpy()  # at --ref_dt: [N, D]
             tok_in.clear()
             records.append((meta, w_h[sum_i]))
-            objs[stem] = (obj, meta, pred, w_h, tokens)
+            objs[stem] = (obj, meta, pred, w_h, wq_last, tokens)
     finally:
         rec.remove()
         tok_hook.remove()
@@ -1197,7 +1331,7 @@ def main() -> None:
         plot_stems = [by_count[i] for i in np.unique(pick)]
 
     for stem in plot_stems:
-        obj, meta, pred, w_h, tokens = objs[stem]
+        obj, meta, pred, w_h, wq_last, tokens = objs[stem]
         if args.focus_band is not None:
             focus = BAND_NAMES.index(args.focus_band)
         else:
@@ -1223,10 +1357,27 @@ def main() -> None:
                               args.formats)
         plot_token_plane(meta, args.ref_dt, canvas, args.horizon_days,
                          os.path.join(outdir, f"token_plane_{stem}"), args.formats)
-        plot_token_timeline(meta, means, stds, lc_truth, w_h, dts, focus, args.ref_dt,
-                            canvas, args.horizon_days,
+        n_blk = len(blocks)
+        if args.timeline_head == "mean":
+            attn = w_h[:, -1, meta["tau"].shape[0] + focus]
+            att_txt = f"block {n_blk}, head mean"
+        else:
+            w_q = wq_last[:, :, focus].astype(np.float32)  # [n_dt, heads, N]
+            key_ok = np.concatenate([meta["valid"], np.ones(N_BANDS, bool)])
+            head = (pick_head(w_q, key_ok) if args.timeline_head == "auto"
+                    else int(args.timeline_head))
+            attn = w_q[:, head]
+            att_txt = f"block {n_blk}, head {head + 1}"
+            print(f"  token_timeline_{stem}: Q {BAND_NAMES[focus]} {att_txt} "
+                  f"of {w_q.shape[1]} ({args.timeline_head})")
+        plot_token_timeline(meta, means, stds, lc_truth, attn, att_txt, dts, focus,
+                            args.ref_dt, canvas, args.horizon_days,
                             os.path.join(outdir, f"token_timeline_{stem}"), args.formats,
                             cell_days=args.timeline_cell_days, mag_limit=args.mag_limit)
+        infl = event_influence(model, obj, dts, device, means, stds)
+        plot_token_influence(meta, infl, dts, focus, canvas, args.horizon_days,
+                             os.path.join(outdir, f"token_influence_{stem}"),
+                             args.formats)
         plot_token_input(meta, tokens, args.ref_dt,
                          os.path.join(outdir, f"token_input_{stem}"), args.formats)
 
