@@ -757,9 +757,10 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     titles or letters; those go in the caption.
 
     Top: the context detections (magnitude vs tau), the uniform truth faintly.
-    Middle: token x time pixels. An event fills the cell at its tau; a band
-    query fills (pale) every forecast cell, since its position is the
-    requested Dt (one forward pass per Dt), with the ``ref_dt`` cell solid.
+    Middle: token x time pixels. An event fills the cell at its tau, colored
+    by its magnitude; a band query (no magnitude, gray) fills every forecast
+    cell pale, since its position is the requested Dt (one forward pass per
+    Dt), with the ``ref_dt`` cell dark.
     Bottom: the focus query's last-block, head-mean attention to every token
     vs Dt (tokens_paper (b) transposed). Middle and bottom rows are the same
     tokens, events numbered as in tokens_paper; empty slots are left out.
@@ -831,15 +832,18 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     img = np.where((mids < 0)[None, :, None], shade, np.ones(3) * 0.985)
     img = np.repeat(img, len(keys), axis=0)
     # Events (tau <= 0) take the cell ending at tau, queries (Dt > 0) the one
-    # starting at Dt, so neither crosses tau = 0.
+    # starting at Dt, so neither crosses tau = 0. Events are colored by their
+    # magnitude (the value the token carries); queries carry none, so gray.
     col = lambda t, side: int(np.clip(  # noqa: E731
         np.searchsorted(edges, t, side=side) - 1, 0, len(mids) - 1))
-    for r, (b, t) in enumerate(zip(ev_band, ev_tau)):
-        img[r, col(t, "left")] = to_rgb(BAND_COLORS[b])
-    for b in range(N_BANDS):
-        c = np.asarray(to_rgb(BAND_COLORS[b]))
-        img[n_ev + b, mids > 0] = 0.3 * c + 0.7
-        img[n_ev + b, col(ref_dt, "right")] = c
+    half = max(0.5 * np.ptp(ev_mag), 0.5) if n_ev else 0.5
+    mid_mag = 0.5 * (ev_mag.max() + ev_mag.min()) if n_ev else 20.0
+    mag_sm = plt.cm.ScalarMappable(plt.Normalize(mid_mag - half, mid_mag + half),
+                                   "viridis_r")
+    for r, (t, m) in enumerate(zip(ev_tau, ev_mag)):
+        img[r, col(t, "left")] = mag_sm.to_rgba(m)[:3]
+    img[n_ev:, mids > 0] = 0.84
+    img[n_ev:, col(ref_dt, "right")] = 0.35
     axt.imshow(img, extent=(edges[0], edges[-1], len(keys) - 0.5, -0.5), aspect="auto",
                interpolation="nearest", zorder=1)
     grid = dict(color="w", lw=rc_lw(0.4), zorder=2)
@@ -851,10 +855,15 @@ def plot_token_timeline(meta, means, stds, truth, w_h, dts, focus, ref_dt, canva
     dt_txt = pub_text("Dt", r"$\Delta t$")
     axt.legend(handles=[
         Rectangle((0, 0), 1, 1, fc="0.35", ec="none",
-                  label=f"token position (queries at {dt_txt} = {ref_dt:g} d)"),
-        Rectangle((0, 0), 1, 1, fc="0.8", ec="none", label=f"other query {dt_txt}"),
+                  label=f"query position ({dt_txt} = {ref_dt:g} d)"),
+        Rectangle((0, 0), 1, 1, fc="0.84", ec="none", label=f"other query {dt_txt}"),
     ], loc="upper right", fontsize=pub_fs(7, "legend.fontsize"), handlelength=1.0,
         handleheight=1.0, framealpha=1)
+    mcax = axt.inset_axes([1.015, 0.0, 0.025, 1.0])
+    mcb = fig.colorbar(mag_sm, cax=mcax, label="magnitude")
+    mcb.ax.invert_yaxis()
+    mcb.locator = plt.MaxNLocator(5)
+    mcb.update_ticks()
     token_axis(axt)
 
     # Bottom: focus query attention vs Dt.
