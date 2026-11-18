@@ -926,7 +926,7 @@ def fig_examples(run: dict, bands: list, stems: list | None,
     context the model saw and the uniform truth over the context window; an
     object whose npz files are missing falls back to the scored window only.
     """
-    u, d = run["uniform"], run["dense"]
+    u = run["uniform"]
     picks = pick_examples(run, stems, percentiles)
     fig, axes = plt.subplots(len(picks), len(bands),
                              figsize=figsize("full_w", 1.75 * len(picks) + 0.4),
@@ -954,11 +954,6 @@ def fig_examples(run: dict, bands: list, stems: list | None,
             else:
                 ax.plot(su["phase"], su["true"], color=LOOK["ink2"],
                         lw=LOOK["lw_thin"], label="Uniform truth")
-            if d is not None:
-                sd = d[(d["stem"] == stem) & (d["b"] == b)]
-                ax.plot(sd["phase"], sd["true"], ls="none", marker="o",
-                        markersize=LOOK["ms_small"], color=LOOK["muted"],
-                        label="Dense truth")
             ax.plot(su["phase"], su["med"], color=color(0), lw=LOOK["lw"],
                     label="Forecast median")
             if obj is not None:
