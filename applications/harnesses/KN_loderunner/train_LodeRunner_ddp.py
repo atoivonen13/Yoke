@@ -799,16 +799,23 @@ def main(args, rank, world_size, local_rank, device):
     # redshift term was exactly zero; turning it off keeps 217 the same model now
     # that w_z trains. Only run as seed replicas (make_seed_sweep --configs 217
     # -> 21700-21704), the pretrained-decoder arm vs the 213 sweep.
+    # Study 218: = 213 (fresh-full event tokens, 300 ep, no redshift) with the
+    # conditioner (the context summary MLP) removed: the heads see only the token
+    # readout + the Dt encoding. Asks whether the summary path carries anything
+    # the transformer does not. Read vs 213 / the 21300 sweep (seed floor ~0.05).
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
+    EVENT_TOKEN_NO_SUMMARY = False
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216, 217):
+    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216, 217, 218):
         EVENT_TOKENS = True
-    if studyIDX in (204, 207, 209, 210, 211, 213, 215, 216):
+    if studyIDX == 218:
+        EVENT_TOKEN_NO_SUMMARY = True
+    if studyIDX in (204, 207, 209, 210, 211, 213, 215, 216, 218):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
-    if studyIDX in (207, 209, 210, 213, 215, 216):
+    if studyIDX in (207, 209, 210, 213, 215, 216, 218):
         VIT_RANDOM_INIT = True
     if studyIDX == 210:
         BACKBONE_TAIL_LR_MULT = 1.0
@@ -817,7 +824,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 216: = 213 (the champion, no redshift) run to 500 epochs with the
     # anneal stretched to match (TERMINAL_STEPS = 25000). 207 -> 209 (100 -> 300
     # ep) gained 0.106; 216 asks whether the schedule is still the lever.
-    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216, 217):
+    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216, 217, 218):
         total_epochs = 500 if studyIDX == 216 else 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
@@ -838,6 +845,7 @@ def main(args, rank, world_size, local_rank, device):
             f"BACKBONE_TAIL_LR_MULT={BACKBONE_TAIL_LR_MULT}, "
             f"BACKBONE_FINETUNE_SCOPE={BACKBONE_FINETUNE_SCOPE!r}, "
             f"EVENT_TOKENS={EVENT_TOKENS}, VIT_RANDOM_INIT={VIT_RANDOM_INIT}, "
+            f"EVENT_TOKEN_NO_SUMMARY={EVENT_TOKEN_NO_SUMMARY}, "
             f"total_epochs={total_epochs}",
             flush=True,
         )
@@ -929,7 +937,7 @@ def main(args, rank, world_size, local_rank, device):
     # both originals ran before the w_z fix, so their redshift term was exactly
     # zero; with w_z now trained, pivot-direct ON would make the replicas a
     # different model. Off = the originals, and matches the 213 / 217 sweeps.
-    if studyIDX in (211, 212, 213, 216, 217):
+    if studyIDX in (211, 212, 213, 216, 217, 218):
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
         print(
@@ -1499,6 +1507,7 @@ def main(args, rank, world_size, local_rank, device):
             backbone_dt_in=BACKBONE_DT_IN,
             event_tokens=EVENT_TOKENS,
             event_token_readout=EVENT_TOKEN_READOUT,
+            event_token_no_summary=EVENT_TOKEN_NO_SUMMARY,
         ).to(device)
 
         # Freeze the backbone and (Study 082) optionally unfreeze its OUTPUT-
@@ -2169,6 +2178,7 @@ def main(args, rank, world_size, local_rank, device):
                     "backbone_dt_in": BACKBONE_DT_IN,
                     "event_tokens": EVENT_TOKENS,
                     "event_token_readout": EVENT_TOKEN_READOUT,
+                    "event_token_no_summary": EVENT_TOKEN_NO_SUMMARY,
                     "model_args": model_args,
                     "model_state_dict": model.module.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),

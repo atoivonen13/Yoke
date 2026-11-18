@@ -248,10 +248,16 @@ def build_finetune_optimizer(
     # modules that actually run keeps DDP's find_unused_parameters=False valid.
     if getattr(model, "spatial_render", False):
         trainable_mods = [model.read_head]
-    elif getattr(model, "color_anchored_head", False):
-        trainable_mods = [model.conditioner, model.ref_head, model.sed_head]
     else:
-        trainable_mods = [model.conditioner, model.output_head]
+        # Study 218: the no-summary event-token model builds no conditioner.
+        trainable_mods = (
+            [] if getattr(model, "event_token_no_summary", False)
+            else [model.conditioner]
+        )
+        if getattr(model, "color_anchored_head", False):
+            trainable_mods += [model.ref_head, model.sed_head]
+        else:
+            trainable_mods.append(model.output_head)
     # Study 203: the token embed / band queries / readout around the ViT blocks.
     if getattr(model, "event_tokens", False):
         trainable_mods.append(model.event_token_io)
@@ -1006,6 +1012,8 @@ def load_direct_loderunner_checkpoint_9band(
         # widens the head input, so it MUST match training for strict load.
         event_tokens=checkpoint_data.get("event_tokens", False),
         event_token_readout=checkpoint_data.get("event_token_readout", 8),
+        # False for pre-218 checkpoints (no key). True drops the conditioner.
+        event_token_no_summary=checkpoint_data.get("event_token_no_summary", False),
     ).to(device)
 
     state_dict = checkpoint_data["model_state_dict"]
