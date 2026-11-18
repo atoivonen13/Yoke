@@ -826,6 +826,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         vit_constant_shortcut: bool = True,
         event_tokens: bool = False,
         event_token_readout: int = 8,
+        event_token_no_summary: bool = False,
     ) -> None:
         """Initialize conditioner and output-head around the backbone.
 
@@ -1027,6 +1028,14 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                 start a FRESH study; round-trips via the loaders.
             event_token_readout (int): Channels read out per band query token
                 when ``event_tokens`` is on. Default 8 (= the waist width).
+            event_token_no_summary (bool): When True (default False), the
+                event-token model drops the conditioner (the summary MLP over the
+                flattened context table; Study 218). The heads then read only the
+                token readout and the Fourier Dt encoding, so all context
+                information reaches the forecast through the transformer. The
+                conditioner is not built, so DDP sees no unused parameters.
+                Requires ``event_tokens=True``. Narrows the head input, so start
+                a FRESH study; round-trips via the loaders.
         """
         super().__init__()
 
@@ -1070,6 +1079,11 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
                     "event_tokens=True is its own backbone path; it cannot be "
                     "combined with bypass_backbone or spatial_render."
                 )
+        if event_token_no_summary and not event_tokens:
+            raise ValueError(
+                "event_token_no_summary=True requires event_tokens=True; without "
+                "the token readout the head would see no context at all."
+            )
 
         if spatial_render:
             if bypass_backbone:
@@ -1196,6 +1210,7 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         # Event-token backbone path (Study 203); see _event_token_readout.
         self.event_tokens = event_tokens
         self.event_token_readout = event_token_readout
+        self.event_token_no_summary = event_token_no_summary
 
         # Waist width: the number of channels the conditioner emits and pooling
         # summarizes. When bypass_channels is set it DECOUPLES this from the frozen
@@ -1222,6 +1237,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         pool_channels = self.waist * (3 if pool_mode == "meanstdmax" else 1)
         # The event-token readout (one vector per band) is appended to the pooled
         # summary, so the heads see it wherever they see the pooled channels.
+        # Study 218: with no summary the readout is the heads' only context.
+        if event_token_no_summary:
+            pool_channels = 0
         if event_tokens:
             pool_channels += n_bands * event_token_readout
 
@@ -1365,15 +1383,16 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # The final layer emits self.waist (== backbone_channels unless bypass
             # widens it) -- the pseudo-image the backbone consumes, or the pooled
             # summary fed straight to the head under bypass.
-            self.conditioner = nn.Sequential(
-                nn.Linear(
-                    input_dim + dt_extra + phase_extra + redshift_extra, hidden
-                ),
-                nn.GELU(),
-                nn.Linear(hidden, hidden),
-                nn.GELU(),
-                nn.Linear(hidden, self.waist),
-            )
+            if not event_token_no_summary:
+                self.conditioner = nn.Sequential(
+                    nn.Linear(
+                        input_dim + dt_extra + phase_extra + redshift_extra, hidden
+                    ),
+                    nn.GELU(),
+                    nn.Linear(hidden, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, self.waist),
+                )
 
             if event_tokens:
                 # Token I/O around the pretrained ViT blocks (Study 203); see
@@ -2134,9 +2153,12 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
         if redshift_feat is None:
             redshift_feat = x.new_zeros((B, 0))
 
-        channel_vals = self.conditioner(
-            torch.cat([x_events, dt_feat, phase_feat, redshift_feat], dim=1)
-        )  # [B, self.waist]
+        if self.event_token_no_summary:
+            channel_vals = None  # Study 218: no conditioner summary
+        else:
+            channel_vals = self.conditioner(
+                torch.cat([x_events, dt_feat, phase_feat, redshift_feat], dim=1)
+            )  # [B, self.waist]
 
         if self.bypass_backbone or self.event_tokens:
             # Skip the backbone's pseudo-image pass (the event-token path runs
@@ -2145,7 +2167,9 @@ class ScalarTemporalConditionedLodeRunner_9band(nn.Module):
             # std = 0, max = channel_vals. Computing them directly avoids
             # materializing the [B, waist, H, W] constant image (H*W = 448000),
             # and is numerically identical to pooling the expanded tensor.
-            if self.pool_mode == "meanstdmax":
+            if channel_vals is None:
+                pred_channel_vals = x.new_zeros((B, 0))
+            elif self.pool_mode == "meanstdmax":
                 pred_channel_vals = torch.cat(
                     [channel_vals, torch.zeros_like(channel_vals), channel_vals],
                     dim=1,

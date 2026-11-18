@@ -293,6 +293,42 @@ def test_event_tokens_finetune_scopes(scope: str) -> None:
             assert p.grad is not None and p.grad.abs().sum() > 0, name
 
 
+@pytest.mark.parametrize("color_anchored_head", [False, True])
+def test_event_tokens_no_summary(color_anchored_head: bool) -> None:
+    """Study 218: no conditioner; heads read the token readout + dt_feat only."""
+    torch.manual_seed(0)
+    model = _make_event_token_wrapper(
+        event_token_no_summary=True, color_anchored_head=color_anchored_head
+    )
+    assert not hasattr(model, "conditioner")
+    first = model.ref_head[0] if color_anchored_head else model.output_head[0]
+    # Head input is [token readout (9 * 8), dt_feat (2 * 4 + 1)].
+    assert first.in_features == N_BANDS * 8 + 9
+
+    build_finetune_optimizer(
+        model,
+        {"lr": 1e-3},
+        backbone_tail_lr_mult=0.1,
+        backbone_finetune_scope="full",
+    )
+    torch.nn.init.normal_(model.event_token_io["readout"].weight)
+    x, in_vars, Dt = _window_inputs()
+    out = model(x, in_vars, in_vars, Dt)
+    assert out.shape == (3, N_BANDS)
+    # Random weights: the color head's offsets are mean-centered over bands, so
+    # a plain out.sum() would give it an exactly zero gradient.
+    (out * torch.randn_like(out)).sum().backward()
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None and p.grad.abs().sum() > 0, name
+
+
+def test_event_tokens_no_summary_requires_event_tokens() -> None:
+    """Without the token readout the no-summary head would see no context."""
+    with pytest.raises(ValueError):
+        _make_wrapper(2, event_token_no_summary=True)
+
+
 def test_event_tokens_tail_scope_raises() -> None:
     """linear4unpatch does not run on the token path, so 'tail' is rejected."""
     model = _make_event_token_wrapper()

@@ -96,7 +96,7 @@ def draw(c, colors):
     # ---------------- Inputs ----------------
     ctx = c.box(1, 30, 25, 52, fc=FILL["inp"])
     c.text(ctx[0] + ctx[2] / 2, 79, "context table", weight="bold")
-    c.text(ctx[0] + ctx[2] / 2, 75.4, "≤ 12 detections,\nlast 2 d", size=fs_s)
+    c.text(ctx[0] + ctx[2] / 2, 75.4, r"${\leq}\,12$ detections," "\nlast 2 d", size=fs_s)
     # Mini table: columns m, tau, valid, filter.
     tx0, ty0, cw, rh = 3.2, 35.0, 5.1, 2.6
     heads = (r"$m$", r"$\tau$", "valid", "filter")
@@ -159,7 +159,7 @@ def draw(c, colors):
     for k, y in enumerate(ys_q):
         c.ax.add_patch(Rectangle((tx, y), tw, th, fc="white", ec=colors[k], lw=1.1,
                                  hatch="//////", zorder=3))
-    c.text(tx + tw + 1.0, (ys_ev[0] + ys_ev[-1] + th) / 2, "event\ntokens\n(≤ 12)",
+    c.text(tx + tw + 1.0, (ys_ev[0] + ys_ev[-1] + th) / 2, "event\ntokens\n(max 12)",
            size=0.72, ha="left")
     c.text(tx + tw + 1.0, (ys_q[0] + ys_q[-1] + th) / 2, "query\ntokens\n(9)",
            size=0.72, ha="left")
@@ -182,7 +182,7 @@ def draw(c, colors):
            "self-attention\nand MLP in parallel\n12 heads\n\nempty slots\nmasked",
            size=fs_s)
     c.arrow(bottom(rope), (bx + bw / 2, by + bh))
-    brk = tx + tw + 8.5
+    brk = tx + tw + 10.0
     c.ax.plot([brk - 1.0, brk, brk, brk - 1.0], [ys_ev[0] + th, ys_ev[0] + th,
               ys_q[-1], ys_q[-1]], color=EDGE, lw=0.9, zorder=4)
     c.arrow((brk, 56.0), (bx, 56.0))
@@ -198,6 +198,9 @@ def draw(c, colors):
            "+ $\\Delta t$ features", size=fs_s)
     c.arrow(bottom(rd), top(cat))
     c.arrow(right(base), (cat[0], right(base)[1]))
+    # The head reads the Dt features again directly (head_in, bomberman.py).
+    c.elbow([bottom(gl, 0.5), (gl[0] + gl[2] / 2, 1.6), (cat[0] + cat[2] / 2, 1.6),
+             bottom(cat)])
 
     # ---------------- Output head ----------------
     hx, hw = 133, 26
