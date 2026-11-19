@@ -57,10 +57,22 @@ export NCCL_IB_GID_INDEX=3  # sometimes 0 or 3 depending on subnet manager confi
 # Debugging selene slurm
 export SLURM_CPU_BIND=verbose
 
-# Load correct conda environment
+# Load correct conda environment. sbatch exports the submitting shell's
+# environment, so a conda env active there gets stacked under base here and
+# miniforge's bin (no numpy) lands ahead of the env's bin on PATH. Clear any
+# inherited activation, activate cleanly, and run the env's python by path.
 module load miniforge/26.9.4
-source activate
+eval "$(conda shell.bash hook)"
+for _ in 1 2 3 4 5 6 7 8; do
+    [ "${CONDA_SHLVL:-0}" -gt 0 ] || break
+    conda deactivate
+done
 conda activate <YOKE_TORCH_ENV>
+PYTHON="$CONDA_PREFIX/bin/python"
+"$PYTHON" -c "import numpy, torch" || {
+    echo "ERROR: $PYTHON cannot import numpy/torch (CONDA_PREFIX=$CONDA_PREFIX)"
+    exit 1
+}
 
 # Set number of threads per GPU. Must be <= cpus-per-task (24). Leaves cores for
 # the dataloader workers (NUM_WORKERS per rank) alongside the OMP compute threads.
@@ -71,7 +83,7 @@ export date00=`date`
 
 # Start the Code
 # Explicitly set TCP environment for the following...
-srun -vv --cpu-bind=verbose python -u <train_script> @study<studyIDX>_START.input
+srun -vv --cpu-bind=verbose "$PYTHON" -u <train_script> @study<studyIDX>_START.input
 
 # Get end time and print to stdout
 export date01=`date`
