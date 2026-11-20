@@ -803,15 +803,25 @@ def main(args, rank, world_size, local_rank, device):
     # conditioner (the context summary MLP) removed: the heads see only the token
     # readout + the Dt encoding. Asks whether the summary path carries anything
     # the transformer does not. Read vs 213 / the 21300 sweep (seed floor ~0.05).
+    # 218 RESULT: 0.8411 uniform, tie with 213 (0.8515) -> summary dropped.
+    # Studies 219 / 220: the pretrained arms on the 218 architecture (no summary),
+    # so every ViT arm of the ablation shares one model. 219 = 211 (PRETRAINED,
+    # full scope) without the summary; 220 = 217 (PRETRAINED, decoder scope) without
+    # it. Both: event tokens, mult 0.1, 300 ep, redshift off. Only run as seed
+    # replicas (make_seed_sweep --configs 219 220 -> 21900-, 22000-), read vs the
+    # 21800 sweep. The head-only arm (212) keeps its summary: with the ViT bypassed
+    # the summary is the only path that sees the context.
     EVENT_TOKENS = False
     EVENT_TOKEN_READOUT = 8
     EVENT_TOKEN_NO_SUMMARY = False
     VIT_RANDOM_INIT = False
-    if studyIDX in (203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216, 217, 218):
+    if studyIDX in (
+        203, 204, 206, 207, 208, 209, 210, 211, 213, 215, 216, 217, 218, 219, 220
+    ):
         EVENT_TOKENS = True
-    if studyIDX == 218:
+    if studyIDX in (218, 219, 220):
         EVENT_TOKEN_NO_SUMMARY = True
-    if studyIDX in (204, 207, 209, 210, 211, 213, 215, 216, 218):
+    if studyIDX in (204, 207, 209, 210, 211, 213, 215, 216, 218, 219):
         BACKBONE_FINETUNE_SCOPE = "full"
     if studyIDX == 206:
         total_epochs = 150
@@ -824,7 +834,7 @@ def main(args, rank, world_size, local_rank, device):
     # Study 216: = 213 (the champion, no redshift) run to 500 epochs with the
     # anneal stretched to match (TERMINAL_STEPS = 25000). 207 -> 209 (100 -> 300
     # ep) gained 0.106; 216 asks whether the schedule is still the lever.
-    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216, 217, 218):
+    if studyIDX in (208, 209, 210, 211, 212, 213, 215, 216, 217, 218, 219, 220):
         total_epochs = 500 if studyIDX == 216 else 300
         # Guard the CSV row: a stale TERMINAL_STEPS would silently cut the
         # anneal short (or leave it flat past the end).
@@ -937,7 +947,7 @@ def main(args, rank, world_size, local_rank, device):
     # both originals ran before the w_z fix, so their redshift term was exactly
     # zero; with w_z now trained, pivot-direct ON would make the replicas a
     # different model. Off = the originals, and matches the 213 / 217 sweeps.
-    if studyIDX in (211, 212, 213, 216, 217, 218):
+    if studyIDX in (211, 212, 213, 216, 217, 218, 219, 220):
         REDSHIFT_PIVOT_DIRECT = False
     if rank == 0:
         print(

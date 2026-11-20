@@ -1,9 +1,10 @@
-"""Schematic of the event-token forecaster (study 216 configuration).
+"""Schematic of the event-token forecaster (study 218 configuration).
 
 Draws architecture.{pdf,png}: the context table and the lead-time / phase
-features on the left; the baseline network (bottom lane) and the event-token
-transformer (top lane) in the middle; the color-anchored output head on the
-right. No model or data needed; the sizes on the figure are the 216 settings
+features on the left; the event-token transformer in the middle; the
+color-anchored output head on the right. The head reads only the transformer
+readout and the Dt features (no conditioner summary, event_token_no_summary).
+No model or data needed; the sizes on the figure are the 218 settings
 (train_LodeRunner_ddp.py, bomberman.py).
 
     python plot_architecture.py --outdir figures
@@ -23,8 +24,8 @@ HOUSE_BAND_COLORS = (
     "#2A9D8F", "#E63946", "#F4A261", "#457B9D", "#1B9E77",
     "#D62828", "#E9C46A", "#8338EC", "#264653",
 )
-# Lane fills: transformer path, baseline path, output head, inputs.
-FILL = dict(vit="#dbe8f5", base="#ececec", head="#fae3cf", inp="white")
+# Fills: transformer path, output head, inputs.
+FILL = dict(vit="#dbe8f5", head="#fae3cf", inp="white")
 EDGE = "0.25"
 # Example context: 8 valid detections of 12 slots (band index per slot).
 EX_BANDS = (0, 4, 1, 5, 8, 6, 4, 2)
@@ -126,15 +127,6 @@ def draw(c, colors):
            "lead time $\\Delta t$ (17)\ntime since\ndiscovery (21)\nFourier features",
            size=fs_s)
 
-    # ---------------- Baseline lane ----------------
-    base = c.box(32, 4, 62, 20, fc=FILL["base"])
-    c.text(base[0] + base[2] / 2, 19.0, "baseline network", weight="bold")
-    c.text(base[0] + base[2] / 2, 11.5,
-           "3-layer MLP (width 128) on the context table and\nthe query-time "
-           "features, summary of 8 numbers", size=fs_s)
-    c.arrow((gl[0] + gl[2], 10.0), (base[0], 10.0))
-    c.elbow([(ctx[0] + ctx[2], 33.0), (34.0, 33.0), (34.0, base[1] + base[3])])
-
     # ---------------- Transformer lane ----------------
     emb = c.box(36, 66, 19, 13, fc=FILL["vit"])
     c.text(*mid(emb), "event\nembedding\n2-layer MLP", size=fs_s)
@@ -142,10 +134,7 @@ def draw(c, colors):
     c.text(*mid(qry), "filter queries\nlearned vector\nper filter\n+ linear map of\n"
            "query time", size=fs_s)
     c.arrow((ctx[0] + ctx[2], 72.5), left(emb))
-    hop = 1.3  # gap where the query-time line crosses the context line
-    c.ax.plot([gl[0] + gl[2], 29.0, 29.0], [20.0, 20.0, 33.0 - hop], color=EDGE,
-              lw=0.9, zorder=4)
-    c.elbow([(29.0, 33.0 + hop), (29.0, 41.5), (qry[0], 41.5)])
+    c.elbow([(gl[0] + gl[2], 20.0), (29.0, 20.0), (29.0, 41.5), (qry[0], 41.5)])
 
     # Token column: events then queries, 2304 features each.
     tw, th, gap = 3.2, 2.15, 0.45
@@ -187,20 +176,17 @@ def draw(c, colors):
               ys_q[-1], ys_q[-1]], color=EDGE, lw=0.9, zorder=4)
     c.arrow((brk, 56.0), (bx, 56.0))
 
-    rd = c.box(108, 46, 19, 20, fc=FILL["vit"])
-    c.text(*mid(rd), "query outputs\nonly, 8 features\neach (72)\n\nzero-init:\n"
-           "starts as the\nbaseline", size=fs_s)
+    rd = c.box(108, 48, 19, 16, fc=FILL["vit"])
+    c.text(*mid(rd), "readout\nquery outputs\nonly, 8 features\neach (72)", size=fs_s)
     c.arrow((bx + bw + 4.5, 56.0), left(rd))
 
     # ---------------- Concatenation ----------------
-    cat = c.box(108, 12, 19, 24, fc="white")
-    c.text(*mid(cat), "concatenate\nsummary (8)\n+ readout (72)\n"
-           "+ $\\Delta t$ features", size=fs_s)
+    cat = c.box(108, 8, 19, 22, fc="white")
+    c.text(*mid(cat), "concatenate\nreadout (72)\n+ $\\Delta t$ (17)", size=fs_s)
     c.arrow(bottom(rd), top(cat))
-    c.arrow(right(base), (cat[0], right(base)[1]))
     # The head reads the Dt features again directly (head_in, bomberman.py).
-    c.elbow([bottom(gl, 0.5), (gl[0] + gl[2] / 2, 1.6), (cat[0] + cat[2] / 2, 1.6),
-             bottom(cat)])
+    c.arrow((gl[0] + gl[2], 12.0), (cat[0], 12.0))
+    c.text((gl[0] + gl[2] + cat[0]) / 2, 14.2, r"$\Delta t$ features", size=0.72)
 
     # ---------------- Output head ----------------
     hx, hw = 133, 26
