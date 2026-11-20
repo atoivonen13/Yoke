@@ -3,21 +3,21 @@
 Made for the worst object of study 218 (lc_01679, ~5 mag too bright in every
 band; see ``find_outliers.py``), but takes any scored stem. Draws a 3 x 3
 figure (``event_<stem>``) and a one-panel overlay (``event_<stem>_overlay``) of
-the bands with a realistic detection (color = filter; truth dash-dot / squares =
-ZTF, dashed / circles = LSST; forecast median solid; no upper limits, dense
-detections or interval bands). Per band:
+the bands with a realistic detection (color = filter; forecast median solid,
+truth faint and dash-dot / squares = ZTF, dashed / circles = LSST; no interval
+bands). Per band:
 
   * the uniform (true) curve from 1 d before the first realistic detection;
-  * the dense detections of the same object (where it would be detectable);
   * the realistic context the model saw (filled) and the other realistic
     detections it did not see (open: after the cutoff, or dropped by the
     trailing window / cap);
-  * the realistic upper limits (open down-triangles at the limiting mag),
-    which the eval and training discard;
-  * the forecast median and calibrated 90% band over the scored window.
+  * the forecast median, and in the 3 x 3 figure the calibrated 90% band, over
+    the scored window.
 
 Also prints each context detection next to the true curve at its time, i.e.
-whether the input already disagrees with the truth.
+whether the input already disagrees with the truth, and the realistic upper
+limits between the last context detection and the cutoff (known at forecast
+time, but the eval and training discard them; not drawn).
 
 Reads the eval outputs and npz sets like ``plot_run_report.py`` (no torch).
 
@@ -58,9 +58,11 @@ from plot_run_report import (
 )
 
 DEFAULT_STEM = "lc_01679"
-# Overlay: one color per filter (ZTF and LSST g, r, i share it), slots of the
-# style's color cycle; the survey is the truth's dash pattern and the marker.
-FILTER_SLOT = {"u": 3, "g": 0, "r": 2, "i": 4, "z": 1, "y": 6}
+# Overlay: one color per filter (ZTF and LSST g, r, i share it), muted and
+# ordered blue -> red with wavelength (u purple at the blue end); the survey is
+# the truth's dash pattern and the marker.
+FILTER_COLOR = {"u": "#8172b3", "g": "#4c72b0", "r": "#55a868", "i": "#ccb974",
+                "z": "#dd8452", "y": "#c44e52"}
 SURVEY_LOOK = {"ztf": ((0, (4.0, 1.4, 1.0, 1.4)), "s"), "lsst": ((0, (4.0, 1.6)), "o")}
 
 
@@ -100,16 +102,6 @@ def upper_limits(path: str, t0: float, x_lim: tuple) -> tuple:
     return phase[keep], v[keep], b[keep]
 
 
-def dense_detections(path: str | None, t0: float, x_lim: tuple) -> tuple | None:
-    """Dense detections in ``x_lim`` on the realistic clock (None if no file)."""
-    if path is None:
-        return None
-    t, v, b = read_npz_stream(path, True)
-    phase = t - t0
-    keep = (phase >= x_lim[0]) & (phase <= x_lim[1]) & np.isfinite(v)
-    return phase[keep], v[keep], b[keep]
-
-
 def print_context_vs_truth(ctx: dict, truth: tuple) -> None:
     """Each context detection minus the true curve at its time (+ = fainter)."""
     t_ph, t_mag, t_b = truth
@@ -136,10 +128,8 @@ def y_limits(*series: np.ndarray) -> tuple | None:
     return hi + pad, lo - pad
 
 
-def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None,
-              uls: tuple, title: str | None) -> plt.Figure:
-    """3 x 3 panels: truth, dense, context, other detections, upper limits,
-    forecast."""
+def fig_event(run: dict, obj: dict, other: tuple, title: str | None) -> plt.Figure:
+    """3 x 3 panels: truth, context, other detections, forecast and its band."""
     fig, axes = plt.subplots(3, 3, figsize=(LOOK["full_w"],
                                             LOOK["full_w"] * 0.78 * LOOK["h"]),
                              sharex=True)
@@ -157,20 +147,8 @@ def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None
         m = t_b == b
         ax.plot(t_ph[m], t_mag[m], color=LOOK["ink2"], lw=LOOK["lw_thin"],
                 label="Uniform truth")
-        d_mag = np.empty(0)
-        if dense is not None:
-            dm = dense[2] == b
-            d_mag = dense[1][dm]
-            ax.plot(dense[0][dm], d_mag, ls="none", marker=".",
-                    markersize=LOOK["ms_small"], color=LOOK["muted"], zorder=2,
-                    label="Dense detections")
         ax.plot(f["phase"], f["med"], color=color(0), lw=LOOK["lw"],
                 label="Forecast median")
-        um = uls[2] == b
-        # "v" points down = fainter on the inverted axis: the object is below it.
-        ax.plot(uls[0][um], uls[1][um], ls="none", marker="v",
-                markersize=LOOK["ms"], mfc="none", mec=LOOK["ink2"],
-                mew=0.6 * LOOK["mew"], zorder=3, label="Realistic upper limits")
         om = other[2] == b
         ax.plot(other[0][om], other[1][om], ls="none", marker="o",
                 markersize=LOOK["ms"], mfc="none", mec=color(1),
@@ -186,8 +164,7 @@ def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None
              va="bottom", fontsize=LOOK["tiny"], color=LOOK["muted"],
              bbox={"fc": "white", "ec": "none", "alpha": 0.8, "pad": 0.5})
         ax.set_xlim(obj["x_lim"])
-        lim = y_limits(t_mag[m], d_mag, ctx["mag"][cm], other[1][om],
-                       uls[1][um], f["med"].to_numpy())
+        lim = y_limits(t_mag[m], ctx["mag"][cm], other[1][om], f["med"].to_numpy())
         if lim is not None:
             ax.set_ylim(lim)
     sup_labels(fig, "Days since first realistic detection", "Magnitude")
@@ -204,7 +181,7 @@ def band_look(b: int) -> tuple:
     """(color, line style, marker) of band ``b`` in the overlay."""
     name = BAND_NAMES[b]
     ls, marker = SURVEY_LOOK["ztf" if name.startswith("ztf") else "lsst"]
-    return color(FILTER_SLOT[name[-1]]), ls, marker
+    return FILTER_COLOR[name[-1]], ls, marker
 
 
 def overlay_bands(ctx: dict, other: tuple) -> list:
@@ -214,20 +191,20 @@ def overlay_bands(ctx: dict, other: tuple) -> list:
 
 def fig_event_overlay(run: dict, obj: dict, other: tuple,
                       title: str | None) -> plt.Figure:
-    """The observed bands in one panel: color = filter; truth dashed (the dash
-    pattern and marker = survey), forecast median solid. No upper limits, dense
-    detections or interval bands."""
+    """The observed bands in one panel: color = filter; forecast median solid,
+    truth faint and dashed (the dash pattern and marker = survey)."""
     fig, ax = plt.subplots(figsize=figsize("full_w", 3.8))
     ctx, (t_ph, t_mag, t_b), fc = obj["ctx"], obj["truth"], obj["forecast"]
     ax.axvline(obj["cutoff"], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"])
-    soft = 0.55  # forecast line alpha; the truth is opaque on top
+    faint = 0.45  # truth line alpha; the forecast is opaque
     drawn, band_handles, any_other = [], [], False
     for b in overlay_bands(ctx, other):
         c, ls, mk = band_look(b)
         f = fc[fc["b"] == b].sort_values("phase")
-        ax.plot(f["phase"], f["med"], color=c, lw=LOOK["lw"], alpha=soft)
+        ax.plot(f["phase"], f["med"], color=c, lw=1.3 * LOOK["lw"], zorder=3)
         m = t_b == b
-        ax.plot(t_ph[m], t_mag[m], color=c, ls=ls, lw=LOOK["lw"], zorder=3)
+        ax.plot(t_ph[m], t_mag[m], color=c, ls=ls, lw=LOOK["lw"], alpha=faint,
+                zorder=2)
         om = other[2] == b
         any_other |= bool(om.any())
         ax.plot(other[0][om], other[1][om], ls="none", marker=mk,
@@ -258,10 +235,10 @@ def fig_event_overlay(run: dict, obj: dict, other: tuple,
     gray, kinds = LOOK["ink2"], []
     kinds.append(plt.Line2D([], [], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"],
                             label=f"Context cutoff ({obj['cutoff']:g} d)"))
-    kinds.append(plt.Line2D([], [], color=gray, ls=SURVEY_LOOK["lsst"][0], lw=LOOK["lw"],
-                            label="Uniform truth"))
-    kinds.append(plt.Line2D([], [], color=gray, lw=LOOK["lw"], alpha=soft,
+    kinds.append(plt.Line2D([], [], color=gray, lw=1.3 * LOOK["lw"],
                             label="Forecast median"))
+    kinds.append(plt.Line2D([], [], color=gray, ls=SURVEY_LOOK["lsst"][0], lw=LOOK["lw"],
+                            alpha=faint, label="Uniform truth"))
     kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
                             mfc=gray, mec=LOOK["ink"], mew=0.5 * LOOK["mew"],
                             label="Realistic context"))
@@ -288,8 +265,6 @@ def main() -> None:
     p.add_argument("--title", default=None,
                    help="Text above the legend (default none: the caption names it).")
     p.add_argument("--realistic_glob", default=None)
-    p.add_argument("--dense_glob", default=None,
-                   help="Dense npz set (default: the eval's; omitted if unknown).")
     p.add_argument("--uniform_glob", default=None)
     p.add_argument("--layout", choices=("grid", "overlay", "both"), default="both",
                    help="3 x 3 panels (event_<stem>), all bands in one panel "
@@ -319,11 +294,6 @@ def main() -> None:
     real_path = _find_npz(sources["realistic_glob"], args.stem)
     other = other_detections(real_path, ctx["t0"], ctx, obj["x_lim"])
     uls = upper_limits(real_path, ctx["t0"], obj["x_lim"])
-    dense_glob = args.dense_glob or sig.get("dense_glob")
-    dense = dense_detections(dense_glob and _find_npz(dense_glob, args.stem),
-                             ctx["t0"], obj["x_lim"])
-    if dense is None:
-        print("no dense npz found; drawing without dense detections")
 
     per_obj = per_object_rmse(run)
     rank = float((per_obj < per_obj[args.stem]).mean() * 100)
@@ -344,7 +314,7 @@ def main() -> None:
     outdir = args.outdir or os.path.join(run["run_dir"], "figures")
     os.makedirs(outdir, exist_ok=True)
     if args.layout in ("grid", "both"):
-        save(fig_event(run, args.stem, obj, other, dense, uls, args.title), outdir,
+        save(fig_event(run, obj, other, args.title), outdir,
              f"event_{args.stem}", tuple(args.formats))
     if args.layout in ("overlay", "both"):
         shown = overlay_bands(ctx, other)
