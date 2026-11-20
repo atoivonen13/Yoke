@@ -2,9 +2,9 @@
 
 Made for the worst object of study 218 (lc_01679, ~5 mag too bright in every
 band; see ``find_outliers.py``), but takes any scored stem. Draws a 3 x 3
-figure (``event_<stem>``) and an overlay of all nine bands in one panel
-(``event_<stem>_overlay``: color = filter, dashed / squares = ZTF, solid /
-circles = LSST; no interval bands unless ``--overlay_intervals``). Per band:
+figure (``event_<stem>``) and a one-panel overlay (``event_<stem>_overlay``) of
+the bands with a realistic detection (color = filter, dashed / squares = ZTF,
+solid / circles = LSST; no upper limits). Per band:
 
   * the uniform (true) curve from 1 d before the first realistic detection;
   * the dense detections of the same object (where it would be detectable);
@@ -206,40 +206,48 @@ def band_look(b: int) -> tuple:
     return color(FILTER_SLOT[name[-1]]), ls, marker
 
 
+def overlay_bands(ctx: dict, other: tuple) -> list:
+    """Bands with at least one realistic detection in the plotted window."""
+    return sorted(set(ctx["b"].tolist()) | set(other[2].tolist()))
+
+
 def fig_event_overlay(run: dict, obj: dict, other: tuple, dense: tuple | None,
-                      uls: tuple, title: str | None, intervals: bool) -> plt.Figure:
-    """All nine bands in one panel: color = filter, line style / marker = survey."""
+                      title: str | None) -> plt.Figure:
+    """The observed bands in one panel: color = filter, line style / marker =
+    survey; truth, forecast median and 90% band, no upper limits."""
     fig, ax = plt.subplots(figsize=figsize("full_w", 3.8))
     ctx, (t_ph, t_mag, t_b), fc = obj["ctx"], obj["truth"], obj["forecast"]
     ax.axvline(obj["cutoff"], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"])
-    fat = 1.8 * LOOK["lw"]  # forecast: wide and translucent, truth: thin on top
-    drawn = [fc["med"].to_numpy(), t_mag, ctx["mag"], other[1], uls[1]]
-    band_handles = []
-    for b in range(N_BANDS):
+    soft = 0.55  # forecast line alpha; the truth is thin and opaque on top
+    drawn, band_handles, any_other, any_dense = [], [], False, False
+    for b in overlay_bands(ctx, other):
         c, ls, mk = band_look(b)
         f = fc[fc["b"] == b].sort_values("phase")
-        if intervals and run["has_band"]:
+        drawn.append(f["med"].to_numpy())
+        if run["has_band"]:
             ax.fill_between(f["phase"], f["low_cal"], f["high_cal"], color=c,
-                            alpha=0.08, lw=0)
+                            alpha=0.1, lw=0)  # light: up to 9 bands overlap
             drawn += [f["low_cal"].to_numpy(), f["high_cal"].to_numpy()]
-        ax.plot(f["phase"], f["med"], color=c, ls=ls, lw=fat, alpha=0.45)
+        ax.plot(f["phase"], f["med"], color=c, ls=ls, lw=LOOK["lw"], alpha=soft)
         m = t_b == b
         ax.plot(t_ph[m], t_mag[m], color=c, ls=ls, lw=LOOK["lw_thin"], zorder=3)
+        drawn.append(t_mag[m])
         if dense is not None:
             dm = dense[2] == b
             ax.plot(dense[0][dm], dense[1][dm], ls="none", marker=".",
                     markersize=LOOK["ms_small"], color=c, alpha=0.4, zorder=2)
             drawn.append(dense[1][dm])
-        um = uls[2] == b
-        ax.plot(uls[0][um], uls[1][um], ls="none", marker="v", markersize=LOOK["ms"],
-                mfc="none", mec=c, mew=0.6 * LOOK["mew"], zorder=4)
+            any_dense |= bool(dm.any())
         om = other[2] == b
+        any_other |= bool(om.any())
+        drawn.append(other[1][om])
         ax.plot(other[0][om], other[1][om], ls="none", marker=mk,
                 markersize=LOOK["ms"], mfc="none", mec=c, mew=LOOK["mew"], zorder=4)
         cm = ctx["b"] == b
         ax.plot(ctx["phase"][cm], ctx["mag"][cm], ls="none", marker=mk,
                 markersize=LOOK["ms"], mfc=c, mec=LOOK["ink"],
                 mew=0.5 * LOOK["mew"], zorder=5)
+        drawn.append(ctx["mag"][cm])
         band_handles.append(plt.Line2D([], [], color=c, ls=ls, lw=LOOK["lw_thin"],
                                        marker=mk, markersize=LOOK["ms"], mfc=c,
                                        mec=LOOK["ink"], mew=0.5 * LOOK["mew"],
@@ -251,7 +259,7 @@ def fig_event_overlay(run: dict, obj: dict, other: tuple, dense: tuple | None,
     ax.set_xlabel("Days since first realistic detection")
     ax.set_ylabel("Magnitude")
     note(ax, f"{len(ctx['phase'])} in context, RMSE {np.sqrt(np.mean(fc['r'] ** 2)):.2f} "
-         "(all bands)", (0.02, 0.03), xycoords="axes fraction", ha="left", va="bottom",
+         "(all 9 bands)", (0.02, 0.03), xycoords="axes fraction", ha="left", va="bottom",
          fontsize=LOOK["tiny"], color=LOOK["muted"],
          bbox={"fc": "white", "ec": "none", "alpha": 0.8, "pad": 0.5})
     ax.legend(handles=band_handles, loc="center left", bbox_to_anchor=(1.01, 0.5))
@@ -261,22 +269,20 @@ def fig_event_overlay(run: dict, obj: dict, other: tuple, dense: tuple | None,
     kinds.append(plt.Line2D([], [], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"],
                             label=f"Context cutoff ({obj['cutoff']:g} d)"))
     kinds.append(plt.Line2D([], [], color=gray, lw=LOOK["lw_thin"], label="Uniform truth"))
-    kinds.append(plt.Line2D([], [], color=gray, lw=fat, alpha=0.45,
+    kinds.append(plt.Line2D([], [], color=gray, lw=LOOK["lw"], alpha=soft,
                             label="Forecast median"))
-    if intervals and run["has_band"]:
+    if run["has_band"]:
         band_label = "Calibrated" if run["calibrated"] else "Raw"
-        kinds.append(plt.Rectangle((0, 0), 1, 1, color=gray, alpha=0.15, lw=0,
+        kinds.append(plt.Rectangle((0, 0), 1, 1, color=gray, alpha=0.2, lw=0,
                                    label=f"{band_label} {run['interval']:.0%} band"))
     kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
                             mfc=gray, mec=LOOK["ink"], mew=0.5 * LOOK["mew"],
                             label="Realistic context"))
-    kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
-                            mfc="none", mec=gray, mew=LOOK["mew"],
-                            label="Realistic, not in context"))
-    kinds.append(plt.Line2D([], [], ls="none", marker="v", markersize=LOOK["ms"],
-                            mfc="none", mec=gray, mew=0.6 * LOOK["mew"],
-                            label="Realistic upper limits"))
-    if dense is not None:
+    if any_other:
+        kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
+                                mfc="none", mec=gray, mew=LOOK["mew"],
+                                label="Realistic, not in context"))
+    if any_dense:
         kinds.append(plt.Line2D([], [], ls="none", marker=".",
                                 markersize=LOOK["ms_small"], color=gray,
                                 label="Dense detections"))
@@ -305,9 +311,6 @@ def main() -> None:
     p.add_argument("--layout", choices=("grid", "overlay", "both"), default="both",
                    help="3 x 3 panels (event_<stem>), all bands in one panel "
                         "(event_<stem>_overlay), or both.")
-    p.add_argument("--overlay_intervals", action="store_true",
-                   help="Also shade the 90%% band per filter in the overlay "
-                        "(off: nine overlapping bands are hard to read).")
     p.add_argument("--context_window_days", type=float, default=2.0)
     p.add_argument("--max_context_len", type=int, default=12)
     add_style_args(p)
@@ -361,8 +364,11 @@ def main() -> None:
         save(fig_event(run, args.stem, obj, other, dense, uls, args.title), outdir,
              f"event_{args.stem}", tuple(args.formats))
     if args.layout in ("overlay", "both"):
-        save(fig_event_overlay(run, obj, other, dense, uls, args.title,
-                               args.overlay_intervals),
+        shown = overlay_bands(ctx, other)
+        print(f"\n  overlay bands (with a realistic detection): "
+              f"{[BAND_NAMES[b] for b in shown]}; left out: "
+              f"{[BAND_NAMES[b] for b in range(N_BANDS) if b not in shown]}")
+        save(fig_event_overlay(run, obj, other, dense, args.title),
              outdir, f"event_{args.stem}_overlay", tuple(args.formats))
 
 
