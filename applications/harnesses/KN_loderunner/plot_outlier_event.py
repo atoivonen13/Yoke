@@ -1,14 +1,18 @@
 """Appendix figure: the forecast of one object in all nine bands.
 
 Made for the worst object of study 218 (lc_01679, ~5 mag too bright in every
-band; see ``find_outliers.py``), but takes any scored stem. One 3 x 3 figure,
-per band:
+band; see ``find_outliers.py``), but takes any scored stem. Draws a 3 x 3
+figure (``event_<stem>``) and an overlay of all nine bands in one panel
+(``event_<stem>_overlay``: color = filter, dashed / squares = ZTF, solid /
+circles = LSST; no interval bands unless ``--overlay_intervals``). Per band:
 
   * the uniform (true) curve from 1 d before the first realistic detection;
   * the dense detections of the same object (where it would be detectable);
   * the realistic context the model saw (filled) and the other realistic
     detections it did not see (open: after the cutoff, or dropped by the
     trailing window / cap);
+  * the realistic upper limits (open down-triangles at the limiting mag),
+    which the eval and training discard;
   * the forecast median and calibrated 90% band over the scored window.
 
 Also prints each context detection next to the true curve at its time, i.e.
@@ -34,10 +38,14 @@ from plot_run_report import (
     DEFAULT_UNIFORM_GLOB,
     LOOK,
     N_BANDS,
+    NPZ_BAND_KEYS,
+    NPZ_ERROR_COL,
+    NPZ_VALUE_COL,
     _find_npz,
     add_style_args,
     apply_style,
     color,
+    figsize,
     load_run,
     note,
     object_context,
@@ -49,6 +57,10 @@ from plot_run_report import (
 )
 
 DEFAULT_STEM = "lc_01679"
+# Overlay: one color per filter (ZTF and LSST g, r, i share it), slots of the
+# style's color cycle; the survey is the line style and marker.
+FILTER_SLOT = {"u": 3, "g": 0, "r": 2, "i": 4, "z": 1, "y": 6}
+SURVEY_LOOK = {"ztf": ("--", "s"), "lsst": ("-", "o")}
 
 
 def other_detections(path: str, t0: float, ctx: dict, x_lim: tuple) -> tuple:
@@ -59,6 +71,31 @@ def other_detections(path: str, t0: float, ctx: dict, x_lim: tuple) -> tuple:
     in_ctx = {(round(float(p), 6), int(c)) for p, c in zip(ctx["phase"], ctx["b"])}
     keep &= np.array([(round(float(p), 6), int(c)) not in in_ctx
                       for p, c in zip(phase, b)], dtype=bool)
+    return phase[keep], v[keep], b[keep]
+
+
+def upper_limits(path: str, t0: float, x_lim: tuple) -> tuple:
+    """Realistic non-detections (limiting mag) in ``x_lim``; the eval drops them.
+
+    Same file layout as ``read_npz_stream``: a non-finite error marks an upper
+    limit, and the value column then holds the limiting magnitude.
+    """
+    t, v, b = [], [], []
+    with np.load(path, allow_pickle=True) as data:
+        names = set(data.files)
+        keys = next((k for k in NPZ_BAND_KEYS if names & set(k[3:])), NPZ_BAND_KEYS[0])
+        for band, key in enumerate(keys):
+            if key not in names or np.asarray(data[key]).size == 0:
+                continue
+            arr = np.asarray(data[key])
+            arr = arr[~np.isfinite(arr[:, NPZ_ERROR_COL])]
+            t.append(arr[:, 0].astype(np.float64) - t0)
+            v.append(arr[:, NPZ_VALUE_COL].astype(np.float64))
+            b.append(np.full(len(arr), band, dtype=np.int64))
+    if not t:
+        return np.empty(0), np.empty(0), np.empty(0, dtype=np.int64)
+    phase, v, b = np.concatenate(t), np.concatenate(v), np.concatenate(b)
+    keep = (phase >= x_lim[0]) & (phase <= x_lim[1]) & np.isfinite(v)
     return phase[keep], v[keep], b[keep]
 
 
@@ -87,8 +124,8 @@ def print_context_vs_truth(ctx: dict, truth: tuple) -> None:
             print(f"  {BAND_NAMES[b]:>5} {p:>10.3f} {m:>8.2f} {'--':>8} {'--':>11}")
 
 
-def y_limits(b: int, *series: np.ndarray) -> tuple | None:
-    """Faint-at-the-bottom limits over every drawn series of band ``b``."""
+def y_limits(*series: np.ndarray) -> tuple | None:
+    """Faint-at-the-bottom limits over every drawn series."""
     vals = np.concatenate([s for s in series if s.size])
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
@@ -99,8 +136,9 @@ def y_limits(b: int, *series: np.ndarray) -> tuple | None:
 
 
 def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None,
-              title: str | None) -> plt.Figure:
-    """3 x 3 panels: truth, dense, context, other detections, forecast."""
+              uls: tuple, title: str | None) -> plt.Figure:
+    """3 x 3 panels: truth, dense, context, other detections, upper limits,
+    forecast."""
     fig, axes = plt.subplots(3, 3, figsize=(LOOK["full_w"],
                                             LOOK["full_w"] * 0.78 * LOOK["h"]),
                              sharex=True)
@@ -127,6 +165,11 @@ def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None
                     label="Dense detections")
         ax.plot(f["phase"], f["med"], color=color(0), lw=LOOK["lw"],
                 label="Forecast median")
+        um = uls[2] == b
+        # "v" points down = fainter on the inverted axis: the object is below it.
+        ax.plot(uls[0][um], uls[1][um], ls="none", marker="v",
+                markersize=LOOK["ms"], mfc="none", mec=LOOK["ink2"],
+                mew=0.6 * LOOK["mew"], zorder=3, label="Realistic upper limits")
         om = other[2] == b
         ax.plot(other[0][om], other[1][om], ls="none", marker="o",
                 markersize=LOOK["ms"], mfc="none", mec=color(1),
@@ -142,8 +185,8 @@ def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None
              va="bottom", fontsize=LOOK["tiny"], color=LOOK["muted"],
              bbox={"fc": "white", "ec": "none", "alpha": 0.8, "pad": 0.5})
         ax.set_xlim(obj["x_lim"])
-        lim = y_limits(b, t_mag[m], d_mag, ctx["mag"][cm], other[1][om],
-                       f["med"].to_numpy())
+        lim = y_limits(t_mag[m], d_mag, ctx["mag"][cm], other[1][om],
+                       uls[1][um], f["med"].to_numpy())
         if lim is not None:
             ax.set_ylim(lim)
     sup_labels(fig, "Days since first realistic detection", "Magnitude")
@@ -152,7 +195,93 @@ def fig_event(run: dict, stem: str, obj: dict, other: tuple, dense: tuple | None
         for h, lab in zip(*ax.get_legend_handles_labels()):
             handles.setdefault(lab, h)
     top_legend(fig, list(handles.values()), list(handles),
-               ncol=-(-len(handles) // 2), title=title)
+               ncol=min(3, len(handles)), title=title)
+    return fig
+
+
+def band_look(b: int) -> tuple:
+    """(color, line style, marker) of band ``b`` in the overlay."""
+    name = BAND_NAMES[b]
+    ls, marker = SURVEY_LOOK["ztf" if name.startswith("ztf") else "lsst"]
+    return color(FILTER_SLOT[name[-1]]), ls, marker
+
+
+def fig_event_overlay(run: dict, obj: dict, other: tuple, dense: tuple | None,
+                      uls: tuple, title: str | None, intervals: bool) -> plt.Figure:
+    """All nine bands in one panel: color = filter, line style / marker = survey."""
+    fig, ax = plt.subplots(figsize=figsize("full_w", 3.8))
+    ctx, (t_ph, t_mag, t_b), fc = obj["ctx"], obj["truth"], obj["forecast"]
+    ax.axvline(obj["cutoff"], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"])
+    fat = 1.8 * LOOK["lw"]  # forecast: wide and translucent, truth: thin on top
+    drawn = [fc["med"].to_numpy(), t_mag, ctx["mag"], other[1], uls[1]]
+    band_handles = []
+    for b in range(N_BANDS):
+        c, ls, mk = band_look(b)
+        f = fc[fc["b"] == b].sort_values("phase")
+        if intervals and run["has_band"]:
+            ax.fill_between(f["phase"], f["low_cal"], f["high_cal"], color=c,
+                            alpha=0.08, lw=0)
+            drawn += [f["low_cal"].to_numpy(), f["high_cal"].to_numpy()]
+        ax.plot(f["phase"], f["med"], color=c, ls=ls, lw=fat, alpha=0.45)
+        m = t_b == b
+        ax.plot(t_ph[m], t_mag[m], color=c, ls=ls, lw=LOOK["lw_thin"], zorder=3)
+        if dense is not None:
+            dm = dense[2] == b
+            ax.plot(dense[0][dm], dense[1][dm], ls="none", marker=".",
+                    markersize=LOOK["ms_small"], color=c, alpha=0.4, zorder=2)
+            drawn.append(dense[1][dm])
+        um = uls[2] == b
+        ax.plot(uls[0][um], uls[1][um], ls="none", marker="v", markersize=LOOK["ms"],
+                mfc="none", mec=c, mew=0.6 * LOOK["mew"], zorder=4)
+        om = other[2] == b
+        ax.plot(other[0][om], other[1][om], ls="none", marker=mk,
+                markersize=LOOK["ms"], mfc="none", mec=c, mew=LOOK["mew"], zorder=4)
+        cm = ctx["b"] == b
+        ax.plot(ctx["phase"][cm], ctx["mag"][cm], ls="none", marker=mk,
+                markersize=LOOK["ms"], mfc=c, mec=LOOK["ink"],
+                mew=0.5 * LOOK["mew"], zorder=5)
+        band_handles.append(plt.Line2D([], [], color=c, ls=ls, lw=LOOK["lw_thin"],
+                                       marker=mk, markersize=LOOK["ms"], mfc=c,
+                                       mec=LOOK["ink"], mew=0.5 * LOOK["mew"],
+                                       label=BAND_LABELS[b]))
+    ax.set_xlim(obj["x_lim"])
+    lim = y_limits(*drawn)
+    if lim is not None:
+        ax.set_ylim(lim)
+    ax.set_xlabel("Days since first realistic detection")
+    ax.set_ylabel("Magnitude")
+    note(ax, f"{len(ctx['phase'])} in context, RMSE {np.sqrt(np.mean(fc['r'] ** 2)):.2f} "
+         "(all bands)", (0.02, 0.03), xycoords="axes fraction", ha="left", va="bottom",
+         fontsize=LOOK["tiny"], color=LOOK["muted"],
+         bbox={"fc": "white", "ec": "none", "alpha": 0.8, "pad": 0.5})
+    ax.legend(handles=band_handles, loc="center left", bbox_to_anchor=(1.01, 0.5))
+
+    # What each mark means, drawn in gray (the color legend is beside the axes).
+    gray, kinds = LOOK["ink2"], []
+    kinds.append(plt.Line2D([], [], color=LOOK["muted"], ls=":", lw=LOOK["lw_thin"],
+                            label=f"Context cutoff ({obj['cutoff']:g} d)"))
+    kinds.append(plt.Line2D([], [], color=gray, lw=LOOK["lw_thin"], label="Uniform truth"))
+    kinds.append(plt.Line2D([], [], color=gray, lw=fat, alpha=0.45,
+                            label="Forecast median"))
+    if intervals and run["has_band"]:
+        band_label = "Calibrated" if run["calibrated"] else "Raw"
+        kinds.append(plt.Rectangle((0, 0), 1, 1, color=gray, alpha=0.15, lw=0,
+                                   label=f"{band_label} {run['interval']:.0%} band"))
+    kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
+                            mfc=gray, mec=LOOK["ink"], mew=0.5 * LOOK["mew"],
+                            label="Realistic context"))
+    kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
+                            mfc="none", mec=gray, mew=LOOK["mew"],
+                            label="Realistic, not in context"))
+    kinds.append(plt.Line2D([], [], ls="none", marker="v", markersize=LOOK["ms"],
+                            mfc="none", mec=gray, mew=0.6 * LOOK["mew"],
+                            label="Realistic upper limits"))
+    if dense is not None:
+        kinds.append(plt.Line2D([], [], ls="none", marker=".",
+                                markersize=LOOK["ms_small"], color=gray,
+                                label="Dense detections"))
+    top_legend(fig, kinds, [h.get_label() for h in kinds], ncol=min(4, len(kinds)),
+               title=title)
     return fig
 
 
@@ -173,6 +302,12 @@ def main() -> None:
     p.add_argument("--dense_glob", default=None,
                    help="Dense npz set (default: the eval's; omitted if unknown).")
     p.add_argument("--uniform_glob", default=None)
+    p.add_argument("--layout", choices=("grid", "overlay", "both"), default="both",
+                   help="3 x 3 panels (event_<stem>), all bands in one panel "
+                        "(event_<stem>_overlay), or both.")
+    p.add_argument("--overlay_intervals", action="store_true",
+                   help="Also shade the 90%% band per filter in the overlay "
+                        "(off: nine overlapping bands are hard to read).")
     p.add_argument("--context_window_days", type=float, default=2.0)
     p.add_argument("--max_context_len", type=int, default=12)
     add_style_args(p)
@@ -195,8 +330,9 @@ def main() -> None:
     if obj is None:
         raise SystemExit(1)
     ctx = obj["ctx"]
-    other = other_detections(_find_npz(sources["realistic_glob"], args.stem),
-                             ctx["t0"], ctx, obj["x_lim"])
+    real_path = _find_npz(sources["realistic_glob"], args.stem)
+    other = other_detections(real_path, ctx["t0"], ctx, obj["x_lim"])
+    uls = upper_limits(real_path, ctx["t0"], obj["x_lim"])
     dense_glob = args.dense_glob or sig.get("dense_glob")
     dense = dense_detections(dense_glob and _find_npz(dense_glob, args.stem),
                              ctx["t0"], obj["x_lim"])
@@ -211,11 +347,23 @@ def main() -> None:
           f"detections of {ctx['n_pre_cutoff']} before the {obj['cutoff']:g} d "
           f"cutoff, bands {sorted({BAND_NAMES[b] for b in ctx['b']})}")
     print_context_vs_truth(ctx, obj["truth"])
+    gap = (uls[0] > ctx["phase"][-1]) & (uls[0] <= obj["cutoff"])
+    print(f"\n  realistic upper limits: {len(uls[0])} in the plotted window, "
+          f"{int(gap.sum())} between the last context detection "
+          f"({ctx['phase'][-1]:.2f} d) and the {obj['cutoff']:g} d cutoff "
+          "(known at forecast time, not given to the model)")
+    for p_, v_, b_ in zip(uls[0][gap], uls[1][gap], uls[2][gap]):
+        print(f"  {BAND_NAMES[b_]:>5} {p_:>10.3f}  fainter than {v_:.2f}")
 
     outdir = args.outdir or os.path.join(run["run_dir"], "figures")
     os.makedirs(outdir, exist_ok=True)
-    save(fig_event(run, args.stem, obj, other, dense, args.title), outdir,
-         f"event_{args.stem}", tuple(args.formats))
+    if args.layout in ("grid", "both"):
+        save(fig_event(run, args.stem, obj, other, dense, uls, args.title), outdir,
+             f"event_{args.stem}", tuple(args.formats))
+    if args.layout in ("overlay", "both"):
+        save(fig_event_overlay(run, obj, other, dense, uls, args.title,
+                               args.overlay_intervals),
+             outdir, f"event_{args.stem}_overlay", tuple(args.formats))
 
 
 if __name__ == "__main__":
