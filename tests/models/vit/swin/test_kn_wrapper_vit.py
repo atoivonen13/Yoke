@@ -293,9 +293,10 @@ def test_event_tokens_finetune_scopes(scope: str) -> None:
             assert p.grad is not None and p.grad.abs().sum() > 0, name
 
 
+@pytest.mark.parametrize("scope", ["full", "decoder"])
 @pytest.mark.parametrize("color_anchored_head", [False, True])
-def test_event_tokens_no_summary(color_anchored_head: bool) -> None:
-    """Study 218: no conditioner; heads read the token readout + dt_feat only."""
+def test_event_tokens_no_summary(color_anchored_head: bool, scope: str) -> None:
+    """Studies 218-220: no conditioner; heads read the token readout + dt_feat only."""
     torch.manual_seed(0)
     model = _make_event_token_wrapper(
         event_token_no_summary=True, color_anchored_head=color_anchored_head
@@ -309,7 +310,7 @@ def test_event_tokens_no_summary(color_anchored_head: bool) -> None:
         model,
         {"lr": 1e-3},
         backbone_tail_lr_mult=0.1,
-        backbone_finetune_scope="full",
+        backbone_finetune_scope=scope,
     )
     torch.nn.init.normal_(model.event_token_io["readout"].weight)
     x, in_vars, Dt = _window_inputs()
