@@ -967,12 +967,12 @@ def fig_examples(run: dict, bands: list, stems: list | None,
             if i == 0:
                 ax.set_title(BAND_LABELS[b])
             if j == 0:
-                ax.set_ylabel(f"{caption}\nmag")
+                ax.set_ylabel(f"{caption}\napparent mag")
             if j == len(bands) - 1:
                 note(ax, stem, (1.0, 0.0), xycoords="axes fraction",
                      xytext=(-4, 3), textcoords="offset points", ha="right",
                      va="bottom", fontsize=LOOK["tiny"], color=LOOK["muted"])
-    sup_labels(fig, "Days since first realistic detection", None)
+    sup_labels(fig, "Days since first detection", None)
     # Union over panels: a band with no context points has no context handle.
     handles = {}
     for ax in axes.ravel():
@@ -1178,7 +1178,7 @@ def fig_median_example(run: dict, ex: dict, with_forecast: bool,
         ax.set_xlim(ex["x_lim"])
         if ex["y_lim"][b] is not None:
             ax.set_ylim(ex["y_lim"][b])
-    sup_labels(fig, "Days since first realistic detection", "Magnitude")
+    sup_labels(fig, "Days since first detection", "Apparent magnitude")
     handles = {}
     for ax in axes:
         for h, lab in zip(*ax.get_legend_handles_labels()):

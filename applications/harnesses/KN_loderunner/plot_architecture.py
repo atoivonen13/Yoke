@@ -98,9 +98,9 @@ def draw(c, colors):
     ctx = c.box(1, 30, 25, 52, fc=FILL["inp"])
     c.text(ctx[0] + ctx[2] / 2, 79, "context table", weight="bold")
     c.text(ctx[0] + ctx[2] / 2, 75.4, r"${\leq}\,12$ detections," "\nlast 2 d", size=fs_s)
-    # Mini table: columns m, tau, valid, filter.
+    # Mini table: columns m, t, valid, filter.
     tx0, ty0, cw, rh = 3.2, 35.0, 5.1, 2.6
-    heads = (r"$m$", r"$\tau$", "valid", "filter")
+    heads = (r"$m$", r"$t$", "valid", "filter")
     for j, hname in enumerate(heads):
         c.text(tx0 + (j + 0.5) * cw, ty0 + N_SLOTS * rh + 1.6, hname, size=0.72)
     rng = np.random.default_rng(3)
@@ -160,7 +160,7 @@ def draw(c, colors):
     # RoPE positions above the blocks.
     rope = c.box(76, 74, 24, 12, fc="white", ls="--")
     c.text(*mid(rope), "RoPE positions\ncolumn: filter\n"
-           r"row: time, $\tau$ (events)" "\n" r"or $\Delta t$ (queries)", size=0.68)
+           r"row: time, $t$ (events)" "\n" r"or $\Delta t$ (queries)", size=0.68)
 
     # Six stacked transformer blocks.
     bx, by, bw, bh = 76, 32, 24, 36

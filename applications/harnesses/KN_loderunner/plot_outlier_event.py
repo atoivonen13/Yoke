@@ -170,7 +170,7 @@ def fig_event(run: dict, obj: dict, other: tuple, title: str | None) -> plt.Figu
         lim = y_limits(t_mag[m], ctx["mag"][cm], other[1][om], f["med"].to_numpy())
         if lim is not None:
             ax.set_ylim(lim)
-    sup_labels(fig, "Days since first realistic detection", "Magnitude")
+    sup_labels(fig, "Days since first detection", "Apparent magnitude")
     handles = {}
     for ax in axes.ravel():
         for h, lab in zip(*ax.get_legend_handles_labels()):
@@ -227,8 +227,8 @@ def fig_event_overlay(run: dict, obj: dict, other: tuple,
     lim = y_limits(*drawn)
     if lim is not None:
         ax.set_ylim(lim)
-    ax.set_xlabel("Days since first realistic detection")
-    ax.set_ylabel("Magnitude")
+    ax.set_xlabel("Days since first detection")
+    ax.set_ylabel("Apparent magnitude")
     note(ax, f"{len(ctx['phase'])} in context, RMSE {np.sqrt(np.mean(fc['r'] ** 2)):.2f} "
          "(all 9 bands)", (0.02, 0.03), xycoords="axes fraction", ha="left", va="bottom",
          fontsize=LOOK["tiny"], color=LOOK["muted"],
@@ -251,8 +251,9 @@ def fig_event_overlay(run: dict, obj: dict, other: tuple,
         kinds.append(plt.Line2D([], [], ls="none", marker="o", markersize=LOOK["ms"],
                                 mfc="none", mec=gray, mew=LOOK["mew"],
                                 label="Realistic, not in context"))
-    top_legend(fig, kinds, [h.get_label() for h in kinds], ncol=min(3, len(kinds)),
-               title=title)
+    # One row for the usual four entries; a fifth ("not in context") wraps.
+    top_legend(fig, kinds, [h.get_label() for h in kinds],
+               ncol=len(kinds) if len(kinds) <= 4 else 3, title=title)
     return fig
 
 

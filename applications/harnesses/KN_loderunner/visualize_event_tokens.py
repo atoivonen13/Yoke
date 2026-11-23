@@ -418,8 +418,8 @@ def plot_tokens(obj, meta, w_h, dts, ref_i, focus, ref_dt, path, title):
         # Categorical axis: no minor ticks between the bands.
         ax.tick_params(axis="x", which="minor", bottom=False, top=False)
     ax.set_xlim(-0.6, N_BANDS - 0.4)
-    ax.set_ylabel(pub_text("anchor-relative time tau (d) = RoPE row",
-                           r"$\tau$ (d) = RoPE row"))
+    ax.set_ylabel(pub_text("anchor-relative time t (d) = RoPE row",
+                           r"$t$ (d) = RoPE row"))
     ax.set_xlabel("band = RoPE column")
     ax.set_title(pub_text(f"Token set: {len(valid_idx)} events + {N_BANDS} queries; lines = "
                           f"last-block attention from Q {BAND_NAMES[focus]}",
@@ -513,7 +513,7 @@ def plot_tokens_paper(meta, w_h, dts, ref_i, focus, ref_dt, canvas, path_stem, f
     ax.set_xlim(-0.6, N_BANDS - 0.15)
     ax.set_ylim(-c0 - 0.15, ref_dt + 0.45)
     ax.set_xlabel("band (RoPE column)")
-    ax.set_ylabel(pub_text("tau (d)", r"$\tau$ (d)"))
+    ax.set_ylabel(pub_text("t (d)", r"$t$ (d)"))
     rows = ax.secondary_yaxis(
         "right", functions=(lambda t: (t + c0) / span * (H - 1),
                             lambda r: r / (H - 1) * span - c0))
@@ -546,7 +546,7 @@ def plot_tokens_paper(meta, w_h, dts, ref_i, focus, ref_dt, canvas, path_stem, f
                label=pub_text(f"band query at Dt = {ref_dt:g} d",
                               rf"band query at $\Delta t$ = {ref_dt:g} d")),
         Line2D([], [], color="0.4", ls="--", lw=rc_lw(0.8),
-               label=pub_text("last detection (tau = 0)", r"last detection ($\tau = 0$)")),
+               label=pub_text("last detection (t = 0)", r"last detection ($t = 0$)")),
         Line2D([], [], color=BAND_COLORS[focus], lw=rc_lw(2.5), alpha=0.6,
                label=f"attention from Q {q_name} ({ev_share:.0f}% on events)"),
     ]
@@ -647,8 +647,8 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
     if styled():
         axb.tick_params(axis="y", which="minor", left=False, right=False)
     axb.set_xlim(-c0, t_hi)
-    axb.set_xlabel(pub_text("time from last detection tau (d)",
-                            r"time from last detection $\tau$ (d)"))
+    axb.set_xlabel(pub_text("time from last detection t (d)",
+                            r"time from last detection $t$ (d)"))
     axb.set_ylabel("band")
     axb.set_title(pub_text(f"(b) As an image (cells of {cell_days:g} d; "
                            f"stars = band queries at Dt)",
@@ -686,7 +686,7 @@ def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
     n_ev, n_empty = len(valid_idx), int((~meta["valid"]).sum())
     fs = pub_fs(7, "xtick.labelsize")
     dt_txt = pub_text("Dt", r"$\Delta t$")
-    tau_txt = pub_text("tau", r"$\tau$")
+    tau_txt = pub_text("t", r"$t$")
 
     fig, (axl, ax) = plt.subplots(
         1, 2, width_ratios=[1.15, 1.4], constrained_layout=True,
@@ -782,14 +782,14 @@ def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
         ax.tick_params(axis="x", which="minor", top=False, bottom=False)
         ax.tick_params(axis="y", which="both", left=False)
     ax.set_xlabel("filter")
-    ax.set_ylabel(pub_text("time from last detection tau (d)",
-                           r"time from last detection $\tau$ (d)"))
+    ax.set_ylabel(pub_text("time from last detection t (d)",
+                           r"time from last detection $t$ (d)"))
     fig.legend(handles=[
         Rectangle((0, 0), 1, 1, color=CONTEXT_SHADE,
                   label=f"context ({c0:g} d before the last detection)"),
         Rectangle((0, 0), 1, 1, color="0.95", label="forecast window"),
         Line2D([], [], color="0.4", ls="--", lw=rc_lw(0.8),
-               label=pub_text("last detection (tau = 0)", r"last detection ($\tau = 0$)")),
+               label=pub_text("last detection (t = 0)", r"last detection ($t = 0$)")),
         Line2D([], [], color="0.4", ls=":", lw=rc_lw(0.8),
                label=pub_text(f"requested lead time Dt = {ref_dt:g} d",
                               rf"requested lead time $\Delta t$ = {ref_dt:g} d")),
@@ -954,8 +954,8 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
              ha="center", va="center", color="0.25", fontsize=fs)
     token_axis(axc)
     axc.set_xlim(-c0, t_hi)
-    axc.set_xlabel(pub_text("time from last detection: tau (events), Dt (queries) (d)",
-                            r"time from last detection: $\tau$ (events), "
+    axc.set_xlabel(pub_text("time from last detection: t (events), Dt (queries) (d)",
+                            r"time from last detection: $t$ (events), "
                             r"$\Delta t$ (queries) (d)"))
     cax = axc.inset_axes([1.015, 0.0, 0.025, 1.0])
     fig.colorbar(im, cax=cax, label="attention weight")
@@ -984,7 +984,7 @@ def plot_token_influence(meta, infl, dts, focus, canvas, horizon, path_stem, for
         return
     ev_band = meta["band"][valid_idx]
     ev_tau = meta["tau"][valid_idx]
-    tau_txt = pub_text("tau", r"$\tau$")
+    tau_txt = pub_text("t", r"$t$")
     lab = [f"{j + 1} {BAND_NAMES[b]}, {tau_txt} = {t:.2f}"
            for j, (b, t) in enumerate(zip(ev_band, ev_tau))]
     rows = np.arange(n_ev)
@@ -1102,7 +1102,7 @@ def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
         ax.axhline(gy, color="0.8", lw=rc_lw(0.4), zorder=0)
     ax.axvline(x_hot, color="0.4", lw=rc_lw(0.8))
     ax.set_xlim(0, x_edge[-1])
-    ax.set_xticks(x_mid, ["mag", pub_text("tau", r"$\tau$"), "valid"]
+    ax.set_xticks(x_mid, ["mag", pub_text("t", r"$t$"), "valid"]
                   + list(BAND_NAMES), rotation=90)
     for tick, b in zip(ax.get_xticklabels()[3:], range(N_BANDS)):
         tick.set_color(BAND_COLORS[b])
