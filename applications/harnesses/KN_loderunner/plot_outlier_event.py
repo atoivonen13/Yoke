@@ -3,7 +3,8 @@
 Made for the worst object of study 218 (lc_01679, ~5 mag too bright in every
 band; see ``find_outliers.py``), but takes any scored stem. Draws a 3 x 3
 figure (``event_<stem>``) and a one-panel overlay (``event_<stem>_overlay``) of
-the bands with a realistic detection (color = filter; forecast median solid,
+the bands with a realistic detection (color = filter, ZTF g / r a lighter
+shade; forecast median solid,
 truth faint and dash-dot / squares = ZTF, dashed / circles = LSST; no interval
 bands). Per band:
 
@@ -58,11 +59,13 @@ from plot_run_report import (
 )
 
 DEFAULT_STEM = "lc_01679"
-# Overlay: one color per filter (ZTF and LSST g, r, i share it), muted and
-# ordered blue -> red with wavelength (u purple at the blue end); the survey is
-# the truth's dash pattern and the marker.
-FILTER_COLOR = {"u": "#8172b3", "g": "#4c72b0", "r": "#55a868", "i": "#ccb974",
+# Overlay: one color per filter, muted and ordered blue -> red with wavelength
+# (u purple at the blue end); ZTF g / r take a lighter shade of the LSST color
+# so the twins' forecasts can be told apart. The survey is also the truth's dash
+# pattern and the marker.
+FILTER_COLOR = {"u": "#8172b3", "g": "#3f5f9e", "r": "#3d8b52", "i": "#ccb974",
                 "z": "#dd8452", "y": "#c44e52"}
+ZTF_COLOR = {"g": "#6fa8d6", "r": "#8cc56e"}
 SURVEY_LOOK = {"ztf": ((0, (4.0, 1.4, 1.0, 1.4)), "s"), "lsst": ((0, (4.0, 1.6)), "o")}
 
 
@@ -180,8 +183,10 @@ def fig_event(run: dict, obj: dict, other: tuple, title: str | None) -> plt.Figu
 def band_look(b: int) -> tuple:
     """(color, line style, marker) of band ``b`` in the overlay."""
     name = BAND_NAMES[b]
-    ls, marker = SURVEY_LOOK["ztf" if name.startswith("ztf") else "lsst"]
-    return FILTER_COLOR[name[-1]], ls, marker
+    ztf = name.startswith("ztf")
+    ls, marker = SURVEY_LOOK["ztf" if ztf else "lsst"]
+    c = ZTF_COLOR.get(name[-1]) if ztf else None
+    return c or FILTER_COLOR[name[-1]], ls, marker
 
 
 def overlay_bands(ctx: dict, other: tuple) -> list:
