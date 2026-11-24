@@ -55,8 +55,11 @@ q/k projections and checked against its output once per run. It writes:
 
 No training. Needs the checkpoint and a GPU or CPU. Run on the cluster, e.g.:
 
-    python visualize_event_tokens.py --study 207 --epoch 150
-    python visualize_event_tokens.py --study 203 --epoch 100 --n_objects 6
+    python visualize_event_tokens.py --study 207 --epoch 150 --all_plots
+    python visualize_event_tokens.py --study 203 --epoch 100 --n_objects 6 --all_plots
+
+Without ``--all_plots`` only lightcurve_table_<stem> is written (no forward
+pass, fast).
 """
 
 import argparse
@@ -239,8 +242,12 @@ def get_args() -> argparse.Namespace:
                         "0-11, 'mean' (head mean), or 'auto' (the focus query's "
                         "most focused head, lowest mean attention entropy).")
     p.add_argument("--mag_limit", type=float, default=26.0,
-                   help="Faint limit (mag) of the light-curve panel of "
-                        "token_timeline_<stem>; truth fainter than this is clipped.")
+                   help="Faint limit (mag) of the light-curve panels of "
+                        "token_timeline, lightcurve_image and lightcurve_table; "
+                        "truth fainter than this is clipped.")
+    p.add_argument("--all_plots", action="store_true",
+                   help="Write every figure. Default: only lightcurve_table_<stem>, "
+                        "which needs no forward pass (fast).")
     add_style_args(p)
     return p.parse_args()
 
@@ -568,7 +575,7 @@ def plot_tokens_paper(meta, w_h, dts, ref_i, focus, ref_dt, canvas, path_stem, f
 
 
 def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
-                          cell_days, path_stem, formats):
+                          cell_days, path_stem, formats, mag_limit=26.0):
     """lightcurve_image_<stem>.{pdf,png}: a light curve and the time x band
     image it corresponds to.
 
@@ -593,7 +600,7 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
     fig, (ax, axb) = plt.subplots(
         2, 1, sharex=True, height_ratios=[1.4, 1], constrained_layout=True,
         figsize=pub_size((7, 6.2)) if styled() else (7, 6.2))
-    draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi)
+    draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, mag_limit=mag_limit)
 
     # (b) The conceptual image: rows = band, columns = time cells.
     n_cells = int(round(span / cell_days))
@@ -647,47 +654,105 @@ def halo():
     return [patheffects.withStroke(linewidth=rc_lw(2), foreground="w")]
 
 
-def draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, numbers=False):
-    """Panel (a) of lightcurve_image / lightcurve_table: the context
-    detections (magnitude vs t), the uniform truth faintly and the forecast
-    time; ``numbers`` labels each detection with its event number."""
+ZTF = np.array([n.startswith("ztf") for n in BAND_NAMES])
+
+
+def context_events(meta, means, stds):
+    """t, apparent magnitude and band of the valid context slots."""
     valid_idx = np.nonzero(meta["valid"])[0]
     ev_band = meta["band"][valid_idx]
-    ev_tau = meta["tau"][valid_idx]
     ev_mag = meta["value"][valid_idx] * (stds[ev_band] + EPS) + means[ev_band]
-    ax.axvspan(0.0, t_hi, color="0.93", lw=0, zorder=0)
-    ax.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
-    ax.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
+    return meta["tau"][valid_idx], ev_mag, ev_band
+
+
+def draw_events(ax, ev_tau, ev_mag, ev_band, truth):
+    """The uniform truth faintly and the detections. ZTF and Rubin share a hue
+    per filter, so ZTF is squares / dashed, Rubin circles / solid."""
     if truth is not None:
         for b in range(N_BANDS):
             m = truth[2] == b
             if m.any():
                 o = np.argsort(truth[0][m])
                 ax.plot(truth[0][m][o], truth[1][m][o], color=BAND_COLORS[b],
-                        lw=rc_lw(0.8), alpha=0.45, zorder=1)
-    ax.scatter(ev_tau, ev_mag, c=[BAND_COLORS[b] for b in ev_band],
-               s=60 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(1), zorder=3)
-    ax.invert_yaxis()
+                        ls="--" if ZTF[b] else "-", lw=rc_lw(0.8), alpha=0.5, zorder=1)
+    for is_ztf, mk in ((True, "s"), (False, "o")):
+        m = ZTF[ev_band] == is_ztf
+        if m.any():
+            ax.scatter(ev_tau[m], ev_mag[m], c=[BAND_COLORS[b] for b in ev_band[m]],
+                       marker=mk, s=(48 if is_ztf else 60) * rc_ms(1) ** 2,
+                       edgecolors="k", linewidths=rc_lw(1), zorder=3)
+
+
+def draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, mag_limit=26.0):
+    """Panel (a) of lightcurve_image / lightcurve_table: the context
+    detections (magnitude vs t), the uniform truth faintly and the forecast
+    time. The faint end is clipped at ``mag_limit`` so a fast fade does not
+    squeeze the detections."""
+    ev_tau, ev_mag, ev_band = context_events(meta, means, stds)
+    ax.axvspan(0.0, t_hi, color="0.93", lw=0, zorder=0)
+    ax.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
+    ax.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
+    draw_events(ax, ev_tau, ev_mag, ev_band, truth)
+    shown = set(ev_band.tolist())
+    bright = ev_mag.min() if len(ev_mag) else 18.0
+    if truth is not None:
+        m = truth[0] <= t_hi
+        shown |= set(truth[2][m].tolist())
+        if m.any():
+            bright = min(bright, truth[1][m].min())
+    faint = max(mag_limit, ev_mag.max() + 0.5) if len(ev_mag) else mag_limit
+    ax.set_ylim(faint, bright - 0.4)
     ax.set_ylabel("Apparent Magnitude")
     ax.set_title("(a) Light curve", loc="left")
-    seen = sorted(set(ev_band.tolist()))
-    handles = [Line2D([], [], ls="", marker="o", mfc=BAND_COLORS[b], mec="k",
-                      ms=rc_ms(6), label=BAND_NAMES[b]) for b in seen]
-    if truth is not None:
-        handles.append(Line2D([], [], color="0.5", lw=rc_lw(0.8), alpha=0.6,
-                              label="true light curve"))
+    handles = [Line2D([], [], color=BAND_COLORS[b], lw=rc_lw(0.8),
+                      ls=("--" if ZTF[b] else "-") if truth is not None else "",
+                      marker="s" if ZTF[b] else "o", mfc=BAND_COLORS[b], mec="k",
+                      ms=rc_ms(4.5), label=BAND_NAMES[b]) for b in sorted(shown)]
     handles.append(Line2D([], [], color="0.4", ls=":", lw=rc_lw(0.8),
                           label=pub_text(f"forecast time Dt = {ref_dt:g} d",
                                          rf"forecast time $\Delta t$ = {ref_dt:g} d")))
-    ax.legend(handles=handles, loc="lower left", ncol=2,
-              fontsize=pub_fs(7, "legend.fontsize"))
+    ax.legend(handles=handles, loc="lower left", ncol=3, handlelength=1.8,
+              fontsize=pub_fs(7, "legend.fontsize"), framealpha=1)
     ax.text(0.5 * t_hi, 0.96, "forecast window", transform=ax.get_xaxis_transform(),
             ha="center", va="top", color="0.4", fontsize=pub_fs(8, "xtick.labelsize"))
-    if numbers:
-        for j, (t, m) in enumerate(zip(ev_tau, ev_mag)):
-            ax.annotate(str(j + 1), (t, m), xytext=(0, 5), textcoords="offset points",
-                        ha="center", va="bottom", fontsize=pub_fs(6, "xtick.labelsize"),
-                        path_effects=halo(), zorder=4)
+
+
+def place_numbers(ax, xs, ys, fontsize, marker_pt):
+    """Label the points 1..n without overlaps: each number takes the nearest
+    free spot around its point (greedy over rings of offsets), with a leader
+    line once it is pushed off. Call after the layout is final; this draws
+    the figure to get display coordinates."""
+    fig = ax.figure
+    fig.canvas.draw()
+    px = fig.dpi / 72.0  # display units per point
+    pts = ax.transData.transform(np.column_stack([xs, ys]))
+    box = ax.bbox
+    r_m = marker_pt * px
+    taken = [(x - r_m, y - r_m, x + r_m, y + r_m) for x, y in pts]
+
+    def free(b):
+        inside = box.x0 <= b[0] and b[2] <= box.x1 and box.y0 <= b[1] and b[3] <= box.y1
+        return inside and not any(b[0] < t[2] and b[2] > t[0] and b[1] < t[3] and b[3] > t[1]
+                                  for t in taken)
+
+    angles = np.deg2rad([90, 270, 0, 180, 45, 135, 315, 225])
+    offsets = [(r * np.cos(a), r * np.sin(a)) for r in (9, 14, 20, 27, 35) for a in angles]
+    h = fontsize * px
+    for j, (x, y) in enumerate(pts):
+        text = str(j + 1)
+        w = 0.6 * fontsize * px * len(text)
+
+        def spot(dx, dy):
+            cx, cy = x + dx * px, y + dy * px
+            return (cx - w / 2 - px, cy - h / 2, cx + w / 2 + px, cy + h / 2)
+
+        dx, dy = next(((dx, dy) for dx, dy in offsets if free(spot(dx, dy))), offsets[0])
+        taken.append(spot(dx, dy))
+        arrow = (dict(arrowstyle="-", color="0.4", lw=rc_lw(0.5), shrinkA=1,
+                      shrinkB=marker_pt) if np.hypot(dx, dy) > 9.5 else None)
+        ax.annotate(text, (xs[j], ys[j]), xytext=(dx, dy), textcoords="offset points",
+                    ha="center", va="center", fontsize=fontsize, path_effects=halo(),
+                    arrowprops=arrow, zorder=4).set_in_layout(False)
 
 
 def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
@@ -1134,7 +1199,7 @@ def draw_input_table(ax, meta, ref_dt, position=False):
     if position:
         ax.axvline(x_pos, color="0.4", lw=rc_lw(0.8))
     ax.set_xlim(0, x_edge[-1])
-    labels = ["mag", pub_text("t", r"$t$"), "valid"] + list(BAND_NAMES)
+    labels = ["mag (std.)", pub_text("t", r"$t$"), "valid"] + list(BAND_NAMES)
     if position:
         labels.append("2-D position\n(filter, time)")
     ax.set_xticks(x_mid, labels, rotation=0 if position else 90)
@@ -1143,8 +1208,6 @@ def draw_input_table(ax, meta, ref_dt, position=False):
     # After tick_top: the top labels are the ones drawn.
     for tick, b in zip(ax.get_xticklabels()[3:], range(N_BANDS)):
         tick.set_color(BAND_COLORS[b])
-    ax.set_xlabel("input per detection (12 numbers)")
-    ax.xaxis.label.set_x(x_pos / 2 / x_edge[-1])  # centered over the input columns
     ax.set_yticks(np.arange(n_tok), [str(number[i]) if valid[i] else "–" for i in range(L)]
                   + [f"Q {n}" for n in BAND_NAMES], fontsize=fs)
     ax.set_ylabel("token")
@@ -1156,29 +1219,55 @@ def draw_input_table(ax, meta, ref_dt, position=False):
 
 
 def plot_lightcurve_table(meta, means, stds, truth, ref_dt, canvas, horizon,
-                          path_stem, formats):
+                          path_stem, formats, mag_limit=26.0):
     """lightcurve_table_<stem>.{pdf,png}: a light curve and the tokens the ViT
     receives for it.
 
-    (a) The context detections, numbered, with the uniform truth faintly and
-    the forecast time. (b) One row per token: detection k of (a) is row k
-    (magnitude, t, valid, filter one-hot), then the 9 band queries; the last
-    column is the 2-D position (filter, time) each token carries into
-    attention via RoPE. That position is the only 2-D structure the ViT sees:
-    the input is a set of tokens, not a pixel grid, and the row order is for
-    display only.
+    (a) The context detections with the uniform truth faintly and the
+    forecast time, clipped at ``mag_limit``. (b) Zoom on the context
+    detections (the dashed box in (a)), numbered. (c) One row per token:
+    detection k of (b) is row k (standardized magnitude, t, valid, filter
+    one-hot), then the 9 band queries; the last column is the 2-D position
+    (filter, time) each token carries into attention via RoPE. That position
+    is the only 2-D structure the ViT sees: the input is a set of tokens, not
+    a pixel grid, and the row order is for display only.
     """
     _H, c0, span = canvas
     t_hi = min(horizon, span - c0)
-    fig, (ax, axb) = plt.subplots(
-        2, 1, height_ratios=[1, 1.5], constrained_layout=True,
+    t_label = pub_text("time from last detection t (d)", r"time from last detection $t$ (d)")
+    fig, axd = plt.subplot_mosaic(
+        [["lc", "zoom"], ["table", "table"]], width_ratios=[1.3, 1],
+        height_ratios=[1, 1.5], constrained_layout=True,
         figsize=pub_size((7, 9.4)) if styled() else (7, 9.4))
-    draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, numbers=True)
+    ax, axz, axt = axd["lc"], axd["zoom"], axd["table"]
+    draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, mag_limit=mag_limit)
     ax.set_xlim(-c0, t_hi)
-    ax.set_xlabel(pub_text("time from last detection t (d)",
-                           r"time from last detection $t$ (d)"))
-    draw_input_table(axb, meta, ref_dt, position=True)
-    axb.set_title("(b) Tokens: model input and 2-D position", loc="left")
+    ax.set_xlabel(t_label)
+
+    # (b) Zoom on the detections, wide enough that their numbers fit.
+    ev_tau, ev_mag, ev_band = context_events(meta, means, stds)
+    if len(ev_tau):
+        x_pad = 0.08 * max(np.ptp(ev_tau), 0.25)
+        y_pad = 0.12 * max(np.ptp(ev_mag), 1.0)
+        x0, x1 = ev_tau.min() - x_pad, ev_tau.max() + x_pad
+        y0, y1 = ev_mag.min() - y_pad, ev_mag.max() + y_pad
+        ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, ec="0.3", ls="--",
+                               lw=rc_lw(0.6), zorder=4))
+        ax.text(x1, y1, "(b)", ha="left", va="top", color="0.3",
+                fontsize=pub_fs(7, "xtick.labelsize"), zorder=4)
+        axz.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
+        draw_events(axz, ev_tau, ev_mag, ev_band, truth)
+        axz.set_xlim(x0, x1)
+        axz.set_ylim(y1, y0)
+    axz.set_xlabel(t_label)
+    axz.set_title("(b) Context detections", loc="left")
+
+    draw_input_table(axt, meta, ref_dt, position=True)
+    axt.set_title("(c) Tokens: 12 input numbers per detection, and 2-D position",
+                  loc="left")
+    if len(ev_tau):  # last: the numbers are placed on the final layout
+        place_numbers(axz, ev_tau, ev_mag, pub_fs(7, "xtick.labelsize"),
+                      marker_pt=4.5 * rc_ms(1))
     for fmt in formats:
         fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
     plt.close(fig)
@@ -1209,6 +1298,7 @@ def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
         1, 2, width_ratios=[1.5, 1.4], constrained_layout=True,
         figsize=pub_size((13, 7.6)) if styled() else (13, 7.6))
     draw_input_table(ax, meta, ref_dt)
+    ax.set_xlabel("input per detection (12 numbers)")
     ax.set_title("(a) Detections (model input)", loc="left")
 
     # (b) The token table entering the first ViT block.
@@ -1395,6 +1485,9 @@ def main() -> None:
             if obj is None:
                 continue
             meta = token_meta(model, obj["x"])
+            if not args.all_plots:
+                objs[stem] = (obj, meta)
+                continue
             pred = forward(model, obj["x"], dts, device)
             w_all = rec.pop()  # [n_dt, n_blocks, heads, N, N]
             w_h = w_all.mean(axis=2)  # head mean: [n_dt, n_blocks, N, N]
@@ -1411,12 +1504,12 @@ def main() -> None:
         tok_hook.remove()
     if not objs:
         raise RuntimeError("No test object had a pre-cutoff detection.")
-    print(f"Attention recompute check: max rel. err {rec.max_check_err:.2e}")
-    print(f"Objects: {len(objs)} (summary over {len(records)})")
-
-    summarize(records, len(blocks), cw, os.path.join(outdir, "attention_summary.png"),
-              f"{label}: query attention over {len(records)} test objects, "
-              f"Dt in {SUMMARY_DTS}")
+    print(f"Objects: {len(objs)}")
+    if args.all_plots:
+        print(f"Attention recompute check: max rel. err {rec.max_check_err:.2e}")
+        summarize(records, len(blocks), cw, os.path.join(outdir, "attention_summary.png"),
+                  f"{label}: query attention over {len(records)} test objects, "
+                  f"Dt in {SUMMARY_DTS}")
 
     if args.stems:
         plot_stems = [s for s in args.stems if s in objs]
@@ -1424,8 +1517,32 @@ def main() -> None:
         by_count = sorted(objs, key=lambda s: objs[s][0]["n_window"])
         pick = np.linspace(0, len(by_count) - 1, args.n_objects).round().astype(int)
         plot_stems = [by_count[i] for i in np.unique(pick)]
+    # Objects whose context leaves empty slots, so the masking shows in the table.
+    n_slot = {s: int(objs[s][1]["valid"].sum()) for s in objs}
+    partial = [s for s in sorted(objs, key=n_slot.get) if 5 <= n_slot[s] <= 8]
+    print("Stems with 5-8 of 12 context slots filled (pass with --stems): "
+          + (", ".join(f"{s} ({n_slot[s]})" for s in partial[:10]) or "none"))
 
     for stem in plot_stems:
+        obj, meta = objs[stem][:2]
+        truth = lc_truth = None
+        if stem in uni_map:
+            u_t, u_v, u_b, _ul, _z = read_merged_stream(uni_map[stem], False)
+            lead = u_t - obj["t_anchor"]
+            ok = (lead <= args.horizon_days) & np.isfinite(u_v)
+            m = ok & (lead > 0)
+            truth = (lead[m], u_v[m], u_b[m])
+            m = ok & (lead >= -canvas[1])
+            lc_truth = (lead[m], u_v[m], u_b[m])
+        plot_lightcurve_table(meta, means, stds, lc_truth, args.ref_dt, canvas,
+                              args.horizon_days,
+                              os.path.join(outdir, f"lightcurve_table_{stem}"),
+                              args.formats, mag_limit=args.mag_limit)
+        if not args.all_plots:
+            print(f"  wrote lightcurve_table_{stem} ({n_slot[stem]} of "
+                  f"{meta['valid'].size} context slots)")
+            continue
+
         obj, meta, pred, w_h, wq_last, tokens = objs[stem]
         if args.focus_band is not None:
             focus = BAND_NAMES.index(args.focus_band)
@@ -1436,24 +1553,10 @@ def main() -> None:
                     os.path.join(outdir, f"tokens_{stem}.png"), title)
         plot_tokens_paper(meta, w_h, dts, ref_i, focus, args.ref_dt, canvas,
                           os.path.join(outdir, f"tokens_paper_{stem}"), args.formats)
-
-        truth = lc_truth = None
-        if stem in uni_map:
-            u_t, u_v, u_b, _ul, _z = read_merged_stream(uni_map[stem], False)
-            lead = u_t - obj["t_anchor"]
-            ok = (lead <= args.horizon_days) & np.isfinite(u_v)
-            m = ok & (lead > 0)
-            truth = (lead[m], u_v[m], u_b[m])
-            m = ok & (lead >= -canvas[1])
-            lc_truth = (lead[m], u_v[m], u_b[m])
         plot_lightcurve_image(meta, means, stds, lc_truth, args.ref_dt, canvas,
                               args.horizon_days, args.cell_days,
                               os.path.join(outdir, f"lightcurve_image_{stem}"),
-                              args.formats)
-        plot_lightcurve_table(meta, means, stds, lc_truth, args.ref_dt, canvas,
-                              args.horizon_days,
-                              os.path.join(outdir, f"lightcurve_table_{stem}"),
-                              args.formats)
+                              args.formats, mag_limit=args.mag_limit)
         plot_token_plane(meta, args.ref_dt, canvas, args.horizon_days,
                          os.path.join(outdir, f"token_plane_{stem}"), args.formats)
         n_blk = len(blocks)
