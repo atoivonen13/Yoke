@@ -79,7 +79,7 @@ BANDS_DENSE_MS = 0.9  # dense dot size of the per-band figure (x markersize)
 DET_MS = 0.9  # realistic detection marker of the per-band figure (x markersize)
 CONTEXT_SHADE = "0.9"
 X_LABEL = "Time since first detection (days)"
-Y_LABEL = r"$M_{\mathrm{AB}}$"
+Y_LABEL = "Apparent Magnitude"
 # Selection features: (key, description) in the printout.
 FEATURES = (("n_ctx", "context detections"), ("n_det", "detections to horizon"),
             ("peak", "peak mag"))

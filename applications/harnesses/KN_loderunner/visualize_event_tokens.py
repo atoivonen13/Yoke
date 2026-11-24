@@ -27,10 +27,12 @@ q/k projections and checked against its output once per run. It writes:
                         masked slots, band queries) with arrows to each
                         token's (filter, time) position on the plane.
   token_timeline_<stem> Paper figure, on one time axis: the context light
-                        curve; each token's time (events at tau, band queries
+                        curve; each token's time (events at t, band queries
                         along the forecast window); and the focus query's
                         attention to every token vs Dt, one last-block head
                         (``--timeline_head``).
+  token_timeline_noattn_<stem>
+                        The same without the attention panel.
   token_influence_<stem>
                         Paper figure: leave-one-event-out change of the
                         median forecast, per removed event, vs Dt for the
@@ -602,7 +604,7 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
     ax.scatter(ev_tau, ev_mag, c=[BAND_COLORS[b] for b in ev_band],
                s=60 * rc_ms(1) ** 2, edgecolors="k", linewidths=rc_lw(1), zorder=3)
     ax.invert_yaxis()
-    ax.set_ylabel("magnitude")
+    ax.set_ylabel("Apparent Magnitude")
     ax.set_title("(a) Light curve", loc="left")
     seen = sorted(set(ev_band.tolist()))
     handles = [Line2D([], [], ls="", marker="o", mfc=BAND_COLORS[b], mec="k",
@@ -809,16 +811,16 @@ def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
 
 def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref_dt,
                         canvas, horizon, path_stem, formats, cell_days=0.10724,
-                        mag_limit=26.0):
+                        mag_limit=26.0, attention=True):
     """token_timeline_<stem>.{pdf,png}: the light curve, its tokens and one
     query's attention, on a shared time axis (anchor-relative). No panel
     titles or letters; those go in the caption.
 
-    Top: the context detections (magnitude vs tau), the uniform truth faintly
+    Top: the context detections (magnitude vs t), the uniform truth faintly
     (ZTF squares / dashed, Rubin circles / solid; the two share a hue per
     filter), clipped at ``mag_limit``.
     Middle: token x time pixels of ``cell_days`` (display only; the model's
-    tau and RoPE row are continuous). An event fills the cell at its tau,
+    t and RoPE row are continuous). An event fills the cell at its t,
     colored by the standardized magnitude the token actually carries; a band
     query (no magnitude, gray) fills every forecast cell pale, since its
     position is the requested Dt (one forward pass per Dt), with the
@@ -826,7 +828,8 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
     Bottom: ``attn`` [n_dt, N], the focus query's attention to every token vs
     Dt (one head or the head mean, named by ``att_txt``, e.g. "last block,
     head 3"). Middle and bottom rows are the same tokens, events numbered as in
-    tokens_paper; empty slots are left out.
+    tokens_paper; empty slots are left out. ``attention=False`` drops the
+    bottom panel (the light curve and its tokens only).
     """
     _H, c0, span = canvas
     t_hi = min(horizon, span - c0)
@@ -847,9 +850,13 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
     q_name = BAND_NAMES[focus]
     ztf = np.array([n.startswith("ztf") for n in BAND_NAMES])
 
-    fig, (ax, axt, axc) = plt.subplots(
-        3, 1, sharex=True, height_ratios=[1.15, 1, 1], constrained_layout=True,
-        figsize=pub_size((7, 8.4)) if styled() else (7, 8.4))
+    size = (7, 8.4) if attention else (7, 5.9)
+    axes = plt.subplots(
+        3 if attention else 2, 1, sharex=True,
+        height_ratios=[1.15, 1, 1][: 3 if attention else 2], constrained_layout=True,
+        figsize=pub_size(size) if styled() else size)[1]
+    ax, axt = axes[:2]
+    fig = ax.figure
 
     def token_axis(a):
         a.set_yticks(rows, key_lab, fontsize=0.85 * fs)
@@ -860,9 +867,9 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
         a.tick_params(axis="y", which="both", left=False, right=False)
         a.tick_params(axis="x", which="both", top=False)
 
-    ax.axvspan(-c0, 0.0, color=CONTEXT_SHADE, lw=0, zorder=0)
-    axc.axvspan(-c0, 0.0, color=CONTEXT_SHADE, lw=0, zorder=0)
-    for a in (ax, axt, axc):
+    for a in axes[::2]:  # the token image draws its own context shade
+        a.axvspan(-c0, 0.0, color=CONTEXT_SHADE, lw=0, zorder=0)
+    for a in axes:
         a.axvline(0.0, color="0.25", ls="--", lw=rc_lw(0.8), zorder=3)
 
     # Top: the light curve.
@@ -886,7 +893,7 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
                        edgecolors="k", linewidths=rc_lw(0.8), zorder=3)
     faint = max(mag_limit, ev_mag.max() + 0.5) if n_ev else mag_limit
     ax.set_ylim(faint, bright - 0.4)
-    ax.set_ylabel("magnitude")
+    ax.set_ylabel("Apparent Magnitude")
     note = dict(transform=ax.get_xaxis_transform(), ha="center", va="bottom",
                 color="0.35", fontsize=fs)
     ax.text(-c0 / 2, 1.01, "context", **note)
@@ -898,15 +905,15 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
     ax.legend(handles=handles, loc="lower left", ncol=3, handlelength=1.8,
               fontsize=pub_fs(7, "legend.fontsize"), framealpha=1)
 
-    # Middle: token x time pixels (display cells, edges on tau = 0).
+    # Middle: token x time pixels (display cells, edges on t = 0).
     cell = cell_days
     edges = np.arange(-c0, t_hi + cell / 2, cell)
     mids = 0.5 * (edges[:-1] + edges[1:])
     shade = np.asarray(to_rgb(CONTEXT_SHADE))
     img = np.where((mids < 0)[None, :, None], shade, np.ones(3) * 0.985)
     img = np.repeat(img, len(keys), axis=0)
-    # Events (tau <= 0) take the cell ending at tau, queries (Dt > 0) the one
-    # starting at Dt, so neither crosses tau = 0. Events are colored by the
+    # Events (t <= 0) take the cell ending at t, queries (Dt > 0) the one
+    # starting at Dt, so neither crosses t = 0. Events are colored by the
     # standardized magnitude the token carries; queries carry none, so gray.
     col = lambda t, side: int(np.clip(  # noqa: E731
         np.searchsorted(edges, t, side=side) - 1, 0, len(mids) - 1))
@@ -944,22 +951,24 @@ def plot_token_timeline(meta, means, stds, truth, attn, att_txt, dts, focus, ref
     token_axis(axt)
 
     # Bottom: focus query attention vs Dt.
-    a_dt = attn[:, keys].astype(np.float32)  # [n_dt, n_keys]
-    im = axc.pcolormesh(dts, rows, a_dt.T, cmap="magma", shading="nearest", zorder=1,
-                        rasterized=True)
-    axc.hlines(n_ev - 0.5, 0.0, t_hi, color="w", lw=rc_lw(0.8), zorder=2)
-    axc.axvline(ref_dt, color="w", ls=":", lw=rc_lw(0.8), zorder=2)
-    att_lines = att_txt.replace(", ", "\n")
-    axc.text(-c0 / 2, (len(keys) - 1) / 2, f"attention\nfrom Q {q_name}\n{att_lines}",
-             ha="center", va="center", color="0.25", fontsize=fs)
-    token_axis(axc)
-    axc.set_xlim(-c0, t_hi)
-    axc.set_xlabel(pub_text("time from last detection: t (events), Dt (queries) (d)",
-                            r"time from last detection: $t$ (events), "
-                            r"$\Delta t$ (queries) (d)"))
-    cax = axc.inset_axes([1.015, 0.0, 0.025, 1.0])
-    fig.colorbar(im, cax=cax, label="attention weight")
-    fig.align_ylabels((ax, axt, axc))
+    if attention:
+        axc = axes[2]
+        a_dt = attn[:, keys].astype(np.float32)  # [n_dt, n_keys]
+        im = axc.pcolormesh(dts, rows, a_dt.T, cmap="magma", shading="nearest",
+                            zorder=1, rasterized=True)
+        axc.hlines(n_ev - 0.5, 0.0, t_hi, color="w", lw=rc_lw(0.8), zorder=2)
+        axc.axvline(ref_dt, color="w", ls=":", lw=rc_lw(0.8), zorder=2)
+        att_lines = att_txt.replace(", ", "\n")
+        axc.text(-c0 / 2, (len(keys) - 1) / 2, f"attention\nfrom Q {q_name}\n{att_lines}",
+                 ha="center", va="center", color="0.25", fontsize=fs)
+        token_axis(axc)
+        cax = axc.inset_axes([1.015, 0.0, 0.025, 1.0])
+        fig.colorbar(im, cax=cax, label="attention weight")
+    axes[-1].set_xlim(-c0, t_hi)
+    axes[-1].set_xlabel(pub_text("time from last detection: t (events), Dt (queries) (d)",
+                                 r"time from last detection: $t$ (events), "
+                                 r"$\Delta t$ (queries) (d)"))
+    fig.align_ylabels(axes)
     for fmt in formats:
         fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
     plt.close(fig)
@@ -1370,10 +1379,12 @@ def main() -> None:
             att_txt = f"block {n_blk}, head {head + 1}"
             print(f"  token_timeline_{stem}: Q {BAND_NAMES[focus]} {att_txt} "
                   f"of {w_q.shape[1]} ({args.timeline_head})")
-        plot_token_timeline(meta, means, stds, lc_truth, attn, att_txt, dts, focus,
-                            args.ref_dt, canvas, args.horizon_days,
-                            os.path.join(outdir, f"token_timeline_{stem}"), args.formats,
-                            cell_days=args.timeline_cell_days, mag_limit=args.mag_limit)
+        for attention, name in ((True, "token_timeline"), (False, "token_timeline_noattn")):
+            plot_token_timeline(meta, means, stds, lc_truth, attn, att_txt, dts, focus,
+                                args.ref_dt, canvas, args.horizon_days,
+                                os.path.join(outdir, f"{name}_{stem}"), args.formats,
+                                cell_days=args.timeline_cell_days,
+                                mag_limit=args.mag_limit, attention=attention)
         infl = event_influence(model, obj, dts, device, means, stds)
         plot_token_influence(meta, infl, dts, focus, canvas, args.horizon_days,
                              os.path.join(outdir, f"token_influence_{stem}"),
