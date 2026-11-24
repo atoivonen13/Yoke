@@ -23,7 +23,12 @@ q/k projections and checked against its output once per run. It writes:
                         detections as cells of a time x band image (which the
                         code never builds; the tokens carry only its
                         positions), with the band queries at ``--ref_dt``.
-  token_plane_<stem>    Paper figure: schematic of the token list (events,
+  lightcurve_table_<stem>
+                        Paper figure: the numbered context light curve, and
+                        the tokens the ViT gets for it (one row per token: the
+                        model input, then the band queries) with each token's
+                        2-D position (filter, time).
+  token_plane_<stem>   Paper figure: schematic of the token list (events,
                         masked slots, band queries) with arrows to each
                         token's (filter, time) position on the plane.
   token_timeline_<stem> Paper figure, on one time axis: the context light
@@ -219,8 +224,8 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--outdir", type=str, default=None)
     p.add_argument("--formats", nargs="+", default=["pdf", "png"],
                    help="Formats of the paper figures (tokens_paper, "
-                        "lightcurve_image, token_plane, token_timeline, token_influence, "
-                        "token_input).")
+                        "lightcurve_image, lightcurve_table, token_plane, token_timeline, "
+                        "token_influence, token_input).")
     p.add_argument("--cell_days", type=float, default=0.25,
                    help="Time cell (days) of the conceptual image in "
                         "lightcurve_image_<stem>.")
@@ -583,14 +588,73 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
     ev_band = meta["band"][valid_idx]
     ev_tau = meta["tau"][valid_idx]
     ev_val = meta["value"][valid_idx]
-    ev_mag = ev_val * (stds[ev_band] + EPS) + means[ev_band]
     t_hi = min(horizon, span - c0)
 
     fig, (ax, axb) = plt.subplots(
         2, 1, sharex=True, height_ratios=[1.4, 1], constrained_layout=True,
         figsize=pub_size((7, 6.2)) if styled() else (7, 6.2))
+    draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi)
 
-    # (a) The light curve.
+    # (b) The conceptual image: rows = band, columns = time cells.
+    n_cells = int(round(span / cell_days))
+    edges = -c0 + np.arange(n_cells + 1) * span / n_cells
+    img = np.full((N_BANDS, n_cells), np.nan)
+    # Each event takes the cell ending at its t, so the last detection (t = 0)
+    # stays left of the forecast line.
+    cols = np.clip(np.searchsorted(edges, ev_tau, side="left") - 1, 0, n_cells - 1)
+    img[ev_band, cols] = ev_val
+    axb.set_facecolor("0.96")
+    lim = max(np.nanmax(np.abs(img)), 1e-3) if np.isfinite(img).any() else 1.0
+    im = axb.pcolormesh(edges, np.arange(N_BANDS + 1) - 0.5, img, cmap="RdBu_r",
+                        vmin=-lim, vmax=lim, shading="flat")
+    for gy in np.arange(N_BANDS + 1) - 0.5:
+        axb.axhline(gy, color="0.8", lw=rc_lw(0.5), zorder=1)
+    axb.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=2)
+    axb.scatter(np.full(N_BANDS, ref_dt), np.arange(N_BANDS), marker="*",
+                s=110 * rc_ms(1) ** 2, c=BAND_COLORS, edgecolors="k",
+                linewidths=rc_lw(0.8), zorder=3)
+    for j in range(len(valid_idx)):
+        axb.annotate(str(j + 1), (ev_tau[j], ev_band[j]), xytext=(4, 0), va="center",
+                     textcoords="offset points", fontsize=pub_fs(7, "xtick.labelsize"),
+                     path_effects=halo(), zorder=4)
+    axb.set_ylim(N_BANDS - 0.5, -0.5)
+    axb.set_yticks(range(N_BANDS), BAND_NAMES)
+    for tick, b in zip(axb.get_yticklabels(), range(N_BANDS)):
+        tick.set_color(BAND_COLORS[b])
+    if styled():
+        axb.tick_params(axis="y", which="minor", left=False, right=False)
+    axb.set_xlim(-c0, t_hi)
+    axb.set_xlabel(pub_text("time from last detection t (d)",
+                            r"time from last detection $t$ (d)"))
+    axb.set_ylabel("band")
+    axb.set_title(pub_text(f"(b) As an image (cells of {cell_days:g} d; "
+                           f"stars = band queries at Dt)",
+                           rf"(b) As an image (cells of {cell_days:g} d; "
+                           r"stars = band queries at $\Delta t$)"), loc="left")
+    top = axb.secondary_xaxis("top", functions=(lambda t: (t + c0) / span * (H - 1),
+                                                lambda r: r / (H - 1) * span - c0))
+    top.set_xlabel("canvas row", fontsize=pub_fs(8, "xtick.labelsize"))
+    top.tick_params(labelsize=pub_fs(7, "xtick.labelsize"))
+    fig.colorbar(im, ax=axb, location="bottom", shrink=0.5, aspect=30,
+                 label="standardized magnitude (+ = fainter)")
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+
+
+def halo():
+    """White halo: numbers stay legible on dark cells and over curves."""
+    return [patheffects.withStroke(linewidth=rc_lw(2), foreground="w")]
+
+
+def draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, numbers=False):
+    """Panel (a) of lightcurve_image / lightcurve_table: the context
+    detections (magnitude vs t), the uniform truth faintly and the forecast
+    time; ``numbers`` labels each detection with its event number."""
+    valid_idx = np.nonzero(meta["valid"])[0]
+    ev_band = meta["band"][valid_idx]
+    ev_tau = meta["tau"][valid_idx]
+    ev_mag = meta["value"][valid_idx] * (stds[ev_band] + EPS) + means[ev_band]
     ax.axvspan(0.0, t_hi, color="0.93", lw=0, zorder=0)
     ax.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=1)
     ax.axvline(ref_dt, color="0.4", ls=":", lw=rc_lw(0.8), zorder=1)
@@ -619,52 +683,11 @@ def plot_lightcurve_image(meta, means, stds, truth, ref_dt, canvas, horizon,
               fontsize=pub_fs(7, "legend.fontsize"))
     ax.text(0.5 * t_hi, 0.96, "forecast window", transform=ax.get_xaxis_transform(),
             ha="center", va="top", color="0.4", fontsize=pub_fs(8, "xtick.labelsize"))
-
-    # (b) The conceptual image: rows = band, columns = time cells.
-    n_cells = int(round(span / cell_days))
-    edges = -c0 + np.arange(n_cells + 1) * span / n_cells
-    img = np.full((N_BANDS, n_cells), np.nan)
-    cols = np.clip(((ev_tau + c0) / span * n_cells).astype(int), 0, n_cells - 1)
-    img[ev_band, cols] = ev_val
-    axb.set_facecolor("0.96")
-    lim = max(np.nanmax(np.abs(img)), 1e-3) if np.isfinite(img).any() else 1.0
-    im = axb.pcolormesh(edges, np.arange(N_BANDS + 1) - 0.5, img, cmap="RdBu_r",
-                        vmin=-lim, vmax=lim, shading="flat")
-    for gy in np.arange(N_BANDS + 1) - 0.5:
-        axb.axhline(gy, color="0.8", lw=rc_lw(0.5), zorder=1)
-    axb.axvline(0.0, color="0.4", ls="--", lw=rc_lw(0.8), zorder=2)
-    axb.scatter(np.full(N_BANDS, ref_dt), np.arange(N_BANDS), marker="*",
-                s=110 * rc_ms(1) ** 2, c=BAND_COLORS, edgecolors="k",
-                linewidths=rc_lw(0.8), zorder=3)
-    # White halo: the numbers stay legible on dark cells.
-    halo = [patheffects.withStroke(linewidth=rc_lw(2), foreground="w")]
-    for j in range(len(valid_idx)):
-        axb.annotate(str(j + 1), (ev_tau[j], ev_band[j]), xytext=(4, 0), va="center",
-                     textcoords="offset points", fontsize=pub_fs(7, "xtick.labelsize"),
-                     path_effects=halo, zorder=4)
-    axb.set_ylim(N_BANDS - 0.5, -0.5)
-    axb.set_yticks(range(N_BANDS), BAND_NAMES)
-    for tick, b in zip(axb.get_yticklabels(), range(N_BANDS)):
-        tick.set_color(BAND_COLORS[b])
-    if styled():
-        axb.tick_params(axis="y", which="minor", left=False, right=False)
-    axb.set_xlim(-c0, t_hi)
-    axb.set_xlabel(pub_text("time from last detection t (d)",
-                            r"time from last detection $t$ (d)"))
-    axb.set_ylabel("band")
-    axb.set_title(pub_text(f"(b) As an image (cells of {cell_days:g} d; "
-                           f"stars = band queries at Dt)",
-                           rf"(b) As an image (cells of {cell_days:g} d; "
-                           r"stars = band queries at $\Delta t$)"), loc="left")
-    top = axb.secondary_xaxis("top", functions=(lambda t: (t + c0) / span * (H - 1),
-                                                lambda r: r / (H - 1) * span - c0))
-    top.set_xlabel("canvas row", fontsize=pub_fs(8, "xtick.labelsize"))
-    top.tick_params(labelsize=pub_fs(7, "xtick.labelsize"))
-    fig.colorbar(im, ax=axb, location="bottom", shrink=0.5, aspect=30,
-                 label="standardized magnitude (+ = fainter)")
-    for fmt in formats:
-        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
-    plt.close(fig)
+    if numbers:
+        for j, (t, m) in enumerate(zip(ev_tau, ev_mag)):
+            ax.annotate(str(j + 1), (t, m), xytext=(0, 5), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=pub_fs(6, "xtick.labelsize"),
+                        path_effects=halo(), zorder=4)
 
 
 def plot_token_plane(meta, ref_dt, canvas, horizon, path_stem, formats):
@@ -1051,6 +1074,116 @@ def plot_token_influence(meta, infl, dts, focus, canvas, horizon, path_stem, for
                       for b in range(N_BANDS)))
 
 
+def draw_input_table(ax, meta, ref_dt, position=False):
+    """The model's per-slot context input, one row per token: standardized
+    magnitude, t, valid flag and filter one-hot, then the 9 band queries
+    (a learned vector per filter plus the encoded Dt and phase, not built from
+    the table). ``position`` adds a last column with each token's 2-D RoPE
+    position (filter, time); masked slots have none. Events are numbered as in
+    tokens_paper."""
+    L = meta["tau"].shape[0]
+    valid, band, tau, val = meta["valid"], meta["band"], meta["tau"], meta["value"]
+    number = np.cumsum(valid)  # event number of each valid slot
+    n_tok = L + N_BANDS
+    fs = pub_fs(7, "xtick.labelsize")
+    cell_fs = 0.8 * fs  # numbers inside the table cells
+
+    # Columns mag, t, valid (wide enough for the numbers), the filter one-hot
+    # (one unit each), then the optional position column.
+    widths = np.array([2.4, 2.4, 1.4] + [1.0] * N_BANDS + ([6.4] if position else []))
+    x_edge = np.concatenate([[0.0], np.cumsum(widths)])
+    x_mid = 0.5 * (x_edge[1:] + x_edge[:-1])
+    x_hot = x_edge[3]  # left edge of the one-hot
+    x_pos = x_edge[3 + N_BANDS]  # left edge of the position column
+    for i in range(L):
+        if not valid[i]:
+            ax.add_patch(Rectangle((0, i - 0.5), x_edge[-1], 1, color="0.88", lw=0))
+        cells = (f"{val[i]:+.2f}", f"{tau[i]:+.2f}", "1") if valid[i] else ("0", "0", "0")
+        for c, text in enumerate(cells):
+            ax.text(x_mid[c], i, text.replace("-", "−"), ha="center", va="center",
+                    fontsize=cell_fs, color="k" if valid[i] else "0.5")
+        if valid[i]:
+            ax.add_patch(Rectangle((x_hot + band[i] + 0.05, i - 0.45), 0.9, 0.9,
+                                   color=BAND_COLORS[band[i]], lw=0))
+        if position and valid[i]:
+            ax.text(x_mid[-1], i, f"({BAND_NAMES[band[i]]}, {tau[i]:+.2f} d)"
+                    .replace("-", "−"), ha="center", va="center", fontsize=cell_fs,
+                    color=BAND_COLORS[band[i]])
+        elif position:
+            ax.text(x_mid[-1], i, "masked", ha="center", va="center",
+                    fontsize=cell_fs, style="italic", color="0.5")
+    for b in range(N_BANDS):
+        i = L + b
+        ax.add_patch(Rectangle((0, i - 0.5), x_edge[-1], 1, color="0.95", lw=0))
+        ax.add_patch(Rectangle((x_hot + b + 0.05, i - 0.45), 0.9, 0.9,
+                               color=BAND_COLORS[b], lw=0, alpha=0.5))
+        if position:
+            ax.text(x_mid[-1], i, f"({BAND_NAMES[b]}, {ref_dt:+.2f} d)".replace("-", "−"),
+                    ha="center", va="center", fontsize=cell_fs, color=BAND_COLORS[b])
+    ax.text(0.5 * x_hot, L + (N_BANDS - 1) / 2,
+            pub_text(f"filter vector\n+ encoded Dt,\nphase\n(Dt = {ref_dt:g} d\nshown)",
+                     "filter vector\n"
+                     r"+ encoded $\Delta t$," "\nphase\n"
+                     rf"($\Delta t$ = {ref_dt:g} d" "\nshown)"),
+            ha="center", va="center", fontsize=cell_fs, style="italic", color="0.3")
+    for gx in x_edge:
+        ax.axvline(gx, color="0.8", lw=rc_lw(0.4), zorder=0)
+    for gy in np.arange(n_tok + 1) - 0.5:
+        ax.axhline(gy, color="0.8", lw=rc_lw(0.4), zorder=0)
+    ax.axvline(x_hot, color="0.4", lw=rc_lw(0.8))
+    if position:
+        ax.axvline(x_pos, color="0.4", lw=rc_lw(0.8))
+    ax.set_xlim(0, x_edge[-1])
+    labels = ["mag", pub_text("t", r"$t$"), "valid"] + list(BAND_NAMES)
+    if position:
+        labels.append("2-D position\n(filter, time)")
+    ax.set_xticks(x_mid, labels, rotation=0 if position else 90)
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+    # After tick_top: the top labels are the ones drawn.
+    for tick, b in zip(ax.get_xticklabels()[3:], range(N_BANDS)):
+        tick.set_color(BAND_COLORS[b])
+    ax.set_xlabel("input per detection (12 numbers)")
+    ax.xaxis.label.set_x(x_pos / 2 / x_edge[-1])  # centered over the input columns
+    ax.set_yticks(np.arange(n_tok), [str(number[i]) if valid[i] else "–" for i in range(L)]
+                  + [f"Q {n}" for n in BAND_NAMES], fontsize=fs)
+    ax.set_ylabel("token")
+    ax.axhline(L - 0.5, color="k", lw=rc_lw(1))
+    ax.set_ylim(n_tok - 0.5, -0.5)
+    if styled():
+        ax.minorticks_off()
+    ax.tick_params(axis="both", which="both", length=0)
+
+
+def plot_lightcurve_table(meta, means, stds, truth, ref_dt, canvas, horizon,
+                          path_stem, formats):
+    """lightcurve_table_<stem>.{pdf,png}: a light curve and the tokens the ViT
+    receives for it.
+
+    (a) The context detections, numbered, with the uniform truth faintly and
+    the forecast time. (b) One row per token: detection k of (a) is row k
+    (magnitude, t, valid, filter one-hot), then the 9 band queries; the last
+    column is the 2-D position (filter, time) each token carries into
+    attention via RoPE. That position is the only 2-D structure the ViT sees:
+    the input is a set of tokens, not a pixel grid, and the row order is for
+    display only.
+    """
+    _H, c0, span = canvas
+    t_hi = min(horizon, span - c0)
+    fig, (ax, axb) = plt.subplots(
+        2, 1, height_ratios=[1, 1.5], constrained_layout=True,
+        figsize=pub_size((7, 9.4)) if styled() else (7, 9.4))
+    draw_lightcurve(ax, meta, means, stds, truth, ref_dt, t_hi, numbers=True)
+    ax.set_xlim(-c0, t_hi)
+    ax.set_xlabel(pub_text("time from last detection t (d)",
+                           r"time from last detection $t$ (d)"))
+    draw_input_table(axb, meta, ref_dt, position=True)
+    axb.set_title("(b) Tokens: model input and 2-D position", loc="left")
+    for fmt in formats:
+        fig.savefig(f"{path_stem}.{fmt}", dpi=pub_dpi(150), bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
     """token_input_<stem>.{pdf,png}: what enters the ViT for one object.
 
@@ -1068,59 +1201,14 @@ def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
     n_tok, dim = tokens.shape
     if n_tok != L + N_BANDS:
         raise ValueError(f"expected {L + N_BANDS} tokens, got {n_tok}")
-    valid, band, tau, val = meta["valid"], meta["band"], meta["tau"], meta["value"]
-    number = np.cumsum(valid)  # event number of each valid slot
+    valid, band, tau = meta["valid"], meta["band"], meta["tau"]
     fs = pub_fs(7, "xtick.labelsize")
-    cell_fs = 0.8 * fs  # numbers inside the table cells
     rows = np.arange(n_tok)
 
     fig, (ax, axb) = plt.subplots(
         1, 2, width_ratios=[1.5, 1.4], constrained_layout=True,
         figsize=pub_size((13, 7.6)) if styled() else (13, 7.6))
-
-    # (a) The input table: columns mag, tau, valid (wide enough for the
-    # numbers), then the filter one-hot (one unit each).
-    widths = np.array([2.4, 2.4, 1.4] + [1.0] * N_BANDS)
-    x_edge = np.concatenate([[0.0], np.cumsum(widths)])
-    x_mid = 0.5 * (x_edge[1:] + x_edge[:-1])
-    x_hot = x_edge[3]  # left edge of the one-hot
-    for i in range(L):
-        if not valid[i]:
-            ax.add_patch(Rectangle((0, i - 0.5), x_edge[-1], 1, color="0.88", lw=0))
-        cells = (f"{val[i]:+.2f}", f"{tau[i]:+.2f}", "1") if valid[i] else ("0", "0", "0")
-        for c, text in enumerate(cells):
-            ax.text(x_mid[c], i, text.replace("-", "−"), ha="center", va="center",
-                    fontsize=cell_fs, color="k" if valid[i] else "0.5")
-        if valid[i]:
-            ax.add_patch(Rectangle((x_hot + band[i] + 0.05, i - 0.45), 0.9, 0.9,
-                                   color=BAND_COLORS[band[i]], lw=0))
-    for b in range(N_BANDS):
-        i = L + b
-        ax.add_patch(Rectangle((0, i - 0.5), x_edge[-1], 1, color="0.95", lw=0))
-        ax.add_patch(Rectangle((x_hot + b + 0.05, i - 0.45), 0.9, 0.9,
-                               color=BAND_COLORS[b], lw=0, alpha=0.5))
-    ax.text(0.5 * x_hot, L + (N_BANDS - 1) / 2,
-            pub_text(f"filter vector\n+ encoded Dt,\nphase\n(Dt = {ref_dt:g} d\nshown)",
-                     "filter vector\n"
-                     r"+ encoded $\Delta t$," "\nphase\n"
-                     rf"($\Delta t$ = {ref_dt:g} d" "\nshown)"),
-            ha="center", va="center", fontsize=cell_fs, style="italic", color="0.3")
-    for gx in x_edge:
-        ax.axvline(gx, color="0.8", lw=rc_lw(0.4), zorder=0)
-    for gy in np.arange(n_tok + 1) - 0.5:
-        ax.axhline(gy, color="0.8", lw=rc_lw(0.4), zorder=0)
-    ax.axvline(x_hot, color="0.4", lw=rc_lw(0.8))
-    ax.set_xlim(0, x_edge[-1])
-    ax.set_xticks(x_mid, ["mag", pub_text("t", r"$t$"), "valid"]
-                  + list(BAND_NAMES), rotation=90)
-    for tick, b in zip(ax.get_xticklabels()[3:], range(N_BANDS)):
-        tick.set_color(BAND_COLORS[b])
-    ax.xaxis.tick_top()
-    ax.xaxis.set_label_position("top")
-    ax.set_xlabel("input per detection (12 numbers)")
-    ax.set_yticks(rows, [str(number[i]) if valid[i] else "–" for i in range(L)]
-                  + [f"Q {n}" for n in BAND_NAMES], fontsize=fs)
-    ax.set_ylabel("slot")
+    draw_input_table(ax, meta, ref_dt)
     ax.set_title("(a) Detections (model input)", loc="left")
 
     # (b) The token table entering the first ViT block.
@@ -1133,13 +1221,11 @@ def plot_token_input(meta, tokens, ref_dt, path_stem, formats):
         first = int(np.nonzero(~valid)[0][0])
         axb.text(dim / 2, (first + L - 1) / 2, "empty slots (masked out of attention)",
                  ha="center", va="center", fontsize=fs, color="0.3")
-    for a in (ax, axb):
-        a.axhline(L - 0.5, color="k", lw=rc_lw(1))
-        a.set_ylim(n_tok - 0.5, -0.5)
-        if styled():
-            a.minorticks_off()
-    for a in (ax, axb):
-        a.tick_params(axis="both", which="both", length=0)
+    axb.axhline(L - 0.5, color="k", lw=rc_lw(1))
+    axb.set_ylim(n_tok - 0.5, -0.5)
+    if styled():
+        axb.minorticks_off()
+    axb.tick_params(axis="both", which="both", length=0)
     axb.yaxis.tick_right()
     axb.yaxis.set_label_position("right")
     pos = [f"{BAND_NAMES[band[i]]}, {tau[i]:+.2f} d" if valid[i] else "–"
@@ -1363,6 +1449,10 @@ def main() -> None:
         plot_lightcurve_image(meta, means, stds, lc_truth, args.ref_dt, canvas,
                               args.horizon_days, args.cell_days,
                               os.path.join(outdir, f"lightcurve_image_{stem}"),
+                              args.formats)
+        plot_lightcurve_table(meta, means, stds, lc_truth, args.ref_dt, canvas,
+                              args.horizon_days,
+                              os.path.join(outdir, f"lightcurve_table_{stem}"),
                               args.formats)
         plot_token_plane(meta, args.ref_dt, canvas, args.horizon_days,
                          os.path.join(outdir, f"token_plane_{stem}"), args.formats)
