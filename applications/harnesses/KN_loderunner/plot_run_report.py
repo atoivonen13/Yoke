@@ -967,7 +967,7 @@ def fig_examples(run: dict, bands: list, stems: list | None,
             if i == 0:
                 ax.set_title(BAND_LABELS[b])
             if j == 0:
-                ax.set_ylabel(f"{caption}\napparent mag")
+                ax.set_ylabel(f"{caption}\nApparent Magnitude")
             if j == len(bands) - 1:
                 note(ax, stem, (1.0, 0.0), xycoords="axes fraction",
                      xytext=(-4, 3), textcoords="offset points", ha="right",
@@ -1178,7 +1178,7 @@ def fig_median_example(run: dict, ex: dict, with_forecast: bool,
         ax.set_xlim(ex["x_lim"])
         if ex["y_lim"][b] is not None:
             ax.set_ylim(ex["y_lim"][b])
-    sup_labels(fig, "Days since first detection", "Apparent magnitude")
+    sup_labels(fig, "Days since first detection", "Apparent Magnitude")
     handles = {}
     for ax in axes:
         for h, lab in zip(*ax.get_legend_handles_labels()):

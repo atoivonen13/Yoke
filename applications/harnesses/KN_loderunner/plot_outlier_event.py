@@ -170,7 +170,7 @@ def fig_event(run: dict, obj: dict, other: tuple, title: str | None) -> plt.Figu
         lim = y_limits(t_mag[m], ctx["mag"][cm], other[1][om], f["med"].to_numpy())
         if lim is not None:
             ax.set_ylim(lim)
-    sup_labels(fig, "Days since first detection", "Apparent magnitude")
+    sup_labels(fig, "Days since first detection", "Apparent Magnitude")
     handles = {}
     for ax in axes.ravel():
         for h, lab in zip(*ax.get_legend_handles_labels()):
@@ -228,7 +228,7 @@ def fig_event_overlay(run: dict, obj: dict, other: tuple,
     if lim is not None:
         ax.set_ylim(lim)
     ax.set_xlabel("Days since first detection")
-    ax.set_ylabel("Apparent magnitude")
+    ax.set_ylabel("Apparent Magnitude")
     note(ax, f"{len(ctx['phase'])} in context, RMSE {np.sqrt(np.mean(fc['r'] ** 2)):.2f} "
          "(all 9 bands)", (0.02, 0.03), xycoords="axes fraction", ha="left", va="bottom",
          fontsize=LOOK["tiny"], color=LOOK["muted"],
