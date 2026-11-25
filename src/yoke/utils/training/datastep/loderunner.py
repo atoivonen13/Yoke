@@ -282,18 +282,11 @@ def train_loderunner_datastep(
     model.train()
 
     # Extract data
-    #(start_img, end_img, Dt) = data
-    img_seq, Dt = data
+    (start_img, end_img, Dt) = data
 
-    #start_img = start_img.to(device, non_blocking=True)
-    #Dt = Dt.to(torch.float32).to(device, non_blocking=True)
-    #end_img = end_img.to(device, non_blocking=True)
-
-    img_seq = img_seq.to(device, non_blocking=True)
+    start_img = start_img.to(device, non_blocking=True)
     Dt = Dt.to(torch.float32).to(device, non_blocking=True)
-
-    start_img = img_seq[:, 0]
-    end_img = img_seq[:, -1]
+    end_img = end_img.to(device, non_blocking=True)
 
     # For our first LodeRunner training on the lsc240420 dataset the input and
     # output prediction variables are fixed.
@@ -315,9 +308,6 @@ def train_loderunner_datastep(
     # Perform a forward pass
     # NOTE: If training on GPU model should have already been moved to GPU
     # prior to initalizing optimizer.
-    print("start_img entering model:", start_img.shape)   # expect [B, 8, 1120, 800]
-    print("len(in_vars):", len(in_vars))
-    print("in_vars:", in_vars)
     pred_img = model(start_img, in_vars, out_vars, Dt)
 
     # Expecting to use a *reduction="none"* loss function so we can track loss
